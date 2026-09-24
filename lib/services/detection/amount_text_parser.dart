@@ -140,7 +140,7 @@ class AmountTextParser {
     }
 
     final hasMagnitude = RegExp(
-      r'\b(الف|مليون|مليار|طن|طون)\b',
+      r'(?<![\u0600-\u06FF])(الف|مليون|مليار|طن|طون)(?![\u0600-\u06FF])',
     ).hasMatch(normalized);
     final confidence = hasMagnitude ? 0.96 : 0.82;
 
@@ -373,26 +373,34 @@ class AmountTextParser {
     t = t.replaceAll(RegExp(r'\s+'), ' ').trim();
 
     // توحيد صيغ المقادير
-    t = t.replaceAll(RegExp(r'\b(الالف|الف|الاف|لف)\b'), 'الف');
-    t = t.replaceAll(RegExp(r'\bملايين\b'), 'مليون');
-    t = t.replaceAll(RegExp(r'\bمليارات\b'), 'مليار');
+    // ملاحظة: \b في Dart لا يعتبر الحروف العربية جزءًا من الكلمة، لذلك نستخدم
+    // حدودًا عربية صريحة (_word).
+    t = t.replaceAll(_word('الالف|الف|الاف|لف'), 'الف');
+    t = t.replaceAll(_word('ملايين'), 'مليون');
+    t = t.replaceAll(_word('مليارات'), 'مليار');
 
     // طن/طون = مليون
-    t = t.replaceAll(RegExp(r'\bطن\b'), 'مليون');
-    t = t.replaceAll(RegExp(r'\bطون\b'), 'مليون');
+    t = t.replaceAll(_word('طن'), 'مليون');
+    t = t.replaceAll(_word('طون'), 'مليون');
 
     // المثنى
-    t = t.replaceAll(RegExp(r'\bمليونين\b|\bمليونان\b'), '2 مليون');
-    t = t.replaceAll(RegExp(r'\bمليارين\b|\bملياران\b'), '2 مليار');
-    t = t.replaceAll(RegExp(r'\bالفين\b|\bالفان\b'), '2 الف');
+    t = t.replaceAll(_word('مليونين|مليونان'), '2 مليون');
+    t = t.replaceAll(_word('مليارين|ملياران'), '2 مليار');
+    t = t.replaceAll(_word('الفين|الفان'), '2 الف');
 
     // شيوع كتابات مختلفة
-    t = t.replaceAll(RegExp(r'\bنص\b'), 'نصف');
-    t = t.replaceAll(RegExp(r'\bللف\b'), 'الف');
+    t = t.replaceAll(_word('نص'), 'نصف');
+    t = t.replaceAll(_word('للف'), 'الف');
 
     t = t.replaceAll(RegExp(r'\s+'), ' ').trim();
     return t;
   }
+
+  /// كلمة/كلمات عربية كاملة (بدون أن تكون جزءًا من كلمة أطول)
+  static RegExp _word(String alternatives) => RegExp(
+    '(?<![\u0600-\u06FF])(?:$alternatives)(?![\u0600-\u06FF])',
+    unicode: true,
+  );
 
   static String _normalizeToken(String token) {
     String t = token.trim();
@@ -525,6 +533,15 @@ class AmountTextParser {
     'تسعهعشر': 19,
     'عشرين': 20,
     'ثلاثين': 30,
+    'تلاتين': 30,
+    'تلاثين': 30,
+    'تلات': 3,
+    'تلاته': 3,
+    'تمن': 8,
+    'تمانيه': 8,
+    'تماني': 8,
+    'تمانين': 80,
+    'تمنين': 80,
     'اربعين': 40,
     'خمسين': 50,
     'ستين': 60,
@@ -551,10 +568,35 @@ class AmountTextParser {
     'ثمانمئة': 800,
     'تسعمئه': 900,
     'تسعمئة': 900,
+    // الصيغ بعد التطبيع (مئة/مية/مائة → ميه/مايه) والعامية
+    'مايتين': 200,
+    'ميتان': 200,
+    'ثلاثميه': 300,
+    'تلاتميه': 300,
+    'تلتميه': 300,
+    'ثلاثمايه': 300,
+    'اربعميه': 400,
+    'ربعميه': 400,
+    'اربعمايه': 400,
+    'خمسميه': 500,
+    'خمسمايه': 500,
+    'ستميه': 600,
+    'ستمايه': 600,
+    'سبعميه': 700,
+    'سبعمايه': 700,
+    'ثمانميه': 800,
+    'تمانميه': 800,
+    'تمنميه': 800,
+    'ثمانمايه': 800,
+    'تسعميه': 900,
+    'تسعمايه': 900,
   };
 
   static bool _isHundredWord(String token) {
-    return token == 'مئه' || token == 'مئة' || token == 'ميه';
+    return token == 'مئه' ||
+        token == 'مئة' ||
+        token == 'ميه' ||
+        token == 'مايه';
   }
 
   static bool _isHalfToken(String token) {

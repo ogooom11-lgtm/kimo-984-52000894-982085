@@ -106,8 +106,8 @@ class _AccountScreenState extends State<AccountScreen> {
   bool get _isCompanyAccount => widget.account.type.isCompany;
 
   String _movementLabel(TransactionModel tx) =>
-      _isCompanyAccount && tx.companyMovementType != null
-      ? tx.companyMovementType!.label
+      _isCompanyAccount && tx.effectiveCompanyMovement != null
+      ? tx.effectiveCompanyMovement!.label
       : _statusLabel(tx.status);
 
   Color _companyMovementColor(CompanyMovementType type) {
@@ -341,7 +341,28 @@ class _AccountScreenState extends State<AccountScreen> {
     final records = <OperationTxRecord>[];
     for (final tx in items) {
       final before = OperationLogService.snapshot(tx);
-      tx.applyStatus(status, at: now);
+      final movement = tx.companyMovementType;
+      if (_isCompanyAccount && movement != null) {
+        // حركات الشركات: الإلغاء جزء من نوع الحركة (مثل الإلغاء الفردي)،
+        // حتى تُحسب في الإحصائيات بتاريخ إلغائها.
+        final base = movement.isSent
+            ? CompanyMovementType.sent
+            : CompanyMovementType.received;
+        if (status == TransactionStatus.cancelled) {
+          if (!(tx.effectiveCompanyMovement?.isCancelled ?? false) ||
+              tx.cancelledAt == null) {
+            tx.cancelledAt = now;
+          }
+          tx.companyMovementType = base.cancelled;
+        } else if (status == TransactionStatus.added) {
+          tx.companyMovementType = base;
+          tx.cancelledAt = null;
+        }
+        tx.status = TransactionStatus.added;
+        tx.receivedAt = null;
+      } else {
+        tx.applyStatus(status, at: now);
+      }
       await tx.save();
       records.add(
         OperationTxRecord(
@@ -411,7 +432,7 @@ class _AccountScreenState extends State<AccountScreen> {
   List<TransactionModel> _filterBySelectedDay(List<TransactionModel> all) {
     return all.where((t) {
       if (_isCompanyAccount) {
-        final shownAt = t.companyMovementType?.isCancelled == true
+        final shownAt = t.effectiveCompanyMovement?.isCancelled == true
             ? (t.cancelledAt ?? t.date)
             : t.date;
         return _isSameDay(shownAt, _selectedDay);
@@ -1491,22 +1512,26 @@ class _AccountScreenState extends State<AccountScreen> {
         final received = _applySort(
           all.where(
             (t) => _isCompanyAccount
-                ? t.companyMovementType == CompanyMovementType.received
+                ? t.effectiveCompanyMovement == CompanyMovementType.received
                 : t.status == TransactionStatus.received,
           ),
         );
         final sent = _applySort(
-          all.where((t) => t.companyMovementType == CompanyMovementType.sent),
+          all.where(
+            (t) => t.effectiveCompanyMovement == CompanyMovementType.sent,
+          ),
         );
         final receivedCancelled = _applySort(
           all.where(
             (t) =>
-                t.companyMovementType == CompanyMovementType.receivedCancelled,
+                t.effectiveCompanyMovement ==
+                CompanyMovementType.receivedCancelled,
           ),
         );
         final sentCancelled = _applySort(
           all.where(
-            (t) => t.companyMovementType == CompanyMovementType.sentCancelled,
+            (t) =>
+                t.effectiveCompanyMovement == CompanyMovementType.sentCancelled,
           ),
         );
         final cancelled = _applySort(
@@ -1534,14 +1559,15 @@ class _AccountScreenState extends State<AccountScreen> {
                   : null,
               actions: _selectionMode
                   ? [
-                      IconButton(
-                        tooltip: 'تسليم المحدد',
-                        icon: const Icon(Icons.verified_rounded),
-                        onPressed: () => _setTransactionsStatus(
-                          _selectedTransactions(),
-                          TransactionStatus.received,
+                      if (!_isCompanyAccount)
+                        IconButton(
+                          tooltip: 'تسليم المحدد',
+                          icon: const Icon(Icons.verified_rounded),
+                          onPressed: () => _setTransactionsStatus(
+                            _selectedTransactions(),
+                            TransactionStatus.received,
+                          ),
                         ),
-                      ),
                       IconButton(
                         tooltip: 'إلغاء المحدد',
                         icon: const Icon(Icons.cancel_rounded),
@@ -2128,9 +2154,14 @@ class _StatusSection extends StatelessWidget {
                         if (ok == true) {
                           if (account?.type.isCompany == true &&
                               t.companyMovementType != null) {
+                            // لا نغيّر تاريخ الإلغاء لحركة ملغية مسبقًا
+                            if (!(t.effectiveCompanyMovement?.isCancelled ??
+                                    false) ||
+                                t.cancelledAt == null) {
+                              t.cancelledAt = DateTime.now();
+                            }
                             t.companyMovementType =
                                 t.companyMovementType!.cancelled;
-                            t.cancelledAt = DateTime.now();
                           } else {
                             t.applyStatus(TransactionStatus.cancelled);
                           }
@@ -2213,9 +2244,14 @@ class _StatusSection extends StatelessWidget {
                         if (ok == true) {
                           if (account?.type.isCompany == true &&
                               t.companyMovementType != null) {
+                            // لا نغيّر تاريخ الإلغاء لحركة ملغية مسبقًا
+                            if (!(t.effectiveCompanyMovement?.isCancelled ??
+                                    false) ||
+                                t.cancelledAt == null) {
+                              t.cancelledAt = DateTime.now();
+                            }
                             t.companyMovementType =
                                 t.companyMovementType!.cancelled;
-                            t.cancelledAt = DateTime.now();
                           } else {
                             t.applyStatus(TransactionStatus.cancelled);
                           }
@@ -2283,7 +2319,7 @@ class _TxBubble extends StatelessWidget {
   });
 
   Color get _statusColor {
-    switch (t.companyMovementType) {
+    switch (t.effectiveCompanyMovement) {
       case CompanyMovementType.received:
         return const Color(0xFF00897B);
       case CompanyMovementType.sent:
@@ -2305,7 +2341,7 @@ class _TxBubble extends StatelessWidget {
   }
 
   IconData get _statusIcon {
-    switch (t.companyMovementType) {
+    switch (t.effectiveCompanyMovement) {
       case CompanyMovementType.received:
         return Icons.call_received_rounded;
       case CompanyMovementType.sent:

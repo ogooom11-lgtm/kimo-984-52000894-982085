@@ -3,6 +3,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/period_stats.dart';
 import 'share_image_page.dart';
 
 class AccountStatsScreen extends StatefulWidget {
@@ -20,15 +21,32 @@ class AccountStatsScreen extends StatefulWidget {
 class _AccountStatsScreenState extends State<AccountStatsScreen> {
   DateTime _selected = DateTime.now();
 
+  bool get _isCompany => widget.account.type.isCompany;
+
+  /// نص الحالة المعروض على بطاقة الحركة
+  String _statusTextOf(TransactionModel t) {
+    final m = t.effectiveCompanyMovement;
+    if (_isCompany && m != null) return m.label;
+    switch (t.status) {
+      case TransactionStatus.added:
+        return 'مضافة';
+      case TransactionStatus.received:
+        return 'مستلمة';
+      case TransactionStatus.cancelled:
+        return 'ملغاة';
+    }
+  }
+
+  /// توضيح إضافي لحركة ظهرت في قسم الإضافة لكنها أُلغيت لاحقًا
+  String? _laterCancelNote(TransactionModel t) {
+    final cancelAt = PeriodStats.companyCancelMoment(t);
+    if (cancelAt == null) return null;
+    return 'أُلغيت بتاريخ ${_fmtYmdHm(cancelAt)} — تُحسب هنا كإضافة وفي قسم الإلغاء كإلغاء';
+  }
+
   DateTime _startOfDay(DateTime d) => DateTime(d.year, d.month, d.day);
   DateTime _endOfDay(DateTime d) =>
       DateTime(d.year, d.month, d.day, 23, 59, 59, 999);
-
-  bool _within(DateTime d, DateTime start, DateTime end) {
-    final t = d.millisecondsSinceEpoch;
-    return t >= start.millisecondsSinceEpoch &&
-        t <= end.millisecondsSinceEpoch;
-  }
 
   String _fmtYmd(DateTime d) =>
       "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
@@ -81,18 +99,6 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
       return;
     }
     setState(() => _selected = target);
-  }
-
-  bool _isUnreceivedAsOf(TransactionModel t, DateTime dayEnd) {
-    if (t.date.isAfter(dayEnd)) return false;
-
-    final receivedBeforeOrOnEnd =
-    (t.receivedAt != null && !t.receivedAt!.isAfter(dayEnd));
-
-    final cancelledBeforeOrOnEnd =
-    (t.cancelledAt != null && !t.cancelledAt!.isAfter(dayEnd));
-
-    return !receivedBeforeOrOnEnd && !cancelledBeforeOrOnEnd;
   }
 
   String _secondCurrencyOf(TransactionModel t) {
@@ -311,11 +317,13 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
                               tx: t,
                               title: t.beneficiary,
                               accent: bucket.color,
+                              statusText: _statusTextOf(t),
                               moneyText: _shortMoneyParts(t),
                               fullMoneyText: _formatMoneyParts(t),
                               timeLabel: bucket.timeLabel,
                               timeValue:
                               _fmtYmdHm(bucket.timeOf(t) ?? t.date),
+                              statsNote: bucket.noteOf?.call(t),
                               note: t.notes.trim().isEmpty ? null : t.notes,
                             ),
                           );
@@ -343,64 +351,38 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
     final yDate = _selected.subtract(const Duration(days: 1));
     final yesterdayStart = _startOfDay(yDate);
     final yesterdayEnd = _endOfDay(yDate);
+    final isCompany = _isCompany;
 
     return ValueListenableBuilder(
       valueListenable: DatabaseService.transactionsBox.listenable(),
       builder: (context, Box<TransactionModel> box, _) {
-        final allForAccount =
-        box.values.where((t) => t.accountId == widget.account.id);
+        final allForAccount = box.values
+            .where((t) => t.accountId == widget.account.id)
+            .toList();
 
-        final createdToday = allForAccount
-            .where((t) => _within(t.date, rangeStart, rangeEnd))
-            .toList()
-          ..sort((a, b) => b.date.compareTo(a.date));
+        // نفس المنطق للمكاتب والشركات: الإضافة تُحسب بتاريخ إضافتها (حتى لو
+        // أُلغيت لاحقًا) والإلغاء يُحسب بتاريخ إلغائه، فالحركة التي أُضيفت ثم
+        // أُلغيت تُحسب إضافة وإلغاء معًا.
+        final today = PeriodStats.compute(
+          allForAccount,
+          StatsPeriod(rangeStart, rangeEnd),
+          company: isCompany,
+        );
+        final yesterday = PeriodStats.compute(
+          allForAccount,
+          StatsPeriod(yesterdayStart, yesterdayEnd),
+          company: isCompany,
+        );
 
-        final receivedToday = allForAccount
-            .where(
-              (t) =>
-          t.receivedAt != null &&
-              _within(t.receivedAt!, rangeStart, rangeEnd),
-        )
-            .toList()
-          ..sort((a, b) => b.receivedAt!.compareTo(a.receivedAt!));
+        final createdToday = today.added;
+        final receivedToday = today.received;
+        final cancelledToday = today.cancelled;
+        final unreceivedAsOfSelected = today.fourth;
 
-        final cancelledToday = allForAccount
-            .where(
-              (t) =>
-          t.cancelledAt != null &&
-              _within(t.cancelledAt!, rangeStart, rangeEnd),
-        )
-            .toList()
-          ..sort((a, b) => b.cancelledAt!.compareTo(a.cancelledAt!));
-
-        final unreceivedAsOfSelected = allForAccount
-            .where((t) => _isUnreceivedAsOf(t, rangeEnd))
-            .toList()
-          ..sort((a, b) => b.date.compareTo(a.date));
-
-        final createdYesterday = allForAccount
-            .where((t) => _within(t.date, yesterdayStart, yesterdayEnd))
-            .length;
-
-        final receivedYesterday = allForAccount
-            .where(
-              (t) =>
-          t.receivedAt != null &&
-              _within(t.receivedAt!, yesterdayStart, yesterdayEnd),
-        )
-            .length;
-
-        final cancelledYesterday = allForAccount
-            .where(
-              (t) =>
-          t.cancelledAt != null &&
-              _within(t.cancelledAt!, yesterdayStart, yesterdayEnd),
-        )
-            .length;
-
-        final unreceivedYesterday = allForAccount
-            .where((t) => _isUnreceivedAsOf(t, yesterdayEnd))
-            .length;
+        final createdYesterday = yesterday.added.length;
+        final receivedYesterday = yesterday.received.length;
+        final cancelledYesterday = yesterday.cancelled.length;
+        final unreceivedYesterday = yesterday.fourth.length;
 
         final totalsCreated = _totalsByCurrency(createdToday);
         final totalsReceived = _totalsByCurrency(receivedToday);
@@ -432,9 +414,77 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
           countsReceivedByCurrency: countsReceivedByCurrency,
           countsCancelledByCurrency: countsCancelledByCurrency,
           countsUnreceivedByCurrency: countsUnreceivedByCurrency,
+          addedLabel: PeriodStats.label(PeriodMetric.added, company: isCompany),
+          receivedLabel:
+              PeriodStats.label(PeriodMetric.received, company: isCompany),
+          cancelledLabel:
+              PeriodStats.label(PeriodMetric.cancelled, company: isCompany),
+          unreceivedLabel:
+              PeriodStats.label(PeriodMetric.fourth, company: isCompany),
         );
 
-        final buckets = <_StatsBucket>[
+        final buckets = isCompany
+            ? <_StatsBucket>[
+                _StatsBucket(
+                  title: 'الإرسال (أُضيفت في هذا اليوم)',
+                  subtitle:
+                      'كل حركة إرسال أُضيفت في هذا اليوم حتى لو أُلغيت لاحقًا',
+                  color: const Color(0xFF5E35B1),
+                  icon: Icons.call_made_rounded,
+                  items: createdToday,
+                  todayCount: createdToday.length,
+                  yesterdayCount: createdYesterday,
+                  totals: totalsCreated,
+                  counts: countsAddedByCurrency,
+                  timeLabel: 'تاريخ الإضافة',
+                  timeOf: (t) => t.date,
+                  noteOf: _laterCancelNote,
+                ),
+                _StatsBucket(
+                  title: 'الاستقبال (أُضيفت في هذا اليوم)',
+                  subtitle:
+                      'كل حركة استقبال أُضيفت في هذا اليوم حتى لو أُلغيت لاحقًا',
+                  color: const Color(0xFF00897B),
+                  icon: Icons.call_received_rounded,
+                  items: receivedToday,
+                  todayCount: receivedToday.length,
+                  yesterdayCount: receivedYesterday,
+                  totals: totalsReceived,
+                  counts: countsReceivedByCurrency,
+                  timeLabel: 'تاريخ الإضافة',
+                  timeOf: (t) => t.date,
+                  noteOf: _laterCancelNote,
+                ),
+                _StatsBucket(
+                  title: 'إلغاء مرسل (أُلغيت في هذا اليوم)',
+                  subtitle:
+                      'حركات الإرسال التي أُلغيت في هذا اليوم مهما كان تاريخ إضافتها',
+                  color: const Color(0xFFEF6C00),
+                  icon: Icons.cancel_schedule_send_rounded,
+                  items: cancelledToday,
+                  todayCount: cancelledToday.length,
+                  yesterdayCount: cancelledYesterday,
+                  totals: totalsCancelled,
+                  counts: countsCancelledByCurrency,
+                  timeLabel: 'تاريخ الإلغاء',
+                  timeOf: PeriodStats.companyCancelMoment,
+                ),
+                _StatsBucket(
+                  title: 'إلغاء استقبال (أُلغيت في هذا اليوم)',
+                  subtitle:
+                      'حركات الاستقبال التي أُلغيت في هذا اليوم مهما كان تاريخ إضافتها',
+                  color: const Color(0xFFD84315),
+                  icon: Icons.cancel_rounded,
+                  items: unreceivedAsOfSelected,
+                  todayCount: unreceivedAsOfSelected.length,
+                  yesterdayCount: unreceivedYesterday,
+                  totals: totalsUnreceived,
+                  counts: countsUnreceivedByCurrency,
+                  timeLabel: 'تاريخ الإلغاء',
+                  timeOf: PeriodStats.companyCancelMoment,
+                ),
+              ]
+            : <_StatsBucket>[
           _StatsBucket(
             title: 'المضافة (إنشاء اليوم)',
             subtitle: 'الحركات التي أُنشئت في هذا اليوم',
@@ -558,6 +608,12 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
                       child: ListView(
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                         children: [
+                          if (isCompany) ...[
+                            const _RuleNoteCard(
+                              text: PeriodStats.companyRuleText,
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           _AnimatedStatsGrid(
                             buckets: buckets,
                             onTapBucket: _openBucketDetails,
@@ -634,6 +690,9 @@ class _StatsBucket {
   final String timeLabel;
   final DateTime? Function(TransactionModel) timeOf;
 
+  /// ملاحظة إضافية اختيارية تظهر على بطاقة الحركة داخل التفاصيل
+  final String? Function(TransactionModel)? noteOf;
+
   const _StatsBucket({
     required this.title,
     required this.subtitle,
@@ -646,7 +705,40 @@ class _StatsBucket {
     required this.counts,
     required this.timeLabel,
     required this.timeOf,
+    this.noteOf,
   });
+}
+
+class _RuleNoteCard extends StatelessWidget {
+  final String text;
+
+  const _RuleNoteCard({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: cs.secondaryContainer.withValues(alpha: .35),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.secondary.withValues(alpha: .20)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline_rounded, size: 18, color: cs.secondary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 12.5, height: 1.45),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _HeroHeaderCard extends StatelessWidget {
@@ -1217,20 +1309,24 @@ class _TransactionDetailCard extends StatelessWidget {
   final TransactionModel tx;
   final String title;
   final Color accent;
+  final String statusText;
   final String moneyText;
   final String fullMoneyText;
   final String timeLabel;
   final String timeValue;
+  final String? statsNote;
   final String? note;
 
   const _TransactionDetailCard({
     required this.tx,
     required this.title,
     required this.accent,
+    required this.statusText,
     required this.moneyText,
     required this.fullMoneyText,
     required this.timeLabel,
     required this.timeValue,
+    this.statsNote,
     this.note,
   });
 
@@ -1280,7 +1376,7 @@ class _TransactionDetailCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
-                  _statusLabel(tx.status),
+                  statusText,
                   style: TextStyle(
                     color: accent,
                     fontWeight: FontWeight.w800,
@@ -1319,6 +1415,31 @@ class _TransactionDetailCard extends StatelessWidget {
               Expanded(child: Text(timeValue)),
             ],
           ),
+          if ((statsNote ?? '').trim().isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: cs.errorContainer.withValues(alpha: .35),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: cs.error.withValues(alpha: .22)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.info_outline_rounded, size: 18, color: cs.error),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      statsNote!,
+                      style: const TextStyle(fontSize: 12.5, height: 1.45),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if ((note ?? '').trim().isNotEmpty) ...[
             const SizedBox(height: 10),
             Container(
@@ -1350,16 +1471,5 @@ class _TransactionDetailCard extends StatelessWidget {
         ],
       ),
     );
-  }
-
-  static String _statusLabel(TransactionStatus s) {
-    switch (s) {
-      case TransactionStatus.added:
-        return 'مضافة';
-      case TransactionStatus.received:
-        return 'مستلمة';
-      case TransactionStatus.cancelled:
-        return 'ملغاة';
-    }
   }
 }

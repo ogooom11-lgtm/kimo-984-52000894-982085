@@ -1,5 +1,7 @@
 // lib/screens/verify_receive_screen.dart
-// تصميم عصري تفاعلي — فلاتر وفرز وأنيميشن خفيف بدون تغيير منطق المطابقة والتنفيذ.
+// صفحة التسليم (مطابقة واستلام): تستخرج الاسم والمبلغ والعملة من كل رسالة
+// (مع تجاهل أرقام الهواتف والتواريخ والأوقات والأكواد)، ثم تطابقها مع الحركات
+// المضافة وتنفّذ التسليم مع تسجيل العملية في سجل العمليات.
 
 import 'dart:math' show Point;
 import 'package:characters/characters.dart';
@@ -12,8 +14,12 @@ import '../models.dart';
 // كواشف (كما عندك)
 import '../services/detection/name_detector.dart' as nd;
 import '../services/detection/amount_detector.dart' as ad;
-import '../services/detection/currency_detector.dart' as cd;
 import '../services/detection/text_tokens.dart' as tt;
+import '../services/detection/message_noise.dart';
+import '../services/detection/receipt_extractor.dart';
+import '../services/operation_log_service.dart';
+import '../utils/chunked_task.dart';
+import '../widgets/operation_progress_bar.dart';
 
 class VerifyReceiveScreen extends StatefulWidget {
   final Account account;
@@ -38,9 +44,18 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
   late final List<_ParsedSegment> _segments;
   final List<_BubbleState> _bubbles = [];
+  // فقاعات مستبعدة: تُحفظ فقط للتخلص من متحكماتها عند إغلاق الصفحة
+  final List<_BubbleState> _removedBubbles = [];
 
   // الحركات (المضافة فقط كبداية للترشيح)
   late List<TransactionModel> _addedOnly;
+  late _PendingIndex _pending;
+  late final ReceiptExtractor _extractor;
+
+  // تحليل الرسائل يتم على دفعات مع شريط تقدم حتى لا تتجمد الواجهة
+  bool _building = true;
+  final ValueNotifier<OperationProgress?> _progress =
+      ValueNotifier<OperationProgress?>(null);
 
   // أخطاء التنفيذ
   final List<_ExecError> _lastErrors = [];
@@ -75,27 +90,60 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     final all = DatabaseService.getTransactionsForAccount(widget.account.id);
     _addedOnly = all.where((t) => t.status == TransactionStatus.added).toList()
       ..sort((a, b) => b.date.compareTo(a.date));
+    _pending = _PendingIndex(_addedOnly);
 
-    for (int i = 0; i < _segments.length; i++) {
-      _bubbles.add(_buildInitialState(_segments[i], i));
+    _extractor = ReceiptExtractor(
+      nameConfig: _nameConfig,
+      currencyMap: _currencyMap,
+      amountKeywords: _amountKeywords,
+      ignoredWords: _settings.ignoredWords,
+      customWordValues: _settings.amountWordValues,
+    );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _buildBubbles());
+  }
+
+  Future<void> _buildBubbles() async {
+    const label = 'جارٍ تحليل الرسائل';
+    try {
+      await runTimeSliced(
+        total: _segments.length,
+        work: (i) {
+          _BubbleState st;
+          try {
+            st = _buildInitialState(_segments[i], i);
+          } catch (e) {
+            // رسالة غير متوقعة: نعرضها بدون استخراج بدل تعطيل الصفحة كلها
+            debugPrint('VerifyReceiveScreen extract error: $e');
+            st = _BubbleState(segment: _segments[i], index: i);
+          }
+          // تُضاف كل فقاعة فور بنائها حتى يعمل منع تكرار نفس الحركة بين الفقاعات
+          _bubbles.add(st);
+        },
+        onProgress: (done, total) {
+          _progress.value = OperationProgress(
+            label: label,
+            done: done,
+            total: total,
+          );
+        },
+        isCancelled: () => !mounted,
+      );
+    } finally {
+      if (mounted) {
+        _progress.value = null;
+        setState(() => _building = false);
+      }
     }
   }
 
-  // ====== أدوات عربية ======
-  String _stripDiacritics(String s) =>
-      s.replaceAll(RegExp(r'[\u064B-\u065F\u0670]'), '');
-  String _normalizeArabic(String s) {
-    s = _stripDiacritics(s);
-    s = s.replaceAll('أ', 'ا').replaceAll('إ', 'ا').replaceAll('آ', 'ا');
-    s = s.replaceAll('ى', 'ي').replaceAll('ئ', 'ي').replaceAll('ؤ', 'و');
-    s = s.replaceAll('ة', 'ه');
-    return s.trim();
-  }
-
-  bool _eqLoose(String a, String b) {
-    final aa = _normalizeArabic(a).toUpperCase();
-    final bb = _normalizeArabic(b).toUpperCase();
-    return aa == bb;
+  @override
+  void dispose() {
+    for (final b in [..._bubbles, ..._removedBubbles]) {
+      b.dispose();
+    }
+    _progress.dispose();
+    super.dispose();
   }
 
   // ====== تقسيم الهيدر ======
@@ -182,46 +230,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     }.where((e) => e.trim().isNotEmpty).toList();
   }
 
-  List<List<cd.PreparedToken>> _toCurrencyPrepared(
-    List<List<nd.ForwardToken>> rows,
-  ) {
-    return rows
-        .map(
-          (row) => row
-              .map(
-                (t) => cd.PreparedToken(
-                  token: t.token,
-                  originalPos: Point(
-                    t.original.lineIndex,
-                    t.original.tokenIndex,
-                  ),
-                ),
-              )
-              .toList(),
-        )
-        .toList();
-  }
-
-  List<List<ad.AmountPreparedToken>> _toAmountPrepared(
-    List<List<cd.PreparedToken>> rows,
-  ) {
-    return rows
-        .map(
-          (row) => row
-              .map(
-                (t) => ad.AmountPreparedToken(
-                  token: t.token,
-                  originalPos: ad.Position(t.originalPos.x, t.originalPos.y),
-                ),
-              )
-              .toList(),
-        )
-        .toList();
-  }
-
-  ad.Position? _toAmountPosition(Point<int>? p) {
-    if (p == null) return null;
-    return ad.Position(p.x, p.y);
+  String _formatAmount(double v) {
+    final isInt = v == v.roundToDouble();
+    return isInt ? v.toInt().toString() : v.toStringAsFixed(2);
   }
 
   String _formatAmountList(List<double> values) {
@@ -292,82 +303,6 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     setState(() {});
   }
 
-  // ====== تنظيف وتجهيز ======
-  bool _isAsciiDigit(int code) => code >= 0x30 && code <= 0x39;
-  bool _isArabicDigit(int code) => code >= 0x0660 && code <= 0x0669;
-  // نفس المقسّم المستخدم في كاشف الاسم حتى تتطابق فهارس التوكنات
-  String _cleanToken(String w) => tt.cleanToken(w);
-
-  List<String> _tokensFromLine(String line) {
-    return line
-        .split(RegExp(r'\s+'))
-        .map(_cleanToken)
-        .where((w) => w.isNotEmpty)
-        .toList();
-  }
-
-  // ====== كلمات المبلغ ======
-  bool _isAmountKeywordToken(String token) {
-    final t = _normalizeArabic(token);
-    for (final k in _amountKeywords) {
-      if (_normalizeArabic(k) == t) return true;
-    }
-    return false;
-  }
-
-  double? _findAmountRightAfterKeyword(
-    List<String> lines, {
-    int lookahead = 3,
-  }) {
-    for (int li = 0; li < lines.length; li++) {
-      final toks = _tokensFromLine(lines[li]);
-      for (int ti = 0; ti < toks.length; ti++) {
-        if (_isAmountKeywordToken(toks[ti])) {
-          for (int k = 1; k <= lookahead && (ti + k) < toks.length; k++) {
-            final tok = toks[ti + k];
-            final v = _parseAmountSafe(tok);
-            if (v != null && v > 0) return v;
-          }
-        }
-      }
-    }
-    return null;
-  }
-
-  // ====== أرقام الهواتف ======
-  String _digitsOnly(String s) {
-    final b = StringBuffer();
-    for (final ch in s.characters) {
-      final code = ch.codeUnitAt(0);
-      if (_isAsciiDigit(code)) {
-        b.write(ch);
-      } else if (_isArabicDigit(code)) {
-        b.write(String.fromCharCode('0'.codeUnitAt(0) + (code - 0x0660)));
-      }
-    }
-    return b.toString();
-  }
-
-  bool _isPhoneLike(String token) {
-    final d = _digitsOnly(token);
-
-    // طول رقم هاتف معقول
-    if (d.length < 9 || d.length > 14) return false;
-
-    // يبدأ بـ + أو 00 أو 0 أو فيه شرطات => هاتف
-    final startsWithPlus = token.startsWith('+');
-    final startsWith00 = token.startsWith('00');
-    final startsWith0 = d.startsWith('0');
-    final hasHyphen = token.contains('-');
-
-    return startsWithPlus || startsWith00 || startsWith0 || hasHyphen;
-  }
-
-  double? _parseAmountSafe(String token) {
-    if (_isPhoneLike(token)) return null;
-    return ad.AmountDetector.parseAmountToken(token);
-  }
-
   // ====== الحالة الأولى لكل فقاعة ======
   // إعدادات كاشف الاسم تُجهّز مرة واحدة لكل الرسائل (بدل إعادة فرز كل
   // الحركات وبناء فهرس الأسماء لكل رسالة، وهو ما كان يسبب التجمّد)
@@ -382,6 +317,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             .toSet()
             .toList(),
         ignoredWords: _settings.ignoredWords,
+        lineIgnoredWords: _settings.lineIgnoredWords,
         currencyWords: _currencyWordsFromSettings(),
         forbiddenWords: _settings.forbiddenWords,
         forbiddenPhrases: _settings.forbiddenPhrases,
@@ -391,63 +327,30 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
   _BubbleState _buildInitialState(_ParsedSegment seg, int segIndex) {
     final st = _BubbleState(segment: seg, index: segIndex);
+    final ex = _extractor.extract(seg.lines, senderName: seg.senderName);
+    st.extraction = ex;
 
-    for (int li = 0; li < seg.lines.length; li++) {
-      final toks = _tokensFromLine(seg.lines[li]);
-      for (int ti = 0; ti < toks.length; ti++) {
-        if (_isPhoneLike(toks[ti])) {
-          st.phoneTokens.add(_TokPos(li, ti));
-        }
-      }
+    for (int li = 0; li < ex.lines.length; li++) {
+      ex.lines[li].marks.forEach((ti, m) {
+        st.noiseTokens[_TokPos(li, ti)] = m;
+      });
     }
 
-    final currencyWords = _currencyWordsFromSettings();
+    st.nameTokens.addAll(_tokMapToSet(ex.nameTokensByLine));
+    st.detectedName = ex.name;
 
-    final nameRes = nd.NameDetector.detectTokens(
-      tokenLines: [for (final line in seg.lines) _tokensFromLine(line)],
-      senderName: seg.senderName,
-      config: _nameConfig,
-    );
+    st.currencyPos = ex.currencyPos;
+    st.currencyKey = ex.currencyKey;
 
-    st.nameTokens.addAll(_tokMapToSet(nameRes.tokensByLine));
-    st.detectedName = _collectTokens(seg, st.nameTokens).trim();
-
-    final preparedForCurrency = _toCurrencyPrepared(
-      nameRes.remainingTokensByLine,
-    );
-
-    final curRes = cd.CurrencyDetector.detectPrepared(
-      preparedTokensByLine: preparedForCurrency,
-      currencyMap: _currencyMap,
-      ignoredWords: _settings.ignoredWords,
-    );
-
-    st.currencyPos = curRes.pos;
-    st.currencyKey = curRes.detectedKey;
-
-    if (st.currencyKey == null && curRes.pos != null) {
-      final toks = _tokensFromLine(seg.lines[curRes.pos!.x]);
-      if (curRes.pos!.y >= 0 && curRes.pos!.y < toks.length) {
-        st.currencyKey = _mapTokenToCurrencyKey(_settings, toks[curRes.pos!.y]);
-      }
-    }
-
-    final preparedForAmount = _toAmountPrepared(curRes.remainingTokensByLine);
-
-    final amountRes = ad.AmountDetector.detectPrepared(
-      preparedTokensByLine: preparedForAmount,
-      currencyHints: currencyWords.toSet(),
-      amountKeywords: _amountKeywords,
-      ignoredWords: _settings.ignoredWords,
-      customWordValues: _settings.amountWordValues,
-      currencyAnchor: _toAmountPosition(curRes.pos),
-      keywordLookAhead: 3,
-    );
-
-    st.amount = amountRes.numericValue;
-    st.amountHasConflict = amountRes.hasConflict;
-    st.amountHasMultipleCandidates = amountRes.hasMultipleCandidates;
-    st.amountCandidateValues = List<double>.from(amountRes.candidateValues);
+    st.detectedAmount = ex.amount;
+    st.amount = ex.amount;
+    st.detectedAmountTokens = {
+      for (final p in ex.amountTokens) _TokPos(p.x, p.y),
+    };
+    st.amountHasConflict = ex.amountHasConflict;
+    st.amountHasMultipleCandidates = ex.amountHasMultipleCandidates;
+    st.amountCandidateValues = List<double>.from(ex.amountCandidates);
+    st.amountFromSuspect = ex.amountFromSuspect;
 
     _refreshCandidates(st);
     return st;
@@ -463,39 +366,44 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     return s;
   }
 
-  String? _mapTokenToCurrencyKey(Settings s, String token) {
-    for (final k in s.currencyMap.keys) {
-      if (_eqLoose(k, token)) return k;
-    }
-    for (final e in s.currencyMap.entries) {
-      if (_eqLoose(e.value, token)) return e.key;
-    }
-    return null;
+  /// الاسم الفعلي للفقاعة (اليدوي أولًا ثم المكتشف)
+  String _effectiveName(_BubbleState st) {
+    final manual = st.manualName?.trim() ?? '';
+    if (manual.isNotEmpty) return manual;
+    return st.detectedName?.trim() ?? '';
   }
 
-  String _collectTokens(_ParsedSegment seg, Set<_TokPos> positions) {
-    if (positions.isEmpty) return '';
-    final lines = <String>[];
-    final byLine = <int, List<int>>{};
-    for (final p in positions) {
-      (byLine[p.li] ??= []).add(p.ti);
+  /// هل [needle] يظهر كتسلسل متصل داخل [hay]؟
+  static bool _containsSeq(List<String> hay, List<String> needle) {
+    if (needle.isEmpty || needle.length > hay.length) return false;
+    for (int i = 0; i + needle.length <= hay.length; i++) {
+      var ok = true;
+      for (int j = 0; j < needle.length; j++) {
+        if (hay[i + j] != needle[j]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return true;
     }
-    for (final e in byLine.entries) {
-      e.value.sort();
-      final tokens = _tokensFromLine(seg.lines[e.key]);
-      final start = e.value.first;
-      lines.add(tokens.sublist(start).join(' '));
-    }
-    return lines.join(' ').trim();
+    return false;
   }
 
-  bool _nameAppearsInMessage(String name, List<String> rawLines) {
-    if (name.trim().isEmpty) return false;
-    final normName = _normalizeArabic(name);
-    final fullMsg = _normalizeArabic(rawLines.join(' '));
-    return fullMsg.contains(normName);
+  /// العملة متوافقة إلا إذا عُرفت العملتان وكانتا مختلفتين
+  bool _currencyCompatible(TransactionModel tx, String? messageKey) {
+    if (messageKey == null) return true;
+    final txKey = _extractor.currencyKeyOf(tx.currency);
+    if (txKey == null) return true;
+    return txKey == messageKey;
   }
 
+  String _currencyLabel(String? key) {
+    if (key == null) return 'غير محددة';
+    return _currencyMap[key] ?? key;
+  }
+
+  /// درجات المطابقة: 3 = الاسم مطابق تمامًا ، 2 = اسم الحركة ظاهر في الرسالة أو
+  /// الاسم جزء متصل من اسم الحركة (أو العكس) ، 1 = كلمتان مشتركتان على الأقل.
   void _refreshCandidates(_BubbleState st) {
     if (st.isReadOnly) return;
 
@@ -504,55 +412,216 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     st.selectedTxIds.clear();
     st.candidates.clear();
     st.hasAmbiguousExactMatches = false;
+    st.amountChosenByMatch = false;
+    st.amount = st.manualAmount ?? st.detectedAmount;
 
-    final name = (st.manualName?.trim().isNotEmpty == true)
-        ? st.manualName!.trim()
-        : (st.detectedName?.trim().isNotEmpty == true
-              ? st.detectedName!.trim()
-              : '');
+    final name = _effectiveName(st);
+    final nameKeys = tt
+        .tokensFromLine(name)
+        .map(tt.matchKey)
+        .where((k) => k.isNotEmpty)
+        .toList();
 
-    if (name.isEmpty) return;
+    final rankById = <int, int>{};
+    final txById = <int, TransactionModel>{};
+    void bump(TransactionModel tx, int rank) {
+      txById[tx.id] = tx;
+      if ((rankById[tx.id] ?? 0) < rank) rankById[tx.id] = rank;
+    }
+
+    if (nameKeys.isNotEmpty) {
+      for (final tx in _pending.byFull[nameKeys.join(' ')] ?? const []) {
+        bump(tx, 3);
+      }
+      final overlap = <int, int>{};
+      for (final k in nameKeys.toSet()) {
+        for (final tx in _pending.byToken[k] ?? const <TransactionModel>[]) {
+          final keys = _pending.keysById[tx.id]!;
+          if (_containsSeq(keys, nameKeys) || _containsSeq(nameKeys, keys)) {
+            bump(tx, 2);
+          } else {
+            overlap[tx.id] = (overlap[tx.id] ?? 0) + 1;
+            if (overlap[tx.id]! >= 2) bump(tx, 1);
+          }
+        }
+      }
+    }
+
+    // اسم الحركة ظاهر حرفيًا في نص الرسالة (حتى لو لم يُكتشف الاسم)
+    final ex = st.extraction;
+    if (ex != null) {
+      for (final line in ex.lines) {
+        final keys = line.tokens.map(tt.matchKey).toList();
+        for (int p = 0; p < keys.length; p++) {
+          final list = _pending.byFirst[keys[p]];
+          if (list == null) continue;
+          for (final tx in list) {
+            final txKeys = _pending.keysById[tx.id]!;
+            if (p + txKeys.length > keys.length) continue;
+            var ok = true;
+            for (int j = 1; j < txKeys.length; j++) {
+              if (keys[p + j] != txKeys[j]) {
+                ok = false;
+                break;
+              }
+            }
+            if (ok) bump(tx, 2);
+          }
+        }
+      }
+    }
 
     const double tol = 0.0001;
-    final hasAmount = st.amount != null;
-    final amount = st.amount ?? 0.0;
 
-    for (final tx in _addedOnly) {
-      final eqName = _eqLoose(tx.beneficiary, name);
-      final appears = _nameAppearsInMessage(tx.beneficiary, st.segment.lines);
+    void buildCandidates() {
+      st.candidates.clear();
+      final hasAmount = st.amount != null;
+      final amount = st.amount ?? 0.0;
+      rankById.forEach((id, rank) {
+        final tx = txById[id]!;
+        final delta = hasAmount ? (tx.amount - amount).abs() : 0.0;
+        final currencyOk = _currencyCompatible(tx, st.currencyKey);
+        final exact = hasAmount && delta <= tol && rank >= 2 && currencyOk;
+        st.candidates.add(
+          _Candidate(
+            tx: tx,
+            delta: delta,
+            exact: exact,
+            rank: rank,
+            currencyOk: currencyOk,
+          ),
+        );
+      });
+    }
 
-      if (!eqName && !appears) continue;
+    buildCandidates();
 
-      final delta = hasAmount ? (tx.amount - amount).abs() : 0.0;
-      final exact = hasAmount && eqName && delta <= tol;
-
-      st.candidates.add(_Candidate(tx: tx, delta: delta, exact: exact));
+    // الرسالة فيها أكثر من رقم: نعتمد الرقم الذي يطابق حركة معلقة
+    if (st.manualAmount == null &&
+        !st.candidates.any((c) => c.exact) &&
+        st.amountCandidateValues.length > 1) {
+      for (final v in st.amountCandidateValues) {
+        if (st.amount != null && (v - st.amount!).abs() <= tol) continue;
+        final hit = st.candidates.any(
+          (c) => c.rank >= 2 && c.currencyOk && (c.tx.amount - v).abs() <= tol,
+        );
+        if (hit) {
+          st.amount = v;
+          st.amountChosenByMatch = true;
+          buildCandidates();
+          break;
+        }
+      }
     }
 
     st.candidates.sort((a, b) {
       if (a.exact != b.exact) return a.exact ? -1 : 1;
+      final r = b.rank.compareTo(a.rank);
+      if (r != 0) return r;
       final d = a.delta.compareTo(b.delta);
       if (d != 0) return d;
       return b.tx.date.compareTo(a.tx.date);
     });
 
-    // اختيار تلقائي فقط إذا كانت هناك مطابقة مؤكدة واحدة فقط
-    if (hasAmount) {
-      final autoExact = st.candidates.where((c) {
-        if (!c.exact) return false;
-        if (c.tx.status == TransactionStatus.received) return false;
-        if (_isTxSelectedInAnotherBubble(st, c.tx.id)) return false;
-        return true;
-      }).toList();
+    // اختيار تلقائي فقط إذا كانت هناك مطابقة مؤكدة واحدة أفضل من غيرها
+    final autoExact = st.candidates.where((c) {
+      if (!c.exact) return false;
+      if (c.tx.status == TransactionStatus.received) return false;
+      if (_isTxSelectedInAnotherBubble(st, c.tx.id)) return false;
+      return true;
+    }).toList();
 
-      if (autoExact.length == 1) {
-        st.selectedTxIds.add(autoExact.first.tx.id);
-      } else if (autoExact.length > 1) {
+    if (autoExact.length == 1) {
+      st.selectedTxIds.add(autoExact.first.tx.id);
+    } else if (autoExact.length > 1) {
+      final topRank = autoExact.first.rank;
+      final top = autoExact.where((c) => c.rank == topRank).toList();
+      if (top.length == 1) {
+        st.selectedTxIds.add(top.first.tx.id);
+      } else {
         st.hasAmbiguousExactMatches = true;
       }
     }
 
     _recomputeWarningsAndReady(st);
+  }
+
+  /// اعتماد اسم من الرسالة (فهارس دقيقة) — من الضغط على كلمة أو من الاقتراحات
+  void _applyNameTokens(_BubbleState st, int li, List<int> idxs) {
+    final ex = st.extraction;
+    if (ex == null || idxs.isEmpty) return;
+    final text = ReceiptExtractor.textOf(ex.lines, {li: idxs});
+    if (text.isEmpty) return;
+    st.manualName = text;
+    st.manualNameTokens
+      ..clear()
+      ..addAll(idxs.map((ti) => _TokPos(li, ti)));
+    st.nameController.text = text;
+    _refreshCandidates(st);
+    setState(() {});
+  }
+
+  void _applyManualAmount(
+    _BubbleState st,
+    double? value, {
+    Set<_TokPos> tokens = const {},
+  }) {
+    st.manualAmount = (value != null && value > 0) ? value : null;
+    st.manualAmountTokens
+      ..clear()
+      ..addAll(st.manualAmount == null ? const <_TokPos>{} : tokens);
+    st.amountController.text = st.manualAmount == null
+        ? ''
+        : _formatAmount(st.manualAmount!);
+    _refreshCandidates(st);
+    setState(() {});
+  }
+
+  void _onMessageTokenTap(_BubbleState st, int li, int ti) {
+    final ex = st.extraction;
+    if (st.isReadOnly || ex == null || li >= ex.lines.length) return;
+    final line = ex.lines[li];
+    if (ti >= line.tokens.length) return;
+
+    if (tt.tokenHasDigit(line.tokens[ti])) {
+      final v = ReceiptExtractor.numberAt(line, ti);
+      if (v == null || v <= 0) {
+        _showSnack(
+          icon: Icons.info_outline,
+          text: 'هذا الرقم ليس مبلغًا صالحًا.',
+        );
+        return;
+      }
+      final mark = line.markAt(ti);
+      final merged = line.mergedContaining(ti);
+      _applyManualAmount(
+        st,
+        v,
+        tokens: merged == null
+            ? {_TokPos(li, ti)}
+            : {for (int x = merged.start; x <= merged.end; x++) _TokPos(li, x)},
+      );
+      _showSnack(
+        icon: Icons.payments_outlined,
+        text: mark == null
+            ? 'تم اعتماد المبلغ ${_formatAmount(v)} يدويًا.'
+            : 'تم اعتماد ${_formatAmount(v)} كمبلغ رغم أنه يبدو ${mark.kind.label}.',
+      );
+      return;
+    }
+
+    final span = _extractor.spanFrom(line, ti);
+    if (span.isEmpty) {
+      final mark = line.markAt(ti);
+      _showSnack(
+        icon: Icons.info_outline,
+        text: mark == null
+            ? 'لا يمكن اعتماد «${line.tokens[ti]}» كاسم.'
+            : 'لا يمكن اعتماد «${line.tokens[ti]}» كاسم (${mark.kind.label}).',
+      );
+      return;
+    }
+    _applyNameTokens(st, li, span);
   }
 
   void _recomputeWarningsAndReady(_BubbleState st) {
@@ -564,7 +633,13 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     }
     if (st.selectedTxIds.isEmpty) st.ready = false;
 
-    if (st.amountHasMultipleCandidates) {
+    final manualAmount = st.manualAmount != null;
+
+    if (st.amountChosenByMatch && st.amount != null) {
+      st.warningTexts.add(
+        'الرسالة فيها أكثر من رقم، وتم اعتماد المبلغ ${_formatAmount(st.amount!)} لأنه يطابق حركة مضافة.',
+      );
+    } else if (st.amountHasMultipleCandidates && !manualAmount) {
       final vals = _formatAmountList(st.amountCandidateValues);
       st.warningTexts.add(
         vals.isEmpty
@@ -573,9 +648,15 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       );
     }
 
-    if (st.amountHasConflict) {
+    if (st.amountHasConflict && !manualAmount && !st.amountChosenByMatch) {
       st.warningTexts.add(
         'يوجد تعارض واضح بين المبلغ الرقمي والمبلغ النصي، وتم اعتماد النتيجة الأقوى من كاشف المبلغ.',
+      );
+    }
+
+    if (st.amountFromSuspect && !manualAmount && !st.amountChosenByMatch) {
+      st.warningTexts.add(
+        'المبلغ المعتمد رقم طويل قد يكون رقم هاتف — تأكد منه أو اضغط على المبلغ الصحيح في الرسالة.',
       );
     }
 
@@ -589,7 +670,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     final toRemove = <int>[];
 
     for (final id in st.selectedTxIds) {
-      final tx = st.candidates.firstWhere((c) => c.tx.id == id).tx;
+      final match = st.candidates.where((c) => c.tx.id == id);
+      if (match.isEmpty) {
+        toRemove.add(id);
+        continue;
+      }
+      final tx = match.first.tx;
 
       if (_isTxSelectedInAnotherBubble(st, id)) {
         st.warningTexts.add(
@@ -612,7 +698,13 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
       if (st.amount != null && (tx.amount - st.amount!).abs() > tol) {
         st.warningTexts.add(
-          'تحذير: اختلاف مبلغ مع "${tx.beneficiary}" (${tx.amount} ≠ ${st.amount}).',
+          'تحذير: اختلاف مبلغ مع "${tx.beneficiary}" (${_formatAmount(tx.amount)} ≠ ${_formatAmount(st.amount!)}).',
+        );
+      }
+
+      if (!_currencyCompatible(tx, st.currencyKey)) {
+        st.warningTexts.add(
+          'تحذير: عملة الحركة "${tx.beneficiary}" (${tx.currency}) تختلف عن عملة الرسالة (${_currencyLabel(st.currencyKey)}).',
         );
       }
     }
@@ -850,6 +942,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         body: Column(
           children: [
             _adaptiveTopChrome(visible.length),
+            OperationProgressBar(
+              progress: _progress,
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+            ),
             Expanded(
               child: NotificationListener<ScrollNotification>(
                 onNotification: _handleListScroll,
@@ -857,7 +953,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                   duration: const Duration(milliseconds: 260),
                   switchInCurve: Curves.easeOutCubic,
                   switchOutCurve: Curves.easeInCubic,
-                  child: visible.isEmpty
+                  child: _building
+                      ? _buildingState()
+                      : visible.isEmpty
                       ? _emptyState()
                       : ListView.builder(
                           key: ValueKey(
@@ -888,6 +986,31 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
           ],
         ),
         bottomNavigationBar: _bottomActionBar(),
+      ),
+    );
+  }
+
+  Widget _buildingState() {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      key: const ValueKey('building'),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 14),
+            Text(
+              'جارٍ تحليل ${_segments.length} رسالة واستخراج الأسماء والمبالغ...',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: cs.onSurfaceVariant,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1948,14 +2071,14 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         _miniInfo(
           Icons.numbers_rounded,
           'المبلغ',
-          st.amount == null ? 'غير محدد' : st.amount!.toString(),
+          st.amount == null
+              ? 'غير محدد'
+              : '${_formatAmount(st.amount!)}${_amountSourceSuffix(st)}',
         ),
         _miniInfo(
           Icons.payments_outlined,
           'العملة',
-          st.currencyKey == null
-              ? 'غير محددة'
-              : (_currencyMap[st.currencyKey!] ?? st.currencyKey!),
+          _currencyLabel(st.currencyKey),
         ),
         _miniInfo(
           Icons.fact_check_outlined,
@@ -2033,7 +2156,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               'سيتم استبعاد هذه الفقاعة من العملية (لن تُحذف أي حركة). المتابعة؟',
             );
             if (!ok) return;
-            setState(() => _bubbles.remove(st));
+            setState(() {
+              _bubbles.remove(st);
+              _removedBubbles.add(st);
+            });
             _showSnack(
               icon: Icons.remove_circle_outline,
               text: 'تم استبعاد الفقاعة.',
@@ -2100,7 +2226,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       children: [
         Expanded(
           child: Text(
-            '$name • ${st.amount == null ? 'مبلغ غير محدد' : st.amount!.toString()} • نتائج: ${st.candidates.length}',
+            '$name • ${st.amount == null ? 'مبلغ غير محدد' : _formatAmount(st.amount!)} • نتائج: ${st.candidates.length}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
@@ -2159,82 +2285,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          for (int li = 0; li < st.segment.lines.length; li++) ...[
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: _tokensFromLine(st.segment.lines[li])
-                  .asMap()
-                  .entries
-                  .map((e) {
-                    final ti = e.key;
-                    final tok = e.value;
-
-                    final isPhone = st.phoneTokens.contains(_TokPos(li, ti));
-                    final inDetectedName =
-                        st.manualName == null &&
-                        st.nameTokens.contains(_TokPos(li, ti));
-                    final tokenAccent = isPhone
-                        ? Colors.amber.shade800
-                        : (inDetectedName
-                              ? Colors.indigo.shade600
-                              : cs.outline);
-
-                    return Tooltip(
-                      message: st.isReadOnly
-                          ? 'قراءة فقط'
-                          : 'اضغط لاعتماد الاسم من هنا',
-                      waitDuration: const Duration(milliseconds: 500),
-                      child: InkWell(
-                        onTap: st.isReadOnly
-                            ? null
-                            : () {
-                                final toks = _tokensFromLine(
-                                  st.segment.lines[li],
-                                );
-                                final picked = toks.sublist(ti).join(' ');
-                                st.manualName = picked;
-                                st.nameController.text = picked;
-                                _refreshCandidates(st);
-                                setState(() {});
-                              },
-                        borderRadius: BorderRadius.circular(12),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 170),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 7,
-                          ),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: tokenAccent.withOpacity(
-                                inDetectedName || isPhone ? .55 : .25,
-                              ),
-                            ),
-                            color: isPhone
-                                ? Colors.amber.withOpacity(.16)
-                                : (inDetectedName
-                                      ? Colors.indigo.withOpacity(.12)
-                                      : cs.surface.withOpacity(.72)),
-                          ),
-                          child: Text(
-                            tok,
-                            style: TextStyle(
-                              color: isPhone ? Colors.brown[900] : null,
-                              fontWeight: inDetectedName
-                                  ? FontWeight.w800
-                                  : FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  })
-                  .toList(),
-            ),
-            const SizedBox(height: 7),
-          ],
+          ..._messageLines(st),
+          const SizedBox(height: 2),
+          _tokenLegend(st),
           const Divider(height: 22),
           Wrap(
             spacing: 8,
@@ -2243,19 +2296,201 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               _infoInline(
                 icon: Icons.numbers,
                 label: 'المبلغ',
-                value: st.amount == null ? 'غير محدد' : st.amount!.toString(),
+                value: st.amount == null
+                    ? 'غير محدد'
+                    : '${_formatAmount(st.amount!)}${_amountSourceSuffix(st)}',
               ),
               _infoInline(
                 icon: Icons.attach_money,
                 label: 'العملة',
-                value: st.currencyKey == null
-                    ? 'غير محددة'
-                    : (_currencyMap[st.currencyKey!] ?? st.currencyKey!),
+                value: _currencyLabel(st.currencyKey),
               ),
             ],
           ),
         ],
       ),
+    );
+  }
+
+  String _amountSourceSuffix(_BubbleState st) {
+    if (st.manualAmount != null) return ' (يدوي)';
+    if (st.amountChosenByMatch) return ' (مطابق لحركة)';
+    return '';
+  }
+
+  _TokRole _roleOf(_BubbleState st, int li, int ti) {
+    final pos = _TokPos(li, ti);
+    final nameSet = st.manualName != null ? st.manualNameTokens : st.nameTokens;
+    if (nameSet.contains(pos)) return _TokRole.name;
+    final amountSet = st.manualAmount != null
+        ? st.manualAmountTokens
+        : (st.amountChosenByMatch
+              ? const <_TokPos>{}
+              : st.detectedAmountTokens);
+    if (amountSet.contains(pos)) return _TokRole.amount;
+    final cp = st.currencyPos;
+    if (cp != null && cp.x == li && cp.y == ti) return _TokRole.currency;
+    final m = st.noiseTokens[pos];
+    if (m != null) {
+      return m.kind == NoiseKind.context ? _TokRole.context : _TokRole.noise;
+    }
+    return _TokRole.plain;
+  }
+
+  Color _roleColor(_TokRole role, ColorScheme cs) {
+    switch (role) {
+      case _TokRole.name:
+        return Colors.indigo.shade600;
+      case _TokRole.amount:
+        return Colors.green.shade700;
+      case _TokRole.currency:
+        return Colors.teal.shade600;
+      case _TokRole.noise:
+        return Colors.amber.shade800;
+      case _TokRole.context:
+        return Colors.blueGrey;
+      case _TokRole.plain:
+        return cs.outline;
+    }
+  }
+
+  List<Widget> _messageLines(_BubbleState st) {
+    final ex = st.extraction;
+    if (ex == null) {
+      return [
+        for (final l in st.segment.lines)
+          if (l.trim().isNotEmpty)
+            Padding(padding: const EdgeInsets.only(bottom: 6), child: Text(l)),
+      ];
+    }
+    final cs = Theme.of(context).colorScheme;
+    final out = <Widget>[];
+    for (int li = 0; li < ex.lines.length; li++) {
+      final line = ex.lines[li];
+      if (line.tokens.isEmpty) continue;
+      out.add(
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (int ti = 0; ti < line.tokens.length; ti++)
+              _messageToken(st, li, ti, cs),
+          ],
+        ),
+      );
+      out.add(const SizedBox(height: 7));
+    }
+    return out;
+  }
+
+  Widget _messageToken(_BubbleState st, int li, int ti, ColorScheme cs) {
+    final line = st.extraction!.lines[li];
+    final tok = line.tokens[ti];
+    final role = _roleOf(st, li, ti);
+    final mark = st.noiseTokens[_TokPos(li, ti)];
+    final accent = _roleColor(role, cs);
+    final highlighted = role != _TokRole.plain;
+    final hasDigit = tt.tokenHasDigit(tok);
+
+    final String tip;
+    if (st.isReadOnly) {
+      tip = 'قراءة فقط';
+    } else if (role == _TokRole.noise && mark != null) {
+      tip =
+          '${mark.kind.label}${mark.suspect ? ' (مشكوك به)' : ''} — تم تجاهله. اضغط لاعتماده كمبلغ';
+    } else if (hasDigit) {
+      tip = 'اضغط لاعتماد هذا الرقم كمبلغ';
+    } else {
+      tip = 'اضغط لاعتماد الاسم من هنا';
+    }
+
+    return Tooltip(
+      message: tip,
+      waitDuration: const Duration(milliseconds: 500),
+      child: InkWell(
+        onTap: st.isReadOnly ? null : () => _onMessageTokenTap(st, li, ti),
+        borderRadius: BorderRadius.circular(12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 170),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: accent.withValues(alpha: highlighted ? .55 : .25),
+            ),
+            color: highlighted
+                ? accent.withValues(alpha: role == _TokRole.context ? .06 : .13)
+                : cs.surface.withValues(alpha: .72),
+          ),
+          child: Text(
+            tok,
+            style: TextStyle(
+              color: role == _TokRole.noise ? accent : null,
+              decoration: role == _TokRole.noise
+                  ? TextDecoration.lineThrough
+                  : null,
+              decorationColor: accent.withValues(alpha: .7),
+              fontWeight: role == _TokRole.name || role == _TokRole.amount
+                  ? FontWeight.w800
+                  : FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tokenLegend(_BubbleState st) {
+    final cs = Theme.of(context).colorScheme;
+    final kinds = <NoiseKind>{
+      for (final m in st.noiseTokens.values)
+        if (m.kind != NoiseKind.context) m.kind,
+    };
+
+    Widget dot(Color c, String label) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            color: c.withValues(alpha: .75),
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
+        ),
+      ],
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 12,
+          runSpacing: 6,
+          children: [
+            dot(_roleColor(_TokRole.name, cs), 'الاسم'),
+            dot(_roleColor(_TokRole.amount, cs), 'المبلغ'),
+            dot(_roleColor(_TokRole.currency, cs), 'العملة'),
+            if (kinds.isNotEmpty)
+              dot(
+                _roleColor(_TokRole.noise, cs),
+                'متجاهَل: ${kinds.map((k) => k.label).join('، ')}',
+              ),
+          ],
+        ),
+        if (!st.isReadOnly) ...[
+          const SizedBox(height: 6),
+          Text(
+            'اضغط على كلمة لاعتماد الاسم منها، أو على رقم لاعتماده كمبلغ.',
+            style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
+          ),
+        ],
+      ],
     );
   }
 
@@ -2307,7 +2542,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                           tooltip: 'اعتماد',
                           icon: const Icon(Icons.check),
                           onPressed: () {
-                            st.manualName = st.nameController.text.trim();
+                            final typed = st.nameController.text.trim();
+                            st.manualName = typed.isEmpty ? null : typed;
+                            st.manualNameTokens.clear();
                             _refreshCandidates(st);
                             setState(() {});
                           },
@@ -2320,6 +2557,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                   ? null
                   : () {
                       st.manualName = null;
+                      st.manualNameTokens.clear();
                       st.nameController.clear();
                       _refreshCandidates(st);
                       setState(() {});
@@ -2329,6 +2567,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             ),
           ],
         ),
+        ..._nameHints(st),
+
+        const SizedBox(height: 14),
+        _sectionTitle(Icons.payments_outlined, 'المبلغ'),
+        const SizedBox(height: 6),
+        _amountEditor(st),
 
         const SizedBox(height: 14),
 
@@ -2356,6 +2600,157 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                 text: 'لا يوجد مرشّحون لهذا النص.',
               )
             : _candidatesList(st),
+      ],
+    );
+  }
+
+  List<Widget> _nameHints(_BubbleState st) {
+    final cs = Theme.of(context).colorScheme;
+    final ex = st.extraction;
+    if (ex == null) return const [];
+    final current = tt.normalizeText(_effectiveName(st));
+    final options = ex.nameOptions
+        .where((o) => tt.normalizeText(o.text) != current)
+        .toList();
+    final noName = _effectiveName(st).isEmpty;
+
+    return [
+      if (noName) ...[
+        const SizedBox(height: 8),
+        _infoTile(
+          icon: Icons.info_outline,
+          text:
+              '${ex.nameReason ?? 'لم يتم العثور على الاسم'} — اضغط على الاسم داخل نص الرسالة أو اختر من الاقتراحات.',
+        ),
+      ],
+      if (options.isNotEmpty && !st.isReadOnly) ...[
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              'اقتراحات:',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            for (final o in options)
+              Tooltip(
+                message: o.reason,
+                child: ActionChip(
+                  avatar: const Icon(Icons.person_search_outlined, size: 18),
+                  label: Text(o.text),
+                  onPressed: () =>
+                      _applyNameTokens(st, o.lineIndex, o.tokenIndexes),
+                ),
+              ),
+          ],
+        ),
+      ],
+    ];
+  }
+
+  Widget _amountEditor(_BubbleState st) {
+    final cs = Theme.of(context).colorScheme;
+    final others = st.amountCandidateValues
+        .where((v) => st.amount == null || (v - st.amount!).abs() > 0.0001)
+        .toList();
+
+    void applyTyped() {
+      final raw = st.amountController.text.trim();
+      if (raw.isEmpty) {
+        _applyManualAmount(st, null);
+        return;
+      }
+      final v = ad.AmountDetector.parseAmountToken(tt.cleanToken(raw));
+      if (v == null || v <= 0) {
+        _showSnack(
+          icon: Icons.error_outline,
+          text: 'اكتب مبلغًا صحيحًا.',
+          color: cs.error,
+        );
+        return;
+      }
+      _applyManualAmount(st, v);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            InputChip(
+              avatar: const Icon(Icons.payments_outlined),
+              label: Text(
+                st.amount == null
+                    ? 'غير محدد'
+                    : '${_formatAmount(st.amount!)} ${st.currencyKey == null ? '' : _currencyLabel(st.currencyKey)}${_amountSourceSuffix(st)}',
+              ),
+            ),
+            SizedBox(
+              width: 220,
+              child: TextField(
+                controller: st.amountController,
+                enabled: !st.isReadOnly,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                onSubmitted: (_) => applyTyped(),
+                decoration: InputDecoration(
+                  labelText: 'المبلغ اليدوي',
+                  hintText: 'مثال: 1500',
+                  border: const OutlineInputBorder(),
+                  prefixIcon: const Icon(Icons.edit_outlined),
+                  suffixIcon: st.isReadOnly
+                      ? null
+                      : IconButton(
+                          tooltip: 'اعتماد',
+                          icon: const Icon(Icons.check),
+                          onPressed: applyTyped,
+                        ),
+                ),
+              ),
+            ),
+            if (st.manualAmount != null)
+              TextButton.icon(
+                onPressed: st.isReadOnly
+                    ? null
+                    : () => _applyManualAmount(st, null),
+                icon: const Icon(Icons.undo),
+                label: const Text('إلغاء اليدوي'),
+              ),
+          ],
+        ),
+        if (others.isNotEmpty && !st.isReadOnly) ...[
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                'أرقام أخرى في الرسالة:',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+              for (final v in others)
+                ActionChip(
+                  label: Text(_formatAmount(v)),
+                  onPressed: () => _applyManualAmount(st, v),
+                ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -2861,6 +3256,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
   // ====== تنفيذ ======
   Future<void> _onExecute() async {
+    if (_building) return;
     final totalBubblesBefore = _bubbles.length;
     _lastErrors.clear();
     _lastErrorByTxId.clear();
@@ -2889,6 +3285,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
     int changed = 0;
     int failed = 0;
+    final records = <OperationTxRecord>[];
 
     for (final st in readyBubbles.toList()) {
       var bubbleChanged = false;
@@ -2900,8 +3297,16 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
           final DateTime ts =
               st.segment.timestamp ??
               DateTime.now(); // timestamp متاح من الهيدر
+          final before = OperationLogService.snapshot(tx);
           tx.applyStatus(TransactionStatus.received, at: ts);
           await tx.save();
+          records.add(
+            OperationTxRecord(
+              txId: tx.id,
+              before: before,
+              after: OperationLogService.snapshot(tx),
+            ),
+          );
 
           // لا نحذف المرشحات المتبقية من الفقاعة.
           // بعد نجاح التنفيذ نقفل الفقاعة كاملة للقراءة فقط.
@@ -2930,10 +3335,20 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         st.warningTexts.clear();
       } else if (st.selectedTxIds.isEmpty && st.candidates.isEmpty) {
         _bubbles.remove(st);
+        _removedBubbles.add(st);
       } else {
         _recomputeWarningsAndReady(st);
       }
     }
+
+    // تسجيل التسليم في سجل العمليات (قابل للتراجع من شاشة السجل)
+    await OperationLogService.log(
+      kind: OperationKind.statusChange,
+      title:
+          'تسليم ${records.length} حركة من صفحة التسليم في «${widget.account.name}»',
+      subtitle: records.length == 1 ? null : 'مطابقة واستلام',
+      records: records,
+    );
 
     if (!mounted) return;
 
@@ -3173,7 +3588,43 @@ class _Candidate {
   final TransactionModel tx;
   final double delta;
   final bool exact;
-  _Candidate({required this.tx, required this.delta, required this.exact});
+
+  /// 3 = اسم مطابق تمامًا ، 2 = اسم الحركة ظاهر في الرسالة/جزء متصل ، 1 = تشابه
+  final int rank;
+  final bool currencyOk;
+
+  _Candidate({
+    required this.tx,
+    required this.delta,
+    required this.exact,
+    this.rank = 0,
+    this.currencyOk = true,
+  });
+}
+
+/// فهرس الحركات المضافة للمطابقة السريعة بالاسم
+class _PendingIndex {
+  final Map<int, List<String>> keysById = {};
+  final Map<String, List<TransactionModel>> byFull = {};
+  final Map<String, List<TransactionModel>> byFirst = {};
+  final Map<String, List<TransactionModel>> byToken = {};
+
+  _PendingIndex(List<TransactionModel> txs) {
+    for (final tx in txs) {
+      final keys = tt
+          .tokensFromLine(tx.beneficiary)
+          .map(tt.matchKey)
+          .where((k) => k.isNotEmpty)
+          .toList();
+      if (keys.isEmpty) continue;
+      keysById[tx.id] = keys;
+      (byFull[keys.join(' ')] ??= []).add(tx);
+      (byFirst[keys.first] ??= []).add(tx);
+      for (final k in keys.toSet()) {
+        if (k.length >= 2) (byToken[k] ??= []).add(tx);
+      }
+    }
+  }
 }
 
 class _ExecError {
@@ -3191,14 +3642,25 @@ class _BubbleState {
   final _ParsedSegment segment;
   final int index;
 
-  final Set<_TokPos> phoneTokens = {};
+  ReceiptExtraction? extraction;
+  final Map<_TokPos, NoiseMark> noiseTokens = {};
   final Set<_TokPos> nameTokens = {};
+  final Set<_TokPos> manualNameTokens = {};
 
   String? detectedName;
   String? manualName;
   final TextEditingController nameController = TextEditingController();
 
+  /// المبلغ الفعلي (يدوي، أو مختار بالمطابقة، أو المكتشف)
   double? amount;
+  double? detectedAmount;
+  double? manualAmount;
+  Set<_TokPos> detectedAmountTokens = {};
+  final Set<_TokPos> manualAmountTokens = {};
+  final TextEditingController amountController = TextEditingController();
+  bool amountChosenByMatch = false;
+  bool amountFromSuspect = false;
+
   Point<int>? currencyPos;
   String? currencyKey;
 
@@ -3221,7 +3683,15 @@ class _BubbleState {
   bool expanded = true;
 
   _BubbleState({required this.segment, required this.index});
+
+  void dispose() {
+    nameController.dispose();
+    amountController.dispose();
+  }
 }
+
+/// دور التوكن في نص الرسالة (للتلوين)
+enum _TokRole { plain, name, amount, currency, noise, context }
 
 enum _BubbleFilter {
   all,

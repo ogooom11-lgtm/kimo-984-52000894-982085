@@ -153,7 +153,18 @@ class TransactionModel extends HiveObject {
 
   bool get isCompanyTransaction => companyMovementType != null;
 
-  bool get isCompanyCancelled => companyMovementType?.isCancelled ?? false;
+  bool get isCompanyCancelled => effectiveCompanyMovement?.isCancelled ?? false;
+
+  /// نوع حركة الشركة الفعلي: الحركات التي أُلغيت عبر الحالة (بيانات قديمة أو
+  /// إلغاء جماعي قديم) تُعامل كحركات ملغية.
+  CompanyMovementType? get effectiveCompanyMovement {
+    final m = companyMovementType;
+    if (m == null) return null;
+    if (!m.isCancelled && status == TransactionStatus.cancelled) {
+      return m.cancelled;
+    }
+    return m;
+  }
 
   void cancelCompanyMovement() {
     if (companyMovementType != null) {

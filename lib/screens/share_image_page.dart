@@ -37,6 +37,12 @@ class ShareStatsData {
   final Map<String, int>? countsCancelledByCurrency;
   final Map<String, int>? countsUnreceivedByCurrency;
 
+  /// تسميات الأقسام (المكاتب افتراضيًا، والشركات: إرسال/استقبال/إلغاء...)
+  final String addedLabel;
+  final String receivedLabel;
+  final String cancelledLabel;
+  final String unreceivedLabel;
+
   const ShareStatsData({
     required this.accountName,
     required this.dateLabel,
@@ -56,6 +62,10 @@ class ShareStatsData {
     this.countsReceivedByCurrency,
     this.countsCancelledByCurrency,
     this.countsUnreceivedByCurrency,
+    this.addedLabel = 'مضافة',
+    this.receivedLabel = 'مستلمة',
+    this.cancelledLabel = 'ملغاة',
+    this.unreceivedLabel = 'غير مستلمة',
   });
 }
 
@@ -318,25 +328,25 @@ class _ShareImagePageState extends State<ShareImagePage> {
                         const Divider(height: 28),
 
                         tile(
-                          title: 'إظهار قسم المضافة',
+                          title: 'إظهار قسم ${widget.data.addedLabel}',
                           value: _showAddedCard,
                           onChanged: (v) => sync(() => _showAddedCard = v),
                           icon: Icons.add_circle_rounded,
                         ),
                         tile(
-                          title: 'إظهار قسم المستلمة',
+                          title: 'إظهار قسم ${widget.data.receivedLabel}',
                           value: _showReceivedCard,
                           onChanged: (v) => sync(() => _showReceivedCard = v),
                           icon: Icons.check_circle_rounded,
                         ),
                         tile(
-                          title: 'إظهار قسم الملغاة',
+                          title: 'إظهار قسم ${widget.data.cancelledLabel}',
                           value: _showCancelledCard,
                           onChanged: (v) => sync(() => _showCancelledCard = v),
                           icon: Icons.cancel_rounded,
                         ),
                         tile(
-                          title: 'إظهار قسم غير المستلمة',
+                          title: 'إظهار قسم ${widget.data.unreceivedLabel}',
                           value: _showUnreceivedCard,
                           onChanged: (v) => sync(() => _showUnreceivedCard = v),
                           icon: Icons.hourglass_bottom_rounded,
@@ -767,7 +777,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
     if (_showAddedCard) {
       widgets.add(
         quickCard(
-          label: "مضافة",
+          label: d.addedLabel,
           count: d.addedCount,
           gradient: const [Colors.blue, Colors.blueAccent],
           icon: Icons.add_circle_outline_rounded,
@@ -777,7 +787,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
     if (_showReceivedCard) {
       widgets.add(
         quickCard(
-          label: "مستلمة",
+          label: d.receivedLabel,
           count: d.receivedCount,
           gradient: const [Colors.green, Colors.lightGreen],
           icon: Icons.check_circle_outline_rounded,
@@ -787,7 +797,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
     if (_showCancelledCard) {
       widgets.add(
         quickCard(
-          label: "ملغاة",
+          label: d.cancelledLabel,
           count: d.cancelledCount,
           gradient: const [Colors.red, Colors.orange],
           icon: Icons.cancel_outlined,
@@ -797,7 +807,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
     if (_showUnreceivedCard) {
       widgets.add(
         quickCard(
-          label: "غير مستلمة",
+          label: d.unreceivedLabel,
           count: d.unreceivedCount,
           gradient: const [Colors.indigo, Colors.deepPurple],
           icon: Icons.hourglass_empty_rounded,
@@ -823,7 +833,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
     final cards = <Widget>[
       if (_showAddedCard)
         _categoryCard(
-          title: "مضافة",
+          title: d.addedLabel,
           count: d.addedCount,
           totals: d.totalsAdded,
           icon: Icons.add_circle_rounded,
@@ -834,7 +844,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
         ),
       if (_showReceivedCard)
         _categoryCard(
-          title: " (اليوم)",
+          title: d.receivedLabel,
           count: d.receivedCount,
           totals: d.totalsReceived,
           icon: Icons.check_circle_rounded,
@@ -845,7 +855,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
         ),
       if (_showCancelledCard)
         _categoryCard(
-          title: "ملغاة",
+          title: d.cancelledLabel,
           count: d.cancelledCount,
           totals: d.totalsCancelled,
           icon: Icons.cancel_rounded,
@@ -856,7 +866,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
         ),
       if (_showUnreceivedCard)
         _categoryCard(
-          title: "غير مستلمة",
+          title: d.unreceivedLabel,
           count: d.unreceivedCount,
           totals: d.totalsUnreceived,
           icon: Icons.hourglass_bottom_rounded,

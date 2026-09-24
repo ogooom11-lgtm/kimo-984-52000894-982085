@@ -32,7 +32,28 @@ bool _isAsciiDigit(int code) => code >= 0x30 && code <= 0x39;
 bool _isArabicDigit(int code) => code >= 0x0660 && code <= 0x0669;
 bool _isDigitCode(int code) => _isAsciiDigit(code) || _isArabicDigit(code);
 
-/// يحذف الفواصل الواقعة بين رقمين (1,500 → 1500)
+/// هل الفاصل الواقع عند [i] (بين رقمين) فاصل تجميع يجب حذفه؟
+/// - الشرطة/الشرطة السفلية/التطويل وفاصل الآلاف العربي: تُحذف دائمًا.
+/// - الفاصلة العشرية العربية (٫): تبقى دائمًا.
+/// - النقطة والفاصلة: تُحذف فقط إذا تبعتها 3 أرقام بالضبط (1,500 أو 1.500.000)،
+///   وإلا فهي فاصلة عشرية (1.5 أو 12,50) وتبقى.
+bool _isGroupingSeparatorAt(String w, int i) {
+  final ch = w[i];
+  if (ch == '\u066B') return false;
+  if (ch == '.' || ch == ',' || ch == '،') {
+    var n = 0;
+    var j = i + 1;
+    while (j < w.length && _isDigitCode(w.codeUnitAt(j))) {
+      n++;
+      j++;
+    }
+    return n == 3;
+  }
+  return true;
+}
+
+/// يحذف فواصل الآلاف الواقعة بين رقمين (1,500 → 1500) مع إبقاء الفاصلة
+/// العشرية (1.5 تبقى 1.5).
 String squashDigitSeparators(String w) {
   if (w.isEmpty) return w;
   final out = StringBuffer();
@@ -44,7 +65,8 @@ String squashDigitSeparators(String w) {
       if (prev != null &&
           next != null &&
           _isDigitCode(prev) &&
-          _isDigitCode(next)) {
+          _isDigitCode(next) &&
+          _isGroupingSeparatorAt(w, i)) {
         continue;
       }
     }
@@ -76,6 +98,12 @@ String matchKey(String token) {
 String normalizeText(String s) =>
     tokensFromLine(s).map(matchKey).where((e) => e.isNotEmpty).join(' ');
 
+/// نص التوكن للعرض بدون علامات الترقيم في الأطراف (بدون تطبيع الحروف)
+String stripEdgePunct(String token) {
+  final s = token.replaceAll(_edgePunctRe, '');
+  return s.isEmpty ? token.trim() : s;
+}
+
 bool tokenHasDigit(String token) => _hasDigitRe.hasMatch(token);
 
 bool isAllDigits(String token) => _allDigitsRe.hasMatch(token);
@@ -105,17 +133,38 @@ bool isPhoneLike(String token) {
 const Set<String> phoneWordKeys = {
   'هاتف',
   'الهاتف',
+  'هاتفه',
+  'هاتفها',
   'جوال',
   'الجوال',
+  'جواله',
+  'جوالها',
   'واتس',
+  'الواتس',
   'واتساب',
+  'الواتساب',
   'whatsapp',
   'whats',
   'موبايل',
+  'الموبايل',
+  'موبايله',
+  'موبايلها',
   'تلفون',
+  'التلفون',
+  'تلفونه',
   'تليفون',
+  'التليفون',
   'رقم',
   'الرقم',
+  'رقمه',
+  'رقمها',
+  'نمره',
+  'النمره',
+  'نمرته',
+  'للتواصل',
+  'phone',
+  'mobile',
+  'tel',
 };
 
 const Set<String> amountUnitKeys = {

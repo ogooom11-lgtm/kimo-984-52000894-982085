@@ -12,6 +12,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/period_stats.dart';
 
 enum AllStatsPeriod { daily, monthly, yearly }
 
@@ -97,12 +98,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         final prev = DateTime(_anchor.year - 1, 1, 1);
         return _Range(_startOfYear(prev), _endOfYear(prev));
     }
-  }
-
-  bool _within(DateTime d, _Range r) {
-    final ms = d.millisecondsSinceEpoch;
-    return ms >= r.start.millisecondsSinceEpoch &&
-        ms <= r.end.millisecondsSinceEpoch;
   }
 
   bool _canGoNext() {
@@ -258,75 +253,38 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   // Stats logic
   // ==========================
 
-  bool _isUnreceivedAsOf(TransactionModel t, DateTime end) {
-    if (t.date.isAfter(end)) return false;
-
-    final receivedBefore = t.receivedAt != null && !t.receivedAt!.isAfter(end);
-    final cancelledBefore =
-        t.cancelledAt != null && !t.cancelledAt!.isAfter(end);
-
-    return !receivedBefore && !cancelledBefore;
-  }
-
   _AccountStats _buildStatsForAccount(
     Account account,
     Iterable<TransactionModel> allTx,
     _Range current,
     _Range previous,
   ) {
-    final tx = allTx.where((t) => t.accountId == account.id);
+    final tx = allTx.where((t) => t.accountId == account.id).toList();
     final isCompany = account.type == AccountType.company;
 
-    List<TransactionModel> companyItems(
-      CompanyMovementType type,
-      _Range range,
-    ) => tx
-        .where((t) => t.companyMovementType == type && _within(t.date, range))
-        .toList();
+    // نفس منطق المكاتب للشركات أيضًا: الإضافة بتاريخ الإضافة (حتى لو أُلغيت
+    // لاحقًا) والإلغاء بتاريخ الإلغاء، فالحركة التي أُضيفت ثم أُلغيت تُحسب
+    // إضافة وإلغاء معًا.
+    final now = PeriodStats.compute(
+      tx,
+      StatsPeriod(current.start, current.end),
+      company: isCompany,
+    );
+    final prev = PeriodStats.compute(
+      tx,
+      StatsPeriod(previous.start, previous.end),
+      company: isCompany,
+    );
 
-    final addedNow = isCompany
-        ? companyItems(CompanyMovementType.sent, current)
-        : tx.where((t) => _within(t.date, current)).toList();
-    final receivedNow = isCompany
-        ? companyItems(CompanyMovementType.received, current)
-        : tx
-              .where(
-                (t) => t.receivedAt != null && _within(t.receivedAt!, current),
-              )
-              .toList();
-    final cancelledNow = isCompany
-        ? companyItems(CompanyMovementType.sentCancelled, current)
-        : tx
-              .where(
-                (t) =>
-                    t.cancelledAt != null && _within(t.cancelledAt!, current),
-              )
-              .toList();
-    final unreceivedNow = isCompany
-        ? companyItems(CompanyMovementType.receivedCancelled, current)
-        : tx.where((t) => _isUnreceivedAsOf(t, current.end)).toList();
+    final addedNow = now.added;
+    final receivedNow = now.received;
+    final cancelledNow = now.cancelled;
+    final unreceivedNow = now.fourth;
 
-    final addedPrev = isCompany
-        ? companyItems(CompanyMovementType.sent, previous)
-        : tx.where((t) => _within(t.date, previous)).toList();
-    final receivedPrev = isCompany
-        ? companyItems(CompanyMovementType.received, previous)
-        : tx
-              .where(
-                (t) => t.receivedAt != null && _within(t.receivedAt!, previous),
-              )
-              .toList();
-    final cancelledPrev = isCompany
-        ? companyItems(CompanyMovementType.sentCancelled, previous)
-        : tx
-              .where(
-                (t) =>
-                    t.cancelledAt != null && _within(t.cancelledAt!, previous),
-              )
-              .toList();
-    final unreceivedPrev = isCompany
-        ? companyItems(CompanyMovementType.receivedCancelled, previous)
-        : tx.where((t) => _isUnreceivedAsOf(t, previous.end)).toList();
+    final addedPrev = prev.added;
+    final receivedPrev = prev.received;
+    final cancelledPrev = prev.cancelled;
+    final unreceivedPrev = prev.fourth;
 
     return _AccountStats(
       account: account,
@@ -452,6 +410,31 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     if (c4 != 0) return c4;
 
     return a.account.name.compareTo(b.account.name);
+  }
+
+  /// توضيح طريقة حساب الشركات (نفس منطق المكاتب)
+  Widget _companyRuleNote(ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: cs.secondaryContainer.withValues(alpha: .35),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.secondary.withValues(alpha: .20)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline_rounded, size: 18, color: cs.secondary),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              PeriodStats.companyRuleText,
+              style: TextStyle(fontSize: 12.5, height: 1.45),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildHeader(ColorScheme cs, String title, String subtitle) {
@@ -2183,6 +2166,11 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                     ),
 
                                   if (_showHeader) const SizedBox(height: 12),
+
+                                  if (_isCompanyStatsView) ...[
+                                    _companyRuleNote(cs),
+                                    const SizedBox(height: 12),
+                                  ],
 
                                   if (_showQuickStats) ...[
                                     _buildQuickStats(stats, global),

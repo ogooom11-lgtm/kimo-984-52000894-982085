@@ -14,6 +14,7 @@
 
 import 'dart:core';
 import 'amount_text_parser.dart';
+import 'text_tokens.dart' as tt;
 
 /// موضع (سطر، توكن)
 class Position {
@@ -60,6 +61,9 @@ class AmountDetectResult {
   /// جميع القيم المرشحة المميزة بعد التصفية
   final List<double> candidateValues;
 
+  /// هل المبلغ المختار جاء من تعبير لفظي/مركّب (numericPos = أول توكن فيه)؟
+  final bool fromText;
+
   const AmountDetectResult({
     required this.numericPos,
     required this.numericValue,
@@ -67,6 +71,7 @@ class AmountDetectResult {
     required this.hasConflict,
     required this.hasMultipleCandidates,
     required this.candidateValues,
+    this.fromText = false,
   });
 
   @override
@@ -94,6 +99,13 @@ class _AmountCandidate {
     required this.score,
     required this.fromText,
   });
+
+  /// أفضلية: النقاط أولًا، ثم الرقمي على النصي، ثم القيمة الأكبر
+  bool beats(_AmountCandidate other) {
+    if (score != other.score) return score > other.score;
+    if (fromText != other.fromText) return !fromText;
+    return value.abs() > other.value.abs();
+  }
 }
 
 class AmountDetector {
@@ -143,35 +155,8 @@ class AmountDetector {
 
   // ========= تقسيم وتنظيف =========
 
-  static bool _isAsciiDigitCode(int code) => code >= 0x30 && code <= 0x39;
-  static bool _isArabicDigitCode(int code) => code >= 0x0660 && code <= 0x0669;
-  static bool _isDigitCode(int code) =>
-      _isAsciiDigitCode(code) || _isArabicDigitCode(code);
-
-  static String _squashDigitSeparators(String w) {
-    if (w.isEmpty) return w;
-    final sep = RegExp(r'[.,،\-\_\u0640\u066B\u066C]');
-    final out = StringBuffer();
-
-    for (int i = 0; i < w.length; i++) {
-      final ch = w[i];
-      final prev = (i > 0) ? w.codeUnitAt(i - 1) : null;
-      final next = (i + 1 < w.length) ? w.codeUnitAt(i + 1) : null;
-
-      if (sep.hasMatch(ch)) {
-        if (prev != null &&
-            next != null &&
-            _isDigitCode(prev) &&
-            _isDigitCode(next)) {
-          continue;
-        }
-      }
-
-      out.write(ch);
-    }
-
-    return out.toString();
-  }
+  /// نفس منطق شاشة الفقاعات: حذف فواصل الآلاف مع إبقاء الفاصلة العشرية
+  static String _squashDigitSeparators(String w) => tt.squashDigitSeparators(w);
 
   static String _cleanToken(String w) {
     final trimmed = w
@@ -421,6 +406,90 @@ class AmountDetector {
     return false;
   }
 
+  // ========= أنماط أرقام غير مالية =========
+
+  static final RegExp _timeRe = RegExp(
+    r'^[0-9\u0660-\u0669]{1,2}:[0-9\u0660-\u0669]{2}(:[0-9\u0660-\u0669]{2})?$',
+  );
+  static final RegExp _slashBetweenDigitsRe = RegExp(
+    r'[0-9\u0660-\u0669]/[0-9\u0660-\u0669]',
+  );
+
+  /// وقت (10:30) أو تاريخ (12/5 ، 12/5/2025) — ليس مبلغًا
+  static bool _isTimeOrDateToken(String token) {
+    final t = token.trim();
+    if (t.isEmpty) return false;
+    return _timeRe.hasMatch(t) || _slashBetweenDigitsRe.hasMatch(t);
+  }
+
+  static int _trailingZeros(String digits) {
+    var n = 0;
+    for (int i = digits.length - 1; i >= 0 && digits[i] == '0'; i--) {
+      n++;
+    }
+    return n;
+  }
+
+  /// رقم طويل بدون فواصل (هاتف بدون مفتاح دولي/حساب/بطاقة) — ليس مبلغًا.
+  /// الأرقام الكبيرة «المدوّرة» مثل 1000000000 تبقى مبالغ.
+  static bool _isLongIdToken(String token) {
+    final t = token.trim();
+    if (!_isPureDigitsToken(t)) return false;
+    final d = _digitsOnly(t);
+    if (d.length >= 13) return true;
+    return d.length >= 10 && _trailingZeros(d) < 5;
+  }
+
+  /// رقم مشكوك به (8–9 أرقام غير مدوّرة بدون فواصل) قد يكون هاتفًا محليًا:
+  /// يبقى مرشحًا لكن بنقاط أقل.
+  static bool _isSuspectPhoneDigits(String token) {
+    final t = token.trim();
+    if (!_isPureDigitsToken(t)) return false;
+    final d = _digitsOnly(t);
+    return d.length >= 8 && d.length <= 9 && _trailingZeros(d) <= 1;
+  }
+
+  // ========= تعابير لفظية/مركّبة =========
+
+  static const Set<String> _magnitudeWordKeys = {
+    'الف',
+    'الاف',
+    'مليون',
+    'ملايين',
+    'مليار',
+    'مليارات',
+    'طن',
+    'طون',
+  };
+
+  static bool _isMagnitudeWord(String norm) {
+    var k = norm;
+    if (k.startsWith('و') && k.length > 2) {
+      final rest = k.substring(1);
+      if (_magnitudeWordKeys.contains(rest)) k = rest;
+    }
+    return _magnitudeWordKeys.contains(k);
+  }
+
+  static final Expando<Map<String, bool>> _numberWordCaches =
+      Expando<Map<String, bool>>('numberWords');
+
+  /// كلمة عددية بدون أرقام يفهمها محلل المبالغ النصية (خمس، مية، الف، ونص...)
+  static bool _isNumberWord(
+    String token,
+    Map<String, double> customWordValues,
+    Map<String, bool> cache,
+  ) {
+    if (token.isEmpty || _hasDigits(token)) return false;
+    return cache.putIfAbsent(token, () {
+      final r = AmountTextParser.parse(
+        token,
+        customWordValues: customWordValues,
+      );
+      return r.matched && r.value != null;
+    });
+  }
+
   // ========= تحليل رقم مفرد =========
 
   static double? parseAmountToken(String token) {
@@ -572,57 +641,49 @@ class AmountDetector {
         .toSet();
 
     final candidates = <_AmountCandidate>[];
-    double? textValue;
-    Position? textPos;
+    // ذاكرة «هل هذه كلمة عددية؟» تُشارك بين الرسائل ما دامت قيم الكلمات نفسها
+    final numberWordCache = _numberWordCaches[customWordValues] ??=
+        <String, bool>{};
 
-    // 1) كشف التركيبات النصية على مستوى السطر
-    for (int li = 0; li < preparedTokensByLine.length; li++) {
-      final row = preparedTokensByLine[li];
-      if (row.isEmpty) continue;
-
-      final tokens = row.map((e) => e.token).toList();
-      final line = tokens.join(' ');
-
-      if (line.contains('#')) continue;
-      if (tokens.any((t) => _isIgnoredExact(t, ignoredSet))) {
-        // لا نسقط السطر كله، فقط لا نرفع ثقته
+    int keywordBonus(List<String> tokens, int start, int end) {
+      var bonus = 0;
+      for (int back = 1; back <= keywordLookAhead; back++) {
+        final idx = start - back;
+        if (idx >= 0 && _isAmountKeywordExact(tokens[idx], amountKeywordSet)) {
+          bonus += 6;
+          break;
+        }
       }
-
-      final parsedText = AmountTextParser.parse(
-        line,
-        customWordValues: customWordValues,
-      );
-      final txt = parsedText.matched ? parsedText.value : null;
-      if (txt != null && txt > 0) {
-        int score = 5;
-        if (tokens.any((t) => _containsCurrencyHint(t, currencyHints)))
-          score += 3;
-        if (tokens.any((t) => _isAmountKeywordExact(t, amountKeywordSet)))
-          score += 4;
-        if (currencyAnchor != null && currencyAnchor.x == li) score += 2;
-
-        textValue = txt;
-        textPos = row.first.originalPos;
-
-        candidates.add(
-          _AmountCandidate(
-            pos: textPos,
-            value: txt,
-            score: score,
-            fromText: true,
-          ),
-        );
+      for (int fwd = 1; fwd <= keywordLookAhead; fwd++) {
+        final idx = end + fwd;
+        if (idx < tokens.length &&
+            _isAmountKeywordExact(tokens[idx], amountKeywordSet)) {
+          bonus += 3;
+          break;
+        }
       }
+      return bonus;
     }
 
-    // 2) كشف المرشحات الرقمية
+    int anchorBonus(Position pos) {
+      if (currencyAnchor == null || currencyAnchor.x != pos.x) return 0;
+      var bonus = 2;
+      final dist = (currencyAnchor.y - pos.y).abs();
+      if (dist <= 1) {
+        bonus += 3;
+      } else if (dist <= 3) {
+        bonus += 2;
+      } else if (dist <= 5) {
+        bonus += 1;
+      }
+      return bonus;
+    }
+
     for (int li = 0; li < preparedTokensByLine.length; li++) {
       final row = preparedTokensByLine[li];
       if (row.isEmpty) continue;
 
       final tokens = row.map((e) => e.token).toList();
-
-      if (tokens.isEmpty) continue;
       if (tokens.join(' ').contains('#')) continue;
 
       final lineHasKeyword = tokens.any(
@@ -632,6 +693,132 @@ class AmountDetector {
         (t) => _containsCurrencyHint(t, currencyHints),
       );
 
+      // توكن رقمي صالح ليكون جزءًا من مبلغ؟
+      bool isMoneyDigitToken(String t) {
+        if (!_hasDigits(t)) return false;
+        if (t.contains('+') || t.contains('#')) return false;
+        if (_isPhoneLikeToken(t) || _isLongIdToken(t)) return false;
+        if (_isTimeOrDateToken(t)) return false;
+        return parseAmountToken(_normalizeInlineAmountToken(t)) != null;
+      }
+
+      // ---------- 1) التعابير اللفظية/المركّبة (خمسمية، 2 مليون و500 الف) ----------
+      final coveredByText = <int>{};
+      var i = 0;
+      while (i < tokens.length) {
+        bool spanable(int k) {
+          final t = tokens[k];
+          if (t.isEmpty || _isIgnoredExact(t, ignoredSet)) return false;
+          if (_phoneWords.contains(_normalizeArabic(t))) return false;
+          if (isMoneyDigitToken(t)) return true;
+          return _isNumberWord(t, customWordValues, numberWordCache);
+        }
+
+        if (!spanable(i)) {
+          i++;
+          continue;
+        }
+        final start = i;
+        while (i < tokens.length) {
+          if (spanable(i)) {
+            i++;
+            continue;
+          }
+          // «و» وحدها تربط جزأين من نفس المبلغ
+          if (_normalizeArabic(tokens[i]) == 'و' &&
+              i + 1 < tokens.length &&
+              spanable(i + 1)) {
+            i++;
+            continue;
+          }
+          break;
+        }
+        final end = i - 1;
+
+        final digitIdx = <int>[];
+        final magnitudeIdx = <int>[];
+        final quantityIdx = <int>[];
+        for (int k = start; k <= end; k++) {
+          final t = tokens[k];
+          if (_hasDigits(t)) {
+            digitIdx.add(k);
+          } else if (_isMagnitudeWord(_normalizeArabic(_cleanToken(t)))) {
+            magnitudeIdx.add(k);
+          } else if (_isNumberWord(t, customWordValues, numberWordCache)) {
+            quantityIdx.add(k);
+          }
+        }
+
+        // أرقام فقط، أو رقم واحد يتبعه مقدار واحد (500 الف): المرحلة الرقمية تكفي
+        if (quantityIdx.isEmpty &&
+            (magnitudeIdx.isEmpty ||
+                (magnitudeIdx.length == 1 &&
+                    digitIdx.length == 1 &&
+                    magnitudeIdx.first == digitIdx.first + 1))) {
+          continue;
+        }
+
+        final spanText = tokens.sublist(start, end + 1).join(' ');
+        final parsed = AmountTextParser.parse(
+          spanText,
+          customWordValues: customWordValues,
+        );
+        final value = parsed.matched ? parsed.value : null;
+        if (value == null || value <= 0 || value.abs() < 10) continue;
+
+        // كلمة مقدار وحدها (مثل «ألف شكر») تعبير ضعيف
+        final weak = quantityIdx.isEmpty && digitIdx.isEmpty;
+
+        var score = weak ? 1 : 5;
+        final prev = start > 0 ? tokens[start - 1] : null;
+        final next = end + 1 < tokens.length ? tokens[end + 1] : null;
+        var hasContext = false;
+        // للتعبير الضعيف (كلمة مقدار وحدها) لا نعتبر العملة التي تسبقه دليلًا:
+        // «500 دولار ألف شكر».
+        if ((!weak &&
+                prev != null &&
+                _containsCurrencyHint(prev, currencyHints)) ||
+            (next != null && _containsCurrencyHint(next, currencyHints)) ||
+            tokens
+                .sublist(start, end + 1)
+                .any((t) => _containsCurrencyHint(t, currencyHints))) {
+          score += 4;
+          hasContext = true;
+        }
+        final kb = keywordBonus(tokens, start, end);
+        if (kb > 0) hasContext = true;
+        score += kb;
+        if (lineHasCurrency) score += 1;
+        if (lineHasKeyword) score += 1;
+        score += anchorBonus(row[start].originalPos);
+
+        if (weak && !hasContext) continue;
+
+        // أجزاء التعبير المركّب لا تُعرض كمبالغ مستقلة
+        if (!weak && digitIdx.isNotEmpty) {
+          var maxPart = 0.0;
+          for (final k in digitIdx) {
+            final v = parseAmountToken(_normalizeInlineAmountToken(tokens[k]));
+            if (v != null && v.abs() > maxPart) maxPart = v.abs();
+          }
+          if (value.abs() + 1e-9 >= maxPart) {
+            for (int k = start; k <= end; k++) {
+              coveredByText.add(k);
+            }
+          }
+        }
+
+        candidates.add(
+          _AmountCandidate(
+            pos: row[start].originalPos,
+            value: value,
+            score: score,
+            fromText: true,
+          ),
+        );
+      }
+
+      // ---------- 2) المرشحات الرقمية ----------
       if (_lineLooksLikeSplitPhone(tokens) &&
           !lineHasCurrency &&
           !lineHasKeyword) {
@@ -662,7 +849,10 @@ class AmountDetector {
 
         if (stopAfterRangeWord) continue;
         if (seenPhoneWord) continue;
+        if (coveredByText.contains(ti)) continue;
         if (_isPhoneLikeToken(t)) continue;
+        if (_isLongIdToken(t)) continue;
+        if (_isTimeOrDateToken(t)) continue;
 
         final prev = ti > 0 ? tokens[ti - 1] : null;
         final next = ti + 1 < tokens.length ? tokens[ti + 1] : null;
@@ -693,53 +883,31 @@ class AmountDetector {
         int score = 1;
 
         if (_containsCurrencyHint(tokenForParsing, currencyHints)) score += 4;
-        if (prev != null && _containsCurrencyHint(prev, currencyHints))
+        if (prev != null && _containsCurrencyHint(prev, currencyHints)) {
           score += 4;
-        if (next != null && _containsCurrencyHint(next, currencyHints))
+        }
+        if (next != null && _containsCurrencyHint(next, currencyHints)) {
           score += 4;
+        }
 
         if (lineHasCurrency) score += 1;
 
-        if (embeddedMagnitude != null)
+        if (embeddedMagnitude != null) {
           score += 4;
-        else if (next != null && _isMoneyMagnitudeToken(next))
+        } else if (next != null && _isMoneyMagnitudeToken(next)) {
           score += 4;
+        }
         if (prev != null && _isMoneyMagnitudeToken(prev)) score += 2;
 
         // دعم كلمات المبلغ exact فقط
-        for (int back = 1; back <= keywordLookAhead; back++) {
-          final idx = ti - back;
-          if (idx >= 0 &&
-              _isAmountKeywordExact(tokens[idx], amountKeywordSet)) {
-            score += 6;
-            break;
-          }
-        }
-
-        for (int fwd = 1; fwd <= keywordLookAhead; fwd++) {
-          final idx = ti + fwd;
-          if (idx < tokens.length &&
-              _isAmountKeywordExact(tokens[idx], amountKeywordSet)) {
-            score += 3;
-            break;
-          }
-        }
+        score += keywordBonus(tokens, ti, ti);
 
         if (lineHasKeyword) score += 1;
 
-        if (currencyAnchor != null) {
-          if (currencyAnchor.x == row[ti].originalPos.x) {
-            score += 2;
-            final dist = (currencyAnchor.y - row[ti].originalPos.y).abs();
-            if (dist <= 1) {
-              score += 3;
-            } else if (dist <= 3) {
-              score += 2;
-            } else if (dist <= 5) {
-              score += 1;
-            }
-          }
-        }
+        score += anchorBonus(row[ti].originalPos);
+
+        // رقم يشبه هاتفًا محليًا بدون مفتاح: يبقى مرشحًا بنقاط أقل
+        if (_isSuspectPhoneDigits(t)) score -= 2;
 
         candidates.add(
           _AmountCandidate(
@@ -759,54 +927,41 @@ class AmountDetector {
     }
     candidateValues.sort();
 
-    // 4) اختيار أفضل مرشح رقمي
+    // 4) أفضل مرشح إجمالًا (بدل «آخر سطر نصي يفوز»)
+    _AmountCandidate? best;
     _AmountCandidate? bestNumeric;
-    for (final c in candidates.where((e) => !e.fromText)) {
-      if (bestNumeric == null) {
-        bestNumeric = c;
-        continue;
-      }
-
-      if (c.score > bestNumeric.score ||
-          (c.score == bestNumeric.score &&
-              c.value.abs() > bestNumeric.value.abs())) {
-        bestNumeric = c;
+    _AmountCandidate? bestText;
+    for (final c in candidates) {
+      if (best == null || c.beats(best)) best = c;
+      if (c.fromText) {
+        if (bestText == null || c.beats(bestText)) bestText = c;
+      } else {
+        if (bestNumeric == null || c.beats(bestNumeric)) bestNumeric = c;
       }
     }
 
-    // 5) حسم النصي مع الرقمي
-    double? finalNumeric = bestNumeric?.value;
-    Position? finalPos = bestNumeric?.pos;
+    // 5) تعارض حقيقي: نصي ورقمي مختلفان بدون أفضلية واضحة لأحدهما
     bool conflict = false;
-
-    if (finalNumeric != null && textValue != null) {
-      final big = finalNumeric.abs() > textValue.abs()
-          ? finalNumeric
-          : textValue;
-      final small = finalNumeric.abs() > textValue.abs()
-          ? textValue
-          : finalNumeric;
-      final rel = (big - small).abs() / (big == 0 ? 1 : big.abs());
-      conflict = rel >= conflictThreshold;
-
-      if (conflict) {
-        finalNumeric = textValue;
-        finalPos = textPos;
-      }
-    } else if (finalNumeric == null && textValue != null) {
-      finalNumeric = textValue;
-      finalPos = textPos;
+    if (bestText != null && bestNumeric != null) {
+      final a = bestText.value.abs();
+      final b = bestNumeric.value.abs();
+      final big = a > b ? a : b;
+      final rel = (a - b).abs() / (big == 0 ? 1 : big);
+      conflict =
+          rel >= conflictThreshold &&
+          (bestText.score - bestNumeric.score).abs() <= 2;
     }
 
     final hasMultipleCandidates = candidateValues.length >= 2;
 
     return AmountDetectResult(
-      numericPos: finalPos,
-      numericValue: finalNumeric,
-      textValue: textValue,
+      numericPos: best?.pos,
+      numericValue: best?.value,
+      textValue: bestText?.value,
       hasConflict: conflict,
       hasMultipleCandidates: hasMultipleCandidates,
       candidateValues: candidateValues,
+      fromText: best?.fromText ?? false,
     );
   }
 }

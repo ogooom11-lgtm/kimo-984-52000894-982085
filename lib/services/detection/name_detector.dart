@@ -762,6 +762,12 @@ class NameDetector {
     return runs.where((r) => r.length <= 8).toList();
   }
 
+  static final RegExp _letterRe = RegExp(r'[a-zA-Z\u0621-\u064A]');
+
+  /// أسطر لا يمكن أن تحتوي اسمًا: سطر فارغ، أو فيه كلمة «تجاهل السطر»، أو
+  /// لا يحتوي إلا أرقامًا ورموزًا (رقم هاتف/كود مفصول أو غير مفصول).
+  /// ملاحظة: كلمات الهاتف (رقم/هاتف/جوال...) لم تعد تُسقط السطر كاملًا؛ هي
+  /// فواصل توقف الاسم فقط، حتى يُكشف الاسم المكتوب قبلها في نفس السطر.
   static bool _shouldSkipLine(
     List<String> tokens,
     List<String> keys,
@@ -769,19 +775,7 @@ class NameDetector {
   ) {
     if (keys.isEmpty) return true;
     if (keys.any(config.lineIgnored.containsKey)) return true;
-    if (keys.any(phoneWordKeys.contains)) return true;
-    if (tokens.length == 1 && isPhoneLike(tokens.first)) return true;
-    // رقم هاتف مقسوم: +964 000 000 أو 0xx xxx xxx
-    final joined = tokens.join(' ').trim();
-    if (joined.startsWith('+')) {
-      final d = digitsOnly(joined);
-      if (d.length >= 9 && d.length <= 14) return true;
-    }
-    final digitGroups = tokens.where(isAllDigits).toList();
-    if (digitGroups.length >= 2) {
-      final d = digitGroups.map(digitsOnly).join();
-      if (d.length >= 9 && d.length <= 14 && d.startsWith('0')) return true;
-    }
+    if (!tokens.any(_letterRe.hasMatch)) return true;
     return false;
   }
 
