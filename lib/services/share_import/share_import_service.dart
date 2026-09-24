@@ -4,6 +4,7 @@
 // - بناء إعدادات التحويل من إعدادات التطبيق.
 // - تحويل الملف داخل Isolate حتى لا تتجمد الواجهة مع الملفات الكبيرة.
 // - عدّ مرات ذكر كل حساب في النص (لترتيب قائمة اختيار الحساب).
+// - قراءة الملف كجدول لصفحة «مطابقة غير المستلمة».
 // -------------------------------------------------------------
 
 import 'package:flutter/foundation.dart';
@@ -12,9 +13,11 @@ import '../../database_service.dart';
 import '../../models.dart';
 import 'import_converter.dart';
 import 'import_models.dart';
+import 'table_file_reader.dart';
 
 export 'import_converter.dart' show ImportFileConverter;
 export 'import_models.dart';
+export 'table_file_reader.dart';
 
 /// ملخص ما تم استيراده (يُعرض أعلى صفحة تحليل النص)
 class ImportSummary {
@@ -26,12 +29,16 @@ class ImportSummary {
   /// ملفات لم يمكن قراءتها (الاسم: السبب)
   final List<String> errors;
 
+  /// وصف العدد بعد الرقم (مثل: «رسالة للتحليل» أو «صف للمطابقة»)
+  final String countUnit;
+
   const ImportSummary({
     required this.fileNames,
     required this.kindLabel,
     required this.messageCount,
     this.notes = const [],
     this.errors = const [],
+    this.countUnit = 'رسالة للتحليل',
   });
 
   String get title {
@@ -83,6 +90,25 @@ class ShareImportService {
     } catch (_) {
       // احتياط: بعض البيئات لا تسمح بإنشاء Isolate
       return convertImportRequest(request);
+    }
+  }
+
+  /// قراءة ملف كجدول (أعمدة وصفوف كما هي) لصفحة «مطابقة غير المستلمة»
+  static Future<TableFileData> readTable({
+    required List<int> bytes,
+    required String fileName,
+    String? mimeType,
+  }) async {
+    final request = TableFileRequest(
+      bytes: bytes,
+      fileName: fileName,
+      mimeType: mimeType,
+    );
+    try {
+      return await compute(readTableFileRequest, request);
+    } catch (_) {
+      // احتياط: بعض البيئات لا تسمح بإنشاء Isolate
+      return readTableFileRequest(request);
     }
   }
 

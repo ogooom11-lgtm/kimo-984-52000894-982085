@@ -1,6 +1,7 @@
 // lib/widgets/import_sheets.dart
 // -------------------------------------------------------------
 // واجهات استيراد الملفات لتحليل النص:
+// - اختيار ما يُفعل بالملف المشارك: تحليل رسائله أو مطابقة غير المستلمة.
 // - اختيار الحساب الذي سيُحلَّل الملف عليه (مع اقتراح الحسابات المذكورة فيه).
 // - اختيار فترة الرسائل عند مشاركة محادثة واتساب مصدَّرة.
 // - طبقة انتظار أثناء قراءة الملف.
@@ -120,7 +121,7 @@ class ImportSummaryHeader extends StatelessWidget {
               ),
               const SizedBox(height: 3),
               Text(
-                '${summary.kindLabel} • ${summary.messageCount} رسالة للتحليل',
+                '${summary.kindLabel} • ${summary.messageCount} ${summary.countUnit}',
                 style: TextStyle(color: muted, fontSize: 12.5),
               ),
             ],
@@ -131,12 +132,13 @@ class ImportSummaryHeader extends StatelessWidget {
   }
 }
 
-/// يعرض اختيار الحساب لتحليل الملف عليه. يعيد null عند الإلغاء.
+/// يعرض اختيار الحساب لتحليل الملف (أو مطابقته) عليه. يعيد null عند الإلغاء.
 Future<Account?> showImportAccountPicker(
   BuildContext context, {
   required ImportSummary summary,
   required List<Account> accounts,
   Map<int, int> mentions = const {},
+  String title = 'اختر الحساب لتحليل الملف عليه',
 }) {
   return showModalBottomSheet<Account>(
     context: context,
@@ -147,6 +149,7 @@ Future<Account?> showImportAccountPicker(
       summary: summary,
       accounts: accounts,
       mentions: mentions,
+      title: title,
     ),
   );
 }
@@ -155,11 +158,13 @@ class _AccountPickerSheet extends StatefulWidget {
   final ImportSummary summary;
   final List<Account> accounts;
   final Map<int, int> mentions;
+  final String title;
 
   const _AccountPickerSheet({
     required this.summary,
     required this.accounts,
     required this.mentions,
+    required this.title,
   });
 
   @override
@@ -323,9 +328,12 @@ class _AccountPickerSheetState extends State<_AccountPickerSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'اختر الحساب لتحليل الملف عليه',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+              Text(
+                widget.title,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
               ),
               const SizedBox(height: 12),
               Container(
@@ -424,6 +432,263 @@ class _AccountPickerSheetState extends State<_AccountPickerSheet> {
                 onPressed: () => Navigator.pop(context),
                 child: const Text('إلغاء'),
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ما يفعله المستخدم بالملف الذي شاركه مع التطبيق
+enum SharedFileAction { analyze, reconcile }
+
+/// يسأل المستخدم: تحليل رسائل الملف أم مطابقته مع الحوالات غير المستلمة؟
+/// يعرض تحت كل خيار تفاصيله أو سبب عدم توفره. يعيد null عند الإلغاء.
+Future<SharedFileAction?> showSharedFileActionSheet(
+  BuildContext context, {
+  required String fileTitle,
+  required String kindLabel,
+  String? analyzeDetail,
+  String? analyzeUnavailable,
+  String? reconcileDetail,
+  String? reconcileUnavailable,
+}) {
+  return showModalBottomSheet<SharedFileAction>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (ctx) {
+      final theme = Theme.of(ctx);
+      final cs = theme.colorScheme;
+      return Directionality(
+        textDirection: TextDirection.rtl,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'ماذا تريد أن تفعل بالملف؟',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest.withValues(alpha: .45),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: cs.primary.withValues(alpha: .14),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(
+                        Icons.table_chart_rounded,
+                        color: cs.primary,
+                        size: 21,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            fileTitle,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 15,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            kindLabel,
+                            style: TextStyle(
+                              color: theme.textTheme.bodySmall?.color,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              _ActionOption(
+                icon: Icons.auto_awesome_rounded,
+                color: cs.primary,
+                title: 'تحليل الرسائل',
+                subtitle:
+                    'كل صف يصبح رسالة في صفحة تحليل النص لإضافة الحوالات أو تسليمها',
+                detail: analyzeDetail,
+                unavailable: analyzeUnavailable,
+                onTap: () => Navigator.pop(ctx, SharedFileAction.analyze),
+              ),
+              const SizedBox(height: 10),
+              _ActionOption(
+                icon: Icons.compare_arrows_rounded,
+                color: cs.tertiary,
+                title: 'مطابقة غير المستلمة',
+                subtitle:
+                    'قارن الملف مع الحوالات غير المستلمة في الحساب الذي تختاره',
+                detail: reconcileDetail,
+                unavailable: reconcileUnavailable,
+                onTap: () => Navigator.pop(ctx, SharedFileAction.reconcile),
+              ),
+              const SizedBox(height: 6),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إلغاء'),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _ActionOption extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String subtitle;
+  final String? detail;
+
+  /// سبب عدم توفر الخيار (null = متاح)
+  final String? unavailable;
+  final VoidCallback onTap;
+
+  const _ActionOption({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.detail,
+    this.unavailable,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final muted = theme.textTheme.bodySmall?.color;
+    final reason = unavailable;
+    final enabled = reason == null;
+    final c = enabled ? color : cs.outline;
+    return Material(
+      color: c.withValues(alpha: enabled ? .08 : .06),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: enabled ? onTap : null,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [c, Color.lerp(c, Colors.white, .35)!],
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft,
+                  ),
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Icon(icon, color: Colors.white, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                        color: enabled ? null : muted,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: muted,
+                        fontSize: 12.5,
+                        height: 1.35,
+                      ),
+                    ),
+                    if (enabled && detail != null) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: c.withValues(alpha: .13),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          detail!,
+                          style: TextStyle(
+                            color: c,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (reason != null) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.info_outline_rounded,
+                            size: 16,
+                            color: cs.error,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              reason,
+                              style: TextStyle(
+                                color: cs.error,
+                                fontSize: 12,
+                                height: 1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (enabled) ...[
+                const SizedBox(width: 6),
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Icon(Icons.chevron_left_rounded, color: c),
+                ),
+              ],
             ],
           ),
         ),

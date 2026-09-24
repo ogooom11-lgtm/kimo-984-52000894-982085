@@ -35,6 +35,37 @@ bool isOleBytes(List<int> b) =>
     b[6] == 0x1A &&
     b[7] == 0xE1;
 
+/// هل تبدأ البايتات بنص ASCII معيّن (مثل %PDF)
+bool bytesStartWith(List<int> bytes, String ascii) {
+  if (bytes.length < ascii.length) return false;
+  for (var i = 0; i < ascii.length; i++) {
+    if (bytes[i] != ascii.codeUnitAt(i)) return false;
+  }
+  return true;
+}
+
+/// ملف ثنائي وليس نصًا (مع مراعاة ملفات UTF-16)
+bool looksBinaryBytes(List<int> bytes) {
+  final n = bytes.length < 4096 ? bytes.length : 4096;
+  if (n >= 2 &&
+      ((bytes[0] == 0xFF && bytes[1] == 0xFE) ||
+          (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
+    return false; // UTF-16
+  }
+  var zeros = 0, control = 0;
+  for (var i = 0; i < n; i++) {
+    final b = bytes[i];
+    if (b == 0) {
+      zeros++;
+    } else if (b < 0x09 || (b > 0x0D && b < 0x20 && b != 0x1B)) {
+      control++;
+    }
+  }
+  // UTF-16 بدون BOM فيه أصفار كثيرة لكن منتظمة — decodeImportText يعالجه
+  if (zeros > n * 0.3) return false;
+  return zeros > 0 || control > n * 0.05;
+}
+
 class XlsxFormatException implements Exception {
   final String message;
   const XlsxFormatException(this.message);

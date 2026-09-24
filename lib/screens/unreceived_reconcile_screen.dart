@@ -1,14 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
-import 'package:excel/excel.dart' as xls;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/share_import/share_import_service.dart'
+    show ShareImportService, TableFileData, TableFileKind;
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
 
@@ -16,11 +16,21 @@ class UnreceivedReconcileScreen extends StatefulWidget {
   final Account? account;
   final bool enableFuzzy;
 
+  /// ملف شاركه المستخدم مع التطبيق (مقروء مسبقًا) — يُفتح مباشرة
+  /// على خطوة اختيار الأعمدة بدل خطوة رفع الملف
+  final TableFileData? initialTable;
+
   const UnreceivedReconcileScreen({
     super.key,
     this.account,
     this.enableFuzzy = true,
+    this.initialTable,
   });
+
+  /// عدد الأسطر المكتوبة بصيغة «الاسم - المبلغ - العملة» (0 إن لم تكن
+  /// الأسطر بهذه الصيغة) — لعرض خيار المطابقة عند مشاركة ملف نصي
+  static int dashListLength(List<String> lines) =>
+      _UnreceivedReconcileScreenState._parseDashLines(lines)?.length ?? 0;
 
   @override
   State<UnreceivedReconcileScreen> createState() =>
@@ -70,6 +80,9 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   static const String _dashAmountHeader = 'المبلغ';
   static const String _dashCurrencyHeader = 'العملة';
 
+  /// مفتاح مخفي داخل كل صف: رقم الصف الحقيقي في الملف (ليس عمودًا)
+  static const String _rowNumberKey = '\u0000row';
+
   @override
   void initState() {
     super.initState();
@@ -82,6 +95,28 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       start: now.subtract(const Duration(days: 1)),
       end: now,
     );
+
+    // ملف تمت مشاركته مع التطبيق: نفتحه مباشرة (قبل ربط مستمع البحث)
+    final initial = widget.initialTable;
+    if (initial != null) {
+      String? error;
+      try {
+        _applyTable(initial);
+        _currentStep = _isDashFormat ? 2 : 1;
+      } catch (e) {
+        _resetParsedData();
+        error = _errorText(e);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (error != null) {
+          _showSnack('تعذر فتح الملف المشارك: $error', isError: true);
+        } else {
+          _showLoadedSnack(initial);
+        }
+      });
+    }
+
     _resultsSearchCtrl.addListener(() {
       if (mounted) setState(() {});
     });
@@ -108,23 +143,24 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
 
       if (res == null || res.files.isEmpty) return;
 
-      final bytes = res.files.first.bytes;
-      final ext = res.files.first.extension?.toLowerCase() ?? '';
+      final file = res.files.first;
+      final bytes = file.bytes;
       if (bytes == null) return;
 
-      await _parseFile(bytes, ext);
+      final data = await ShareImportService.readTable(
+        bytes: bytes,
+        fileName: file.name,
+      );
       if (!mounted) return;
+      _applyTable(data);
       setState(() {
         // صيغة «الاسم - المبلغ - العملة» تُحدَّد أعمدتها تلقائيًا
         _currentStep = _isDashFormat ? 2 : 1;
       });
-      if (_isDashFormat) {
-        _showSnack(
-          'تم التعرف على ${_rows.length} سطر بصيغة الاسم - المبلغ - العملة',
-        );
-      }
+      _showLoadedSnack(data);
     } catch (e) {
-      _showSnack('خطأ في قراءة الملف: $e', isError: true);
+      if (mounted) _resetParsedData();
+      _showSnack('خطأ في قراءة الملف: ${_errorText(e)}', isError: true);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -158,7 +194,8 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   static final RegExp _hasDigitRe = RegExp(r'[0-9\u0660-\u0669]');
 
   /// يحلل سطرًا بصيغة «الاسم - المبلغ - العملة» (العملة اختيارية)
-  ({String name, String amount, String currency})? _parseDashLine(String line) {
+  static ({String name, String amount, String currency})? _parseDashLine(
+      String line) {
     final raw = line.trim();
     if (raw.isEmpty) return null;
     List<String> splitBy(RegExp re) => raw
@@ -199,10 +236,11 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     return (name: name, amount: amount, currency: currency);
   }
 
-  /// إذا كانت معظم الأسطر بصيغة «الاسم - المبلغ - العملة» يحوّلها إلى صفوف
-  bool _tryLoadDashLines(List<String> lines) {
+  /// أسطر «الاسم - المبلغ - العملة» إذا طابقت الصيغة معظم الأسطر، وإلا null
+  static List<({String name, String amount, String currency})>?
+      _parseDashLines(List<String> lines) {
     final nonEmpty = lines.where((l) => l.trim().isNotEmpty).toList();
-    if (nonEmpty.isEmpty) return false;
+    if (nonEmpty.isEmpty) return null;
     final parsed = <({String name, String amount, String currency})>[];
     for (final l in nonEmpty) {
       final r = _parseDashLine(l);
@@ -210,8 +248,15 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     }
     // نقبل الصيغة إذا طابقت 60% من الأسطر على الأقل (قد يوجد سطر عنوان)
     if (parsed.isEmpty || parsed.length < (nonEmpty.length * 0.6)) {
-      return false;
+      return null;
     }
+    return parsed;
+  }
+
+  /// إذا كانت معظم الأسطر بصيغة «الاسم - المبلغ - العملة» يحوّلها إلى صفوف
+  bool _tryLoadDashLines(List<String> lines) {
+    final parsed = _parseDashLines(lines);
+    if (parsed == null) return false;
 
     _headers
       ..clear()
@@ -305,87 +350,88 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     _showSnack('تم التعرف على ${_rows.length} سطر بصيغة الاسم - المبلغ - العملة');
   }
 
-  Future<void> _parseFile(Uint8List bytes, String ext) async {
+  /// يملأ الأعمدة والصفوف من ملف مقروء (Excel / CSV / نص).
+  /// يرمي FormatException برسالة مفهومة إذا لم يمكن استخدام الملف.
+  void _applyTable(TableFileData data) {
     _resetParsedData();
+    final error = data.error;
+    if (error != null) throw FormatException(error);
 
-    if (ext == 'txt') {
-      final text = utf8.decode(bytes, allowMalformed: true);
-      if (!_tryLoadDashLines(const LineSplitter().convert(text))) {
-        throw const FormatException(
-          'الملف النصي يجب أن يكون بصيغة: الاسم - المبلغ - العملة',
-        );
-      }
-      return;
-    }
-
-    if (ext == 'csv') {
-      final text = utf8.decode(bytes, allowMalformed: true);
-      final lines = const LineSplitter()
-          .convert(text)
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
-
-      if (lines.isEmpty) return;
-
-      // ملف CSV بدون فواصل لكنه بصيغة «الاسم - المبلغ - العملة»
-      final commaLines = lines.where((l) => l.contains(',')).length;
-      if (commaLines < lines.length * 0.5 && _tryLoadDashLines(lines)) {
-        return;
-      }
-
-      _headers.addAll(lines.first.split(',').map((s) => s.trim()));
-      for (int i = 1; i < lines.length; i++) {
-        final cols = lines[i].split(',');
-        final row = <String, dynamic>{};
-        for (int c = 0; c < _headers.length; c++) {
-          row[_headers[c]] = c < cols.length ? cols[c].trim() : null;
+    switch (data.kind) {
+      case TableFileKind.text:
+        if (_tryLoadDashLines(data.lines)) return;
+        if (!data.hasTable) {
+          throw const FormatException(
+            'الملف النصي يجب أن يكون بصيغة: الاسم - المبلغ - العملة',
+          );
         }
-        _rows.add(row);
-      }
-      return;
+        _fillRows(data);
+        break;
+      case TableFileKind.csv:
+        // ملف CSV بدون فواصل لكنه بصيغة «الاسم - المبلغ - العملة»
+        if (data.headers.length < 2 && _tryLoadDashLines(data.lines)) return;
+        _fillRows(data);
+        break;
+      case TableFileKind.excel:
+        // ملف Excel فيه عمود واحد مكتوب بصيغة «الاسم - المبلغ - العملة»
+        if (data.headers.length <= 1 && _tryLoadDashLines(data.lines)) return;
+        _fillRows(data);
+        break;
     }
 
-    final excel = xls.Excel.decodeBytes(bytes);
-    if (excel.tables.isEmpty) return;
-    final table = excel.tables.values.first;
-    if (table.maxRows <= 0) return;
+    if (_headers.isEmpty) {
+      throw const FormatException('الملف لا يحتوي بيانات');
+    }
+    if (_rows.isEmpty) {
+      throw const FormatException('لا توجد صفوف بيانات تحت صف الأعمدة');
+    }
+  }
 
-    _headers.addAll(
-      table.rows.first.map((e) => e?.value?.toString().trim() ?? ''),
-    );
-
-    for (int r = 1; r < table.rows.length; r++) {
-      final cells = table.rows[r];
-      final row = <String, dynamic>{};
+  void _fillRows(TableFileData data) {
+    _headers
+      ..clear()
+      ..addAll(data.headers);
+    _rows.clear();
+    for (int i = 0; i < data.rows.length; i++) {
+      final cells = data.rows[i];
+      final row = <String, dynamic>{
+        _rowNumberKey: i < data.rowNumbers.length ? data.rowNumbers[i] : null,
+      };
       for (int c = 0; c < _headers.length; c++) {
-        row[_headers[c]] = c < cells.length ? cells[c]?.value : null;
+        final v = c < cells.length ? cells[c].trim() : '';
+        row[_headers[c]] = v.isEmpty ? null : v;
       }
       _rows.add(row);
     }
-
-    // ملف Excel فيه عمود واحد مكتوب بصيغة «الاسم - المبلغ - العملة»
-    final nonEmptyHeaders = _headers.where((h) => h.trim().isNotEmpty).toList();
-    if (nonEmptyHeaders.length <= 1) {
-      final firstCol = table.rows
-          .map(
-            (cells) => cells.isEmpty
-                ? ''
-                : (cells.first?.value?.toString() ?? '').trim(),
-          )
-          .where((v) => v.isNotEmpty)
-          .toList();
-      final snapshotHeaders = List<String>.from(_headers);
-      final snapshotRows = List<Map<String, dynamic>>.from(_rows);
-      if (!_tryLoadDashLines(firstCol)) {
-        _headers
-          ..clear()
-          ..addAll(snapshotHeaders);
-        _rows
-          ..clear()
-          ..addAll(snapshotRows);
-      }
+    // جدول أعمدته بالضبط: الاسم | المبلغ | العملة → نحددها تلقائيًا
+    if (_isDashFormat) {
+      _selectedNameCols
+        ..clear()
+        ..add(_dashNameHeader);
+      _selectedAmountCols
+        ..clear()
+        ..add(_dashAmountHeader);
+      _currencyColumn = _dashCurrencyHeader;
     }
   }
+
+  void _showLoadedSnack(TableFileData data) {
+    // صفوف «الاسم - المبلغ - العملة» المقروءة من الأسطر ليس لها رقم صف
+    final fromLines =
+        _rows.isNotEmpty && !_rows.first.containsKey(_rowNumberKey);
+    if (fromLines) {
+      _showSnack(
+        'تم التعرف على ${_rows.length} سطر بصيغة الاسم - المبلغ - العملة',
+      );
+      return;
+    }
+    final sheet = data.sheetCount > 1
+        ? ' (الورقة «${data.sheetName}» من ${data.sheetCount} أوراق)'
+        : '';
+    _showSnack('تمت قراءة ${_rows.length} صف من «${data.fileName}»$sheet');
+  }
+
+  String _errorText(Object e) => e is FormatException ? e.message : '$e';
 
   Future<void> _runReconcile() async {
     if (_loading) return;
@@ -600,7 +646,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           rawName: rawName,
           amounts: parts,
           ref: null,
-          rowNumber: i + 2,
+          rowNumber: (row[_rowNumberKey] as int?) ?? i + 2,
         ),
       );
     }
@@ -1360,6 +1406,13 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
               color: Colors.teal,
               text:
               'يمكن أيضًا قراءة ملفات نصية (TXT/CSV) أو عمود Excel واحد مكتوب بصيغة «الاسم - المبلغ - العملة» في كل سطر، ويتم التعرف على الأعمدة والعملة تلقائيًا.',
+            ),
+            const SizedBox(height: 10),
+            _buildInfoCard(
+              icon: Icons.share_rounded,
+              color: Colors.deepPurple,
+              text:
+              'يمكنك أيضًا مشاركة ملف Excel أو CSV مع التطبيق مباشرة (من واتساب أو مدير الملفات)، ثم اختيار «مطابقة غير المستلمة» والحساب.',
             ),
           ],
         ),

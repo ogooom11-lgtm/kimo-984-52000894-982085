@@ -1,8 +1,10 @@
 // lib/services/share_import/share_import_controller.dart
 // -------------------------------------------------------------
 // استقبال الملفات التي يشاركها المستخدم مع التطبيق (أندرويد):
-// ملف Excel / CSV / نص / محادثة واتساب → قراءة الملف → اختيار الحساب →
-// فتح صفحة «تحليل النص» بالنص الجاهز والحساب المختار.
+// ملف Excel / CSV / نص / محادثة واتساب → قراءة الملف → ثم:
+// - «تحليل الرسائل»: اختيار الحساب → صفحة «تحليل النص» بالنص الجاهز.
+// - «مطابقة غير المستلمة» (ملف جدول واحد): اختيار الحساب → صفحة المطابقة
+//   والملف محمَّل فيها مباشرة.
 // يُشغَّل من الصفحة الرئيسية بعد انتهاء شاشة البداية.
 // -------------------------------------------------------------
 
@@ -15,6 +17,7 @@ import 'package:share_intake/share_intake.dart';
 import '../../database_service.dart';
 import '../../models.dart';
 import '../../screens/parse_text_screen.dart';
+import '../../screens/unreceived_reconcile_screen.dart';
 import '../../widgets/import_sheets.dart';
 import 'share_import_service.dart';
 
@@ -79,6 +82,7 @@ class ShareImportController {
     final options = ShareImportService.optionsFromSettings();
     final multi = item.files.length > 1;
     final conversions = <ImportConversion>[];
+    TableFileData? table;
     final busy = ImportBusyOverlay.show(
       ctx,
       item.files.isEmpty ? 'جارٍ تجهيز النص...' : 'جارٍ قراءة الملف...',
@@ -95,6 +99,14 @@ class ShareImportController {
               options: multi ? options.copyWith(labelSuffix: f.name) : options,
             ),
           );
+          // ملف واحد: نقرؤه أيضًا كجدول لخيار «مطابقة غير المستلمة»
+          if (!multi) {
+            table = await ShareImportService.readTable(
+              bytes: bytes,
+              fileName: f.name,
+              mimeType: f.mimeType,
+            );
+          }
         } catch (e) {
           conversions.add(
             ImportConversion.failure(f.name, 'تعذر فتح الملف: $e'),
@@ -116,7 +128,13 @@ class ShareImportController {
       _cleanup(item);
     }
 
-    if (!conversions.any((c) => c.ok)) {
+    final analyzable = conversions.any((c) => c.ok);
+    final isChat = conversions.any(
+      (c) => c.ok && c.kind == ImportFileKind.whatsapp,
+    );
+    final reconcile = isChat ? null : _reconcileInfo(table);
+
+    if (!analyzable && reconcile == null) {
       ctx = contextOf();
       if (ctx == null || !ctx.mounted) return;
       await _showFailure(ctx, [
@@ -125,6 +143,34 @@ class ShareImportController {
           '${c.fileName}: ${c.error ?? 'لا توجد بيانات قابلة للتحليل'}',
       ]);
       return;
+    }
+
+    // ملف جدول واحد: تحليل رسائله أم مطابقته مع غير المستلمة؟
+    if (reconcile != null) {
+      ctx = contextOf();
+      if (ctx == null || !ctx.mounted) return;
+      final messages = conversions
+          .where((c) => c.ok)
+          .fold<int>(0, (sum, c) => sum + c.messages.length);
+      final analyzeProblem = conversions
+          .map((c) => c.error ?? '')
+          .firstWhere(
+            (e) => e.isNotEmpty,
+            orElse: () => 'لا توجد بيانات قابلة للتحليل',
+          );
+      final action = await showSharedFileActionSheet(
+        ctx,
+        fileTitle: reconcile.table.fileName,
+        kindLabel: reconcile.table.kindLabel,
+        analyzeDetail: analyzable ? '$messages رسالة' : null,
+        analyzeUnavailable: analyzable ? null : analyzeProblem,
+        reconcileDetail: reconcile.detail,
+      );
+      if (action == null) return;
+      if (action == SharedFileAction.reconcile) {
+        await _openReconcile(reconcile, item.errors);
+        return;
+      }
     }
 
     // محادثات واتساب: اختيار فترة الرسائل
@@ -179,6 +225,66 @@ class ShareImportController {
         importSummary: combined.summary,
       ),
     );
+  }
+
+  /// إمكانية مطابقة الملف: جدول بعمودين على الأقل، أو أسطر بصيغة
+  /// «الاسم - المبلغ - العملة» (بنفس ترتيب صفحة المطابقة). null = غير ممكن.
+  ({TableFileData table, int count, String unit, String detail})?
+  _reconcileInfo(TableFileData? t) {
+    if (t == null || !t.ok) return null;
+    if (t.kind == TableFileKind.text || t.headers.length < 2) {
+      final n = UnreceivedReconcileScreen.dashListLength(t.lines);
+      if (n > 0) {
+        return (
+          table: t,
+          count: n,
+          unit: 'سطر للمطابقة',
+          detail: '$n سطر بصيغة الاسم - المبلغ - العملة',
+        );
+      }
+    }
+    if (!t.hasTable) return null;
+    return (
+      table: t,
+      count: t.rows.length,
+      unit: 'صف للمطابقة',
+      detail: '${t.rows.length} صف • ${t.headers.length} أعمدة',
+    );
+  }
+
+  /// اختيار الحساب ثم فتح صفحة «مطابقة غير المستلمة» والملف محمَّل فيها
+  Future<void> _openReconcile(
+    ({TableFileData table, int count, String unit, String detail}) info,
+    List<String> errors,
+  ) async {
+    final accounts = DatabaseService.accountsBox.values.toList();
+    if (accounts.isEmpty) {
+      _snack('لا توجد حسابات بعد — أضف حسابًا ثم شارك الملف من جديد');
+      return;
+    }
+    final table = info.table;
+    final mentions = await ShareImportService.countAccountMentions(
+      table.plainText,
+      accounts,
+    );
+    final ctx = contextOf();
+    if (ctx == null || !ctx.mounted) return;
+    final account = await showImportAccountPicker(
+      ctx,
+      title: 'اختر الحساب لمطابقة الملف عليه',
+      summary: ImportSummary(
+        fileNames: [table.fileName],
+        kindLabel: table.kindLabel,
+        messageCount: info.count,
+        countUnit: info.unit,
+        notes: table.notes,
+        errors: _readableErrors(errors),
+      ),
+      accounts: accounts,
+      mentions: mentions,
+    );
+    if (account == null || contextOf() == null || _disposed) return;
+    openPage(UnreceivedReconcileScreen(account: account, initialTable: table));
   }
 
   void _snack(String message) {

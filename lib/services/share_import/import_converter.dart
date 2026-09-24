@@ -134,13 +134,13 @@ class ImportFileConverter {
         'هذا ملف Excel قديم (xls) أو محمي بكلمة سر — افتحه واحفظه بصيغة xlsx ثم شاركه من جديد',
       );
     }
-    if (_startsWith(bytes, '%PDF')) {
+    if (bytesStartWith(bytes, '%PDF')) {
       return ImportConversion.failure(
         fileName,
         'ملفات PDF غير مدعومة للتحليل — شارك ملف Excel أو CSV أو نص',
       );
     }
-    if (_looksBinary(bytes)) {
+    if (looksBinaryBytes(bytes)) {
       return ImportConversion.failure(fileName, unsupportedMessage);
     }
 
@@ -213,35 +213,6 @@ class ImportFileConverter {
       messages: c.messages,
       notes: ['من داخل الملف المضغوط: ${entry.name}', ...c.notes],
     );
-  }
-
-  static bool _startsWith(List<int> bytes, String ascii) {
-    if (bytes.length < ascii.length) return false;
-    for (var i = 0; i < ascii.length; i++) {
-      if (bytes[i] != ascii.codeUnitAt(i)) return false;
-    }
-    return true;
-  }
-
-  static bool _looksBinary(List<int> bytes) {
-    final n = bytes.length < 4096 ? bytes.length : 4096;
-    if (n >= 2 &&
-        ((bytes[0] == 0xFF && bytes[1] == 0xFE) ||
-            (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
-      return false; // UTF-16
-    }
-    var zeros = 0, control = 0;
-    for (var i = 0; i < n; i++) {
-      final b = bytes[i];
-      if (b == 0) {
-        zeros++;
-      } else if (b < 0x09 || (b > 0x0D && b < 0x20 && b != 0x1B)) {
-        control++;
-      }
-    }
-    // UTF-16 بدون BOM فيه أصفار كثيرة لكن منتظمة — decodeImportText يعالجه
-    if (zeros > n * 0.3) return false;
-    return zeros > 0 || control > n * 0.05;
   }
 
   // ====================== النصوص ======================
