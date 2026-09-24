@@ -17,6 +17,7 @@ import '../services/detection/text_tokens.dart' as tt;
 import '../services/detection/message_noise.dart';
 import '../services/detection/receipt_extractor.dart';
 import '../services/detection/segment_splitter.dart';
+import '../services/detection/receive_matching.dart' as rm;
 import '../services/operation_log_service.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
@@ -49,8 +50,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
   // الحركات (المضافة فقط كبداية للترشيح)
   late List<TransactionModel> _addedOnly;
-  late _PendingIndex _pending;
+  final Map<int, TransactionModel> _pendingById = {};
+  late rm.PendingNameIndex _pending;
   late final ReceiptExtractor _extractor;
+  late final rm.CurrencyMatcher _currency;
 
   // تحليل الرسائل يتم على دفعات مع شريط تقدم حتى لا تتجمد الواجهة
   bool _building = true;
@@ -90,7 +93,14 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     final all = DatabaseService.getTransactionsForAccount(widget.account.id);
     _addedOnly = all.where((t) => t.status == TransactionStatus.added).toList()
       ..sort((a, b) => b.date.compareTo(a.date));
-    _pending = _PendingIndex(_addedOnly);
+    for (final t in _addedOnly) {
+      _pendingById[t.id] = t;
+    }
+    _pending = rm.PendingNameIndex({
+      for (final t in _addedOnly) t.id: t.beneficiary,
+    });
+    // الرموز المترادفة في الإعدادات ($ / USD / دولار) تُعتبر عملة واحدة
+    _currency = rm.CurrencyMatcher(_currencyMap);
 
     _extractor = ReceiptExtractor(
       nameConfig: _nameConfig,
@@ -129,6 +139,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         },
         isCancelled: () => !mounted,
       );
+      // الاختيار التلقائي لكل الفقاعات دفعة واحدة بعد تحليلها كلها
+      if (mounted) _autoAssign();
     } finally {
       if (mounted) {
         _progress.value = null;
@@ -205,13 +217,17 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     return st.selectedTxIds.first;
   }
 
-  bool _isTxSelectedInAnotherBubble(_BubbleState current, int txId) {
+  /// الفقاعة الأخرى التي تحدد هذه الحركة حاليًا (أو null)
+  _BubbleState? _ownerOf(_BubbleState current, int txId) {
     for (final b in _bubbles) {
       if (identical(b, current)) continue;
-      if (b.selectedTxIds.contains(txId)) return true;
+      if (b.selectedTxIds.contains(txId)) return b;
     }
-    return false;
+    return null;
   }
+
+  bool _isTxSelectedInAnotherBubble(_BubbleState current, int txId) =>
+      _ownerOf(current, txId) != null;
 
   void _selectSingleCandidate(_BubbleState st, int txId) {
     if (st.isReadOnly) {
@@ -224,20 +240,31 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       return;
     }
 
-    if (_isTxSelectedInAnotherBubble(st, txId)) {
-      _showSnack(
-        icon: Icons.lock_outline,
-        text: 'هذه الحركة محددة بالفعل في فقاعة أخرى، لا يمكن تحديدها هنا.',
-        color: Theme.of(context).colorScheme.error,
-      );
-      return;
+    final owner = _ownerOf(st, txId);
+    if (owner != null) {
+      if (owner.selectionMode != _SelectionMode.auto) {
+        _showSnack(
+          icon: Icons.lock_outline,
+          text: 'هذه الحركة محددة يدويًا في فقاعة أخرى، لا يمكن تحديدها هنا.',
+          color: Theme.of(context).colorScheme.error,
+        );
+        return;
+      }
+      // كانت مختارة تلقائيًا في فقاعة أخرى: الاختيار اليدوي يتقدّم عليها،
+      // والفقاعة الأخرى يُعاد اختيارها تلقائيًا
+      owner.selectedTxIds.remove(txId);
     }
 
     st.selectedTxIds
       ..clear()
       ..add(txId);
+    // اختيار يدوي: لا يغيّره الاختيار التلقائي بعد الآن
+    st.selectionMode = _SelectionMode.manual;
+    st.hasAmbiguousExactMatches = false;
+    st.autoNote = null;
 
-    _recomputeWarningsAndReady(st);
+    // الحركة التي تركها هذا الاختيار قد تكون المطابقة لفقاعة أخرى
+    _autoAssign();
     setState(() {});
   }
 
@@ -245,7 +272,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     if (st.isReadOnly) return;
 
     st.selectedTxIds.remove(txId);
-    _recomputeWarningsAndReady(st);
+    // أزال المستخدم الاختيار: لا نعيد اختيار شيء لهذه الفقاعة تلقائيًا
+    // (حتى يعدّل اسمها أو مبلغها)
+    st.selectionMode = _SelectionMode.cleared;
+    st.hasAmbiguousExactMatches = false;
+    st.autoNote = null;
+    _autoAssign();
     setState(() {});
   }
 
@@ -319,28 +351,66 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     return st.detectedName?.trim() ?? '';
   }
 
-  /// هل [needle] يظهر كتسلسل متصل داخل [hay]؟
-  static bool _containsSeq(List<String> hay, List<String> needle) {
-    if (needle.isEmpty || needle.length > hay.length) return false;
-    for (int i = 0; i + needle.length <= hay.length; i++) {
-      var ok = true;
-      for (int j = 0; j < needle.length; j++) {
-        if (hay[i + j] != needle[j]) {
-          ok = false;
-          break;
-        }
+  /// مدى مطابقة مبلغ الحركة وعملتها لمبلغ الرسالة وعملتها: نقارن المبلغ الأول،
+  /// والثاني (بعملته)، ومجموعهما إن كانا بنفس العملة، ونعتمد الأقرب.
+  /// العملة متوافقة إلا إذا عُرفت العملتان وكانتا مختلفتين، والرموز المترادفة
+  /// في الإعدادات ($ / USD / دولار) عملة واحدة.
+  _AmountFit _amountFit(
+    TransactionModel tx,
+    double? amount,
+    String? messageKey,
+  ) {
+    final parts = <_AmountPart>[_AmountPart(tx.amount, tx.currency, 0)];
+    if (amount != null && tx.hasSecondAmount) {
+      final second = tx.secondAmount!;
+      final secondCurrency = _secondCurrencyOf(tx);
+      parts.add(_AmountPart(second, secondCurrency, 1));
+      if (_currency.compare(tx.currency, secondCurrency) != false) {
+        parts.add(_AmountPart(tx.amount + second, tx.currency, 2));
       }
-      if (ok) return true;
     }
-    return false;
+    _AmountFit? best;
+    for (final p in parts) {
+      final cmp = _currency.compare(p.currency, messageKey);
+      final fit = _AmountFit(
+        delta: amount == null ? 0.0 : (p.value - amount).abs(),
+        currencyOk: cmp != false,
+        currencyExact: cmp == true,
+        part: p.part,
+      );
+      if (best == null || fit.betterThan(best)) best = fit;
+    }
+    return best!;
   }
 
-  /// العملة متوافقة إلا إذا عُرفت العملتان وكانتا مختلفتين
-  bool _currencyCompatible(TransactionModel tx, String? messageKey) {
-    if (messageKey == null) return true;
-    final txKey = _extractor.currencyKeyOf(tx.currency);
-    if (txKey == null) return true;
-    return txKey == messageKey;
+  String _secondCurrencyOf(TransactionModel tx) {
+    final c = tx.secondCurrency?.trim() ?? '';
+    return c.isEmpty ? tx.currency : c;
+  }
+
+  /// مبلغ الحركة للعرض (مع المبلغ الثاني إن وُجد)
+  String _txAmountText(TransactionModel tx) {
+    final first = '${_formatAmount(tx.amount)} ${tx.currency}';
+    if (!tx.hasSecondAmount) return first;
+    return '$first + ${_formatAmount(tx.secondAmount!)} ${_secondCurrencyOf(tx)}';
+  }
+
+  /// مفتاح «التوأم»: حركات بنفس الاسم والمبلغ والعملة تمامًا
+  String _twinKeyOf(TransactionModel tx) {
+    final b = StringBuffer()
+      ..write(_pending.fullKeyOf(tx.id))
+      ..write('|')
+      ..write(tx.amount.toStringAsFixed(4))
+      ..write('|')
+      ..write(_currency.canonicalOf(tx.currency));
+    if (tx.hasSecondAmount) {
+      b
+        ..write('|')
+        ..write(tx.secondAmount!.toStringAsFixed(4))
+        ..write('|')
+        ..write(_currency.canonicalOf(_secondCurrencyOf(tx)));
+    }
+    return b.toString();
   }
 
   String _currencyLabel(String? key) {
@@ -348,8 +418,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     return _currencyMap[key] ?? key;
   }
 
-  /// درجات المطابقة: 3 = الاسم مطابق تمامًا ، 2 = اسم الحركة ظاهر في الرسالة أو
-  /// الاسم جزء متصل من اسم الحركة (أو العكس) ، 1 = كلمتان مشتركتان على الأقل.
+  /// يعيد حساب مرشحي الفقاعة. درجات تطابق الاسم: 3 = مطابق تمامًا ،
+  /// 2 = اسم الحركة ظاهر في الرسالة أو جزء متصل من الاسم (أو العكس) ،
+  /// 1 = كلمتان مشتركتان على الأقل. المطابقة «المؤكدة» = درجة 2 أو 3 مع نفس
+  /// المبلغ وعملة متوافقة. الاختيار نفسه يتم في [_autoAssign].
   void _refreshCandidates(_BubbleState st) {
     if (st.isReadOnly) return;
 
@@ -358,83 +430,46 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     st.selectedTxIds.clear();
     st.candidates.clear();
     st.hasAmbiguousExactMatches = false;
+    st.autoNote = null;
+    st.selectionMode = _SelectionMode.auto;
     st.amountChosenByMatch = false;
     st.amount = st.manualAmount ?? st.detectedAmount;
 
-    final name = _effectiveName(st);
-    final nameKeys = tt
-        .tokensFromLine(name)
-        .map(tt.matchKey)
-        .where((k) => k.isNotEmpty)
-        .toList();
-
-    final rankById = <int, int>{};
-    final txById = <int, TransactionModel>{};
-    void bump(TransactionModel tx, int rank) {
-      txById[tx.id] = tx;
-      if ((rankById[tx.id] ?? 0) < rank) rankById[tx.id] = rank;
-    }
-
-    if (nameKeys.isNotEmpty) {
-      for (final tx in _pending.byFull[nameKeys.join(' ')] ?? const []) {
-        bump(tx, 3);
-      }
-      final overlap = <int, int>{};
-      for (final k in nameKeys.toSet()) {
-        for (final tx in _pending.byToken[k] ?? const <TransactionModel>[]) {
-          final keys = _pending.keysById[tx.id]!;
-          if (_containsSeq(keys, nameKeys) || _containsSeq(nameKeys, keys)) {
-            bump(tx, 2);
-          } else {
-            overlap[tx.id] = (overlap[tx.id] ?? 0) + 1;
-            if (overlap[tx.id]! >= 2) bump(tx, 1);
-          }
-        }
-      }
-    }
-
-    // اسم الحركة ظاهر حرفيًا في نص الرسالة (حتى لو لم يُكتشف الاسم)
     final ex = st.extraction;
-    if (ex != null) {
-      for (final line in ex.lines) {
-        final keys = line.tokens.map(tt.matchKey).toList();
-        for (int p = 0; p < keys.length; p++) {
-          final list = _pending.byFirst[keys[p]];
-          if (list == null) continue;
-          for (final tx in list) {
-            final txKeys = _pending.keysById[tx.id]!;
-            if (p + txKeys.length > keys.length) continue;
-            var ok = true;
-            for (int j = 1; j < txKeys.length; j++) {
-              if (keys[p + j] != txKeys[j]) {
-                ok = false;
-                break;
-              }
-            }
-            if (ok) bump(tx, 2);
-          }
-        }
-      }
-    }
+    final matches = _pending.match(
+      nameKeys: rm.nameKeysOf(_effectiveName(st)),
+      lineKeys: [
+        if (ex != null)
+          for (final line in ex.lines) rm.nameKeysOfTokens(line.tokens),
+      ],
+    );
 
-    const double tol = 0.0001;
+    // بين الحركات المتطابقة تمامًا نفضّل ما أُضيف قبل وقت الرسالة
+    final latest = st.segment.timestamp?.add(const Duration(minutes: 1));
 
     void buildCandidates() {
       st.candidates.clear();
-      final hasAmount = st.amount != null;
-      final amount = st.amount ?? 0.0;
-      rankById.forEach((id, rank) {
-        final tx = txById[id]!;
-        final delta = hasAmount ? (tx.amount - amount).abs() : 0.0;
-        final currencyOk = _currencyCompatible(tx, st.currencyKey);
-        final exact = hasAmount && delta <= tol && rank >= 2 && currencyOk;
+      matches.forEach((id, m) {
+        final tx = _pendingById[id];
+        if (tx == null) return;
+        final fit = _amountFit(tx, st.amount, st.currencyKey);
+        final exact = st.amount != null && fit.matches && m.tier >= 2;
         st.candidates.add(
           _Candidate(
             tx: tx,
-            delta: delta,
+            delta: fit.delta,
             exact: exact,
-            rank: rank,
-            currencyOk: currencyOk,
+            rank: m.tier,
+            currencyOk: fit.currencyOk,
+            amountPart: fit.part,
+            pick: rm.AutoPick(
+              txId: tx.id,
+              name: m,
+              currencyExact: fit.currencyExact,
+              twinKey: _twinKeyOf(tx),
+              beforeMessage: latest == null || !tx.date.isAfter(latest),
+              dateMillis: tx.date.millisecondsSinceEpoch,
+            ),
           ),
         );
       });
@@ -442,54 +477,132 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
     buildCandidates();
 
-    // الرسالة فيها أكثر من رقم: نعتمد الرقم الذي يطابق حركة معلقة
+    // الرسالة فيها أكثر من رقم: نعتمد الرقم الذي يطابق حركة مضافة (الأقوى اسمًا)
     if (st.manualAmount == null &&
         !st.candidates.any((c) => c.exact) &&
         st.amountCandidateValues.length > 1) {
+      double? bestValue;
+      _Candidate? bestHit;
       for (final v in st.amountCandidateValues) {
-        if (st.amount != null && (v - st.amount!).abs() <= tol) continue;
-        final hit = st.candidates.any(
-          (c) => c.rank >= 2 && c.currencyOk && (c.tx.amount - v).abs() <= tol,
-        );
-        if (hit) {
-          st.amount = v;
-          st.amountChosenByMatch = true;
-          buildCandidates();
-          break;
+        if (st.amount != null && (v - st.amount!).abs() <= _AmountFit.tol) {
+          continue;
         }
+        for (final c in st.candidates) {
+          if (c.rank < 2) continue;
+          if (!_amountFit(c.tx, v, st.currencyKey).matches) continue;
+          if (bestHit == null ||
+              rm.AutoPick.compareQuality(c.pick, bestHit.pick) > 0) {
+            bestHit = c;
+            bestValue = v;
+          }
+        }
+      }
+      if (bestValue != null) {
+        st.amount = bestValue;
+        st.amountChosenByMatch = true;
+        buildCandidates();
       }
     }
 
+    _sortCandidates(st);
+    _recomputeWarningsAndReady(st);
+  }
+
+  /// المؤكدة أولًا (الأقوى ثم الأقدم، بنفس ترتيب الاختيار التلقائي)، ثم البقية
+  /// حسب درجة الاسم وفرق المبلغ والأحدث.
+  void _sortCandidates(_BubbleState st) {
     st.candidates.sort((a, b) {
       if (a.exact != b.exact) return a.exact ? -1 : 1;
+      if (a.exact) {
+        final q = rm.AutoPick.compareQuality(b.pick, a.pick);
+        if (q != 0) return q;
+        return rm.AutoPick.compareOrder(a.pick, b.pick);
+      }
       final r = b.rank.compareTo(a.rank);
       if (r != 0) return r;
       final d = a.delta.compareTo(b.delta);
       if (d != 0) return d;
       return b.tx.date.compareTo(a.tx.date);
     });
+  }
 
-    // اختيار تلقائي فقط إذا كانت هناك مطابقة مؤكدة واحدة أفضل من غيرها
-    final autoExact = st.candidates.where((c) {
-      if (!c.exact) return false;
-      if (c.tx.status == TransactionStatus.received) return false;
-      if (_isTxSelectedInAnotherBubble(st, c.tx.id)) return false;
-      return true;
-    }).toList();
+  /// إعادة حساب مرشحي فقاعة ثم إعادة الاختيار التلقائي لكل الفقاعات.
+  void _refreshAndAssign(_BubbleState st) {
+    _refreshCandidates(st);
+    _autoAssign();
+  }
 
-    if (autoExact.length == 1) {
-      st.selectedTxIds.add(autoExact.first.tx.id);
-    } else if (autoExact.length > 1) {
-      final topRank = autoExact.first.rank;
-      final top = autoExact.where((c) => c.rank == topRank).toList();
-      if (top.length == 1) {
-        st.selectedTxIds.add(top.first.tx.id);
-      } else {
-        st.hasAmbiguousExactMatches = true;
+  /// الاختيار التلقائي لكل الفقاعات دفعة واحدة:
+  /// - المطابقة المؤكدة (نفس الاسم ونفس المبلغ) تُختار تلقائيًا دائمًا.
+  /// - عند وجود أكثر من حركة متطابقة تمامًا (نفس الاسم والمبلغ والعملة)
+  ///   تُختار الأقدم، وتأخذ الرسالة التالية الحركة التالية.
+  /// - الأقوى مطابقة يسبق على نفس الحركة، ولا تنزل فقاعة إلى مرشح أضعف إذا
+  ///   كانت أفضل مطابقة لها محجوزة (رسالة مكررة مثلًا).
+  /// - الاختيار اليدوي لا يُلمس، والفقاعة التي أزال المستخدم اختيارها لا يُعاد
+  ///   اختيار شيء لها حتى يعدّل اسمها أو مبلغها.
+  void _autoAssign() {
+    final reserved = <int>{};
+    final autoBubbles = <_BubbleState>[];
+    final requests = <rm.AutoSelectRequest>[];
+    for (final b in _bubbles) {
+      if (b.isReadOnly) continue;
+      if (b.selectionMode != _SelectionMode.auto) {
+        reserved.addAll(b.selectedTxIds);
+        continue;
       }
+      final picks = <rm.AutoPick>[];
+      for (final c in b.candidates) {
+        if (!c.exact) continue;
+        picks.add(c.pick);
+        // المستلمة/الملغاة تبقى ضمن «الأفضل» حتى لا ننزل لمرشح أضعف، لكنها لا تُختار
+        if (c.tx.status != TransactionStatus.added) reserved.add(c.tx.id);
+      }
+      autoBubbles.add(b);
+      requests.add(
+        rm.AutoSelectRequest(
+          picks: picks,
+          previous: b.selectedTxIds.isEmpty ? null : b.selectedTxIds.first,
+        ),
+      );
     }
 
-    _recomputeWarningsAndReady(st);
+    final decisions = rm.autoSelect(requests, reserved: reserved);
+    for (int i = 0; i < autoBubbles.length; i++) {
+      final b = autoBubbles[i];
+      final d = decisions[i];
+      b.selectedTxIds.clear();
+      if (d.txId != null) b.selectedTxIds.add(d.txId!);
+      b.hasAmbiguousExactMatches = d.outcome == rm.AutoSelectOutcome.ambiguous;
+      b.autoNote = _autoNoteFor(d);
+    }
+
+    final owners = <int, _BubbleState>{};
+    for (final b in _bubbles) {
+      for (final id in b.selectedTxIds) {
+        owners[id] = b;
+      }
+    }
+    for (final b in _bubbles) {
+      if (!b.isReadOnly) _recomputeWarningsAndReady(b, owners: owners);
+    }
+  }
+
+  String? _autoNoteFor(rm.AutoSelectDecision d) {
+    switch (d.outcome) {
+      case rm.AutoSelectOutcome.selected:
+        if (d.twins <= 1) return null;
+        final what = d.twins == 2
+            ? 'حركتان مضافتان'
+            : (d.twins <= 10
+                  ? '${d.twins} حركات مضافة'
+                  : '${d.twins} حركة مضافة');
+        return 'توجد $what بنفس الاسم والمبلغ تمامًا، فاختيرت الأقدم المتاحة تلقائيًا — يمكنك تغييرها.';
+      case rm.AutoSelectOutcome.bestTaken:
+        return 'المطابقة الأنسب لهذه الرسالة محددة في فقاعة أخرى أو مستلمة مسبقًا (قد تكون الرسالة مكررة)، لذلك لم يُختر بديل أضعف تلقائيًا.';
+      case rm.AutoSelectOutcome.ambiguous:
+      case rm.AutoSelectOutcome.none:
+        return null;
+    }
   }
 
   /// اعتماد اسم من الرسالة (فهارس دقيقة) — من الضغط على كلمة أو من الاقتراحات
@@ -503,7 +616,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       ..clear()
       ..addAll(idxs.map((ti) => _TokPos(li, ti)));
     st.nameController.text = text;
-    _refreshCandidates(st);
+    _refreshAndAssign(st);
     setState(() {});
   }
 
@@ -519,7 +632,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     st.amountController.text = st.manualAmount == null
         ? ''
         : _formatAmount(st.manualAmount!);
-    _refreshCandidates(st);
+    _refreshAndAssign(st);
     setState(() {});
   }
 
@@ -570,7 +683,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     _applyNameTokens(st, li, span);
   }
 
-  void _recomputeWarningsAndReady(_BubbleState st) {
+  void _recomputeWarningsAndReady(
+    _BubbleState st, {
+    Map<int, _BubbleState>? owners,
+  }) {
     st.warningTexts.clear();
     if (st.isReadOnly) {
       st.ready = false;
@@ -608,7 +724,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
     if (st.hasAmbiguousExactMatches) {
       st.warningTexts.add(
-        'يوجد أكثر من تطابق مؤكد لهذه الفقاعة، لذلك لم يتم تحديد أي نتيجة تلقائيًا. اختر واحدة يدويًا.',
+        'يوجد أكثر من تطابق مؤكد بنفس القوة لأسماء مختلفة، لذلك لم يتم تحديد أي نتيجة تلقائيًا. اختر الصحيحة يدويًا.',
       );
     }
 
@@ -623,7 +739,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       }
       final tx = match.first.tx;
 
-      if (_isTxSelectedInAnotherBubble(st, id)) {
+      final lockedElsewhere = owners == null
+          ? _isTxSelectedInAnotherBubble(st, id)
+          : (owners[id] != null && !identical(owners[id], st));
+      if (lockedElsewhere) {
         st.warningTexts.add(
           'هذه الحركة محددة في فقاعة أخرى، لذلك تم منع استخدامها هنا.',
         );
@@ -642,13 +761,14 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         );
       }
 
-      if (st.amount != null && (tx.amount - st.amount!).abs() > tol) {
+      final fit = _amountFit(tx, st.amount, st.currencyKey);
+      if (st.amount != null && fit.delta > tol) {
         st.warningTexts.add(
           'تحذير: اختلاف مبلغ مع "${tx.beneficiary}" (${_formatAmount(tx.amount)} ≠ ${_formatAmount(st.amount!)}).',
         );
       }
 
-      if (!_currencyCompatible(tx, st.currencyKey)) {
+      if (!fit.currencyOk) {
         st.warningTexts.add(
           'تحذير: عملة الحركة "${tx.beneficiary}" (${tx.currency}) تختلف عن عملة الرسالة (${_currencyLabel(st.currencyKey)}).',
         );
@@ -1921,8 +2041,16 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                                   children: [
                                     if (selectedCount > 0)
                                       _StatePill(
-                                        text: 'مختارة: $selectedCount',
-                                        icon: Icons.checklist,
+                                        text:
+                                            st.selectionMode ==
+                                                _SelectionMode.auto
+                                            ? 'مختارة تلقائيًا'
+                                            : 'مختارة يدويًا',
+                                        icon:
+                                            st.selectionMode ==
+                                                _SelectionMode.auto
+                                            ? Icons.auto_awesome_outlined
+                                            : Icons.checklist,
                                         color: Colors.green.shade700,
                                       ),
                                     if (st.isReadOnly)
@@ -2107,6 +2235,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             setState(() {
               _bubbles.remove(st);
               _removedBubbles.add(st);
+              // حركات هذه الفقاعة أصبحت متاحة لغيرها
+              _autoAssign();
             });
             _showSnack(
               icon: Icons.remove_circle_outline,
@@ -2128,7 +2258,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             onPressed: st.isReadOnly
                 ? null
                 : () {
-                    _refreshCandidates(st);
+                    _refreshAndAssign(st);
                     setState(() {});
                   },
             icon: const Icon(Icons.refresh_rounded),
@@ -2493,7 +2623,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                             final typed = st.nameController.text.trim();
                             st.manualName = typed.isEmpty ? null : typed;
                             st.manualNameTokens.clear();
-                            _refreshCandidates(st);
+                            _refreshAndAssign(st);
                             setState(() {});
                           },
                         ),
@@ -2507,7 +2637,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                       st.manualName = null;
                       st.manualNameTokens.clear();
                       st.nameController.clear();
-                      _refreshCandidates(st);
+                      _refreshAndAssign(st);
                       setState(() {});
                     },
               icon: const Icon(Icons.undo),
@@ -2537,6 +2667,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                 text: 'لم يتم اختيار أي حركة.',
               )
             : _selectedSummary(st),
+        if (st.autoNote != null) ...[
+          const SizedBox(height: 8),
+          _infoTile(icon: Icons.auto_awesome_outlined, text: st.autoNote!),
+        ],
 
         const SizedBox(height: 14),
 
@@ -2718,9 +2852,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       padding: const EdgeInsets.all(10),
       child: Column(
         children: items.map((c) {
-          final delta = (st.amount != null)
-              ? (c.tx.amount - st.amount!).abs()
-              : null;
+          final delta = (st.amount != null) ? c.delta : null;
           final err = _lastErrorByTxId[c.tx.id];
           final isCancelled = c.tx.status == TransactionStatus.cancelled;
 
@@ -2735,11 +2867,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                       ? null
                       : (_) => _selectSingleCandidate(st, c.tx.id),
                 ),
-                title: '${c.tx.beneficiary} • ${c.tx.amount} ${c.tx.currency}',
+                title: '${c.tx.beneficiary} • ${_txAmountText(c.tx)}',
                 subtitle:
                     'الحالة: ${_statusLabel(c.tx.status)}'
                     '${delta != null && delta > 0 ? ' • Δ ${delta.toStringAsFixed(2)}' : ''}'
-                    ' • ${_formatTxDateTime(c.tx.date)}',
+                    ' • ${_formatTxDateTime(c.tx.date)}'
+                    '${st.selectionMode == _SelectionMode.auto ? ' • اختيار تلقائي' : ''}',
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -2833,13 +2966,17 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   Widget _candidateRow(_BubbleState st, _Candidate c) {
     final cs = Theme.of(context).colorScheme;
     final selected = st.selectedTxIds.contains(c.tx.id);
-    final delta = (st.amount != null) ? (c.tx.amount - st.amount!).abs() : 0.0;
+    final delta = (st.amount != null) ? c.delta : 0.0;
     final err = _lastErrorByTxId[c.tx.id];
 
     final isReceived = c.tx.status == TransactionStatus.received;
     final isCancelled = c.tx.status == TransactionStatus.cancelled;
-    final lockedByAnother = _isTxSelectedInAnotherBubble(st, c.tx.id);
-    final disabled = st.isReadOnly || isReceived || lockedByAnother;
+    final owner = _ownerOf(st, c.tx.id);
+    final lockedByAnother = owner != null;
+    // المختارة تلقائيًا في فقاعة أخرى يمكن نقلها إلى هنا باختيارها يدويًا
+    final movable = owner != null && owner.selectionMode == _SelectionMode.auto;
+    final disabled =
+        st.isReadOnly || isReceived || (lockedByAnother && !movable);
     final accent = selected
         ? cs.primary
         : (c.exact ? Colors.green.shade700 : cs.outline);
@@ -2898,7 +3035,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                             borderRadius: BorderRadius.circular(999),
                           ),
                           child: Text(
-                            '${c.tx.amount} ${c.tx.currency}',
+                            _txAmountText(c.tx),
                             style: TextStyle(
                               fontWeight: FontWeight.w900,
                               color: selected ? cs.primary : null,
@@ -2929,7 +3066,15 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                         if (c.exact)
                           _TinyPill(
                             icon: Icons.verified_outlined,
-                            text: 'مؤكدة',
+                            text: c.rank >= 3 ? 'مطابق تمامًا' : 'مؤكدة',
+                            color: Colors.green.shade700,
+                          ),
+                        if (c.exact && c.amountPart > 0)
+                          _TinyPill(
+                            icon: Icons.call_merge,
+                            text: c.amountPart == 1
+                                ? 'مطابق للمبلغ الثاني'
+                                : 'مطابق لمجموع المبلغين',
                             color: Colors.green.shade700,
                           ),
                         if (st.isReadOnly)
@@ -2952,8 +3097,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                           ),
                         if (lockedByAnother)
                           _TinyPill(
-                            icon: Icons.lock_clock_outlined,
-                            text: 'محجوزة بفقاعة أخرى',
+                            icon: movable
+                                ? Icons.auto_awesome_outlined
+                                : Icons.lock_clock_outlined,
+                            text: movable
+                                ? 'مختارة تلقائيًا بفقاعة أخرى'
+                                : 'محجوزة بفقاعة أخرى',
                             color: cs.primary,
                           ),
                       ],
@@ -2972,9 +3121,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                         final wasSelected = st.selectedTxIds.contains(c.tx.id);
                         if (wasSelected) {
                           st.selectedTxIds.remove(c.tx.id);
+                          // رفض المستخدم الاختيار: لا نختار بديلًا تلقائيًا
+                          st.selectionMode = _SelectionMode.cleared;
+                          st.autoNote = null;
                         }
                         st.candidates.removeWhere((x) => x.tx.id == c.tx.id);
-                        _recomputeWarningsAndReady(st);
+                        _autoAssign();
                         setState(() {});
                       },
                 icon: const Icon(Icons.close_rounded),
@@ -2993,7 +3145,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             ),
           if (lockedByAnother)
             _inlineHint(
-              'هذه الحركة محددة الآن داخل فقاعة أخرى، لذلك هي مقفلة هنا.',
+              movable
+                  ? 'هذه الحركة مختارة تلقائيًا في فقاعة أخرى — اخترها هنا لنقلها إلى هذه الفقاعة.'
+                  : 'هذه الحركة محددة يدويًا داخل فقاعة أخرى، لذلك هي مقفلة هنا.',
               cs.primary,
             ),
           if (err != null && err.isNotEmpty)
@@ -3328,6 +3482,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       );
     }
 
+    // الحركات المنفّذة أصبحت مستلمة: نعيد توزيع الاختيار التلقائي على البقية
+    _autoAssign();
     setState(() {});
   }
 
@@ -3545,37 +3701,56 @@ class _Candidate {
   final int rank;
   final bool currencyOk;
 
+  /// جزء مبلغ الحركة الأقرب لمبلغ الرسالة: 0 الأول ، 1 الثاني ، 2 مجموعهما
+  final int amountPart;
+
+  /// بيانات الاختيار التلقائي (قوة المطابقة، التوأم، التاريخ)
+  final rm.AutoPick pick;
+
   _Candidate({
     required this.tx,
     required this.delta,
     required this.exact,
+    required this.pick,
     this.rank = 0,
     this.currencyOk = true,
+    this.amountPart = 0,
   });
 }
 
-/// فهرس الحركات المضافة للمطابقة السريعة بالاسم
-class _PendingIndex {
-  final Map<int, List<String>> keysById = {};
-  final Map<String, List<TransactionModel>> byFull = {};
-  final Map<String, List<TransactionModel>> byFirst = {};
-  final Map<String, List<TransactionModel>> byToken = {};
+/// جزء من مبلغ الحركة (الأول، الثاني، أو مجموعهما) مع عملته
+class _AmountPart {
+  final double value;
+  final String currency;
+  final int part;
+  const _AmountPart(this.value, this.currency, this.part);
+}
 
-  _PendingIndex(List<TransactionModel> txs) {
-    for (final tx in txs) {
-      final keys = tt
-          .tokensFromLine(tx.beneficiary)
-          .map(tt.matchKey)
-          .where((k) => k.isNotEmpty)
-          .toList();
-      if (keys.isEmpty) continue;
-      keysById[tx.id] = keys;
-      (byFull[keys.join(' ')] ??= []).add(tx);
-      (byFirst[keys.first] ??= []).add(tx);
-      for (final k in keys.toSet()) {
-        if (k.length >= 2) (byToken[k] ??= []).add(tx);
-      }
-    }
+/// مدى مطابقة مبلغ الحركة وعملتها لمبلغ الرسالة
+class _AmountFit {
+  static const double tol = 0.0001;
+
+  final double delta;
+  final bool currencyOk;
+  final bool currencyExact;
+  final int part;
+
+  const _AmountFit({
+    required this.delta,
+    required this.currencyOk,
+    required this.currencyExact,
+    required this.part,
+  });
+
+  /// نفس المبلغ وعملة متوافقة
+  bool get matches => currencyOk && delta <= tol;
+
+  bool betterThan(_AmountFit o) {
+    if (matches != o.matches) return matches;
+    if (currencyOk != o.currencyOk) return currencyOk;
+    if ((delta - o.delta).abs() > tol) return delta < o.delta;
+    if (currencyExact != o.currencyExact) return currencyExact;
+    return false;
   }
 }
 
@@ -3622,6 +3797,12 @@ class _BubbleState {
   bool ready = false;
   bool hasAmbiguousExactMatches = false;
 
+  /// كيف اختيرت الحركة: تلقائيًا، أو يدويًا، أو أزال المستخدم الاختيار
+  _SelectionMode selectionMode = _SelectionMode.auto;
+
+  /// ملاحظة عن الاختيار التلقائي (حركات متطابقة مكررة، أو المطابقة محجوزة)
+  String? autoNote;
+
   bool amountHasConflict = false;
   bool amountHasMultipleCandidates = false;
   List<double> amountCandidateValues = [];
@@ -3644,6 +3825,18 @@ class _BubbleState {
 
 /// دور التوكن في نص الرسالة (للتلوين)
 enum _TokRole { plain, name, amount, currency, noise, context }
+
+/// مصدر اختيار الفقاعة
+enum _SelectionMode {
+  /// يديره الاختيار التلقائي
+  auto,
+
+  /// اختاره المستخدم بنفسه (لا يُلمس)
+  manual,
+
+  /// أزال المستخدم الاختيار (لا يُعاد تلقائيًا)
+  cleared,
+}
 
 enum _BubbleFilter {
   all,

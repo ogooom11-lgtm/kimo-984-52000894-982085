@@ -536,3 +536,7 @@ class CurrencyDetector {
     );
   }
 }
+
+/// عائلة العملة (USD / EUR / SYP) لرمز أو اسم عملة، أو null إن لم تُعرف.
+/// تُستخدم لاعتبار الرموز المترادفة ($ / USD / دولار) عملة واحدة.
+String? currencyFamilyOf(String token) => _familyOf(token);
