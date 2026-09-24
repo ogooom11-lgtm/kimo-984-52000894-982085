@@ -1,0 +1,21 @@
+name: share_intake
+description: >-
+  Local Android plugin for my_list: receives files/text shared to the app
+  (share sheet and "Open with") and hands them to Dart.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.8.1
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.mylist.share_intake
+        pluginClass: ShareIntakePlugin

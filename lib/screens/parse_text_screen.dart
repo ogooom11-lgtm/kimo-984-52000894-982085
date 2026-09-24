@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,7 +7,9 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/share_import/share_import_service.dart';
 import '../utils/chunked_task.dart';
+import '../widgets/import_sheets.dart';
 import '../widgets/operation_progress_bar.dart';
 import 'bubble_screen.dart';
 import 'verify_receive_screen.dart';
@@ -15,10 +18,18 @@ class ParseTextScreen extends StatefulWidget {
   final String? initialText;
   final bool pasteFromClipboardOnOpen;
 
+  /// حساب محدد مسبقًا (عند فتح الصفحة من ملف تمت مشاركته مع التطبيق)
+  final Account? initialAccount;
+
+  /// ملخص الملف المستورد (يظهر فوق النص)
+  final ImportSummary? importSummary;
+
   const ParseTextScreen({
     super.key,
     this.initialText,
     this.pasteFromClipboardOnOpen = false,
+    this.initialAccount,
+    this.importSummary,
   });
 
   @override
@@ -31,6 +42,10 @@ class _ParseTextScreenState extends State<ParseTextScreen>
 
   Account? _selectedAccount;
   bool _isBusy = false;
+
+  /// الملف المستورد حاليًا (مشاركة من تطبيق آخر أو زر «استيراد ملف»)
+  ImportSummary? _importSummary;
+  bool _importDetailsOpen = false;
 
   /// تقدم العملية الجارية (شريط سفلي بالنسبة المئوية)
   final ValueNotifier<OperationProgress?> _progress =
@@ -64,16 +79,37 @@ class _ParseTextScreenState extends State<ParseTextScreen>
       curve: Curves.easeOutCubic,
     );
 
+    _importSummary = widget.importSummary;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final initial = widget.initialText?.trim() ?? '';
+      final preset = _resolveAccount(widget.initialAccount);
       if (initial.isNotEmpty) {
-        setState(() => _text.text = initial);
-        unawaited(_detectAccountsWithCountAsync(initial));
+        setState(() {
+          _text.text = initial;
+          if (preset != null) _selectedAccount = preset;
+        });
+        // الحساب اختاره المستخدم مسبقًا (مشاركة ملف) → لا حاجة للكشف التلقائي
+        if (preset == null) unawaited(_detectAccountsWithCountAsync(initial));
+      } else if (preset != null) {
+        setState(() => _selectedAccount = preset);
       } else if (widget.pasteFromClipboardOnOpen) {
         unawaited(_paste());
       }
     });
+  }
+
+  /// نفس كائن الحساب الموجود في الصندوق (حتى يطابق عناصر القائمة المنسدلة)
+  Account? _resolveAccount(Account? account) {
+    if (account == null) return null;
+    for (final a in DatabaseService.accountsBox.values) {
+      if (identical(a, account)) return a;
+    }
+    for (final a in DatabaseService.accountsBox.values) {
+      if (a.id == account.id) return a;
+    }
+    return null;
   }
 
   @override
@@ -168,6 +204,220 @@ class _ParseTextScreenState extends State<ParseTextScreen>
     await yieldToUi();
     _setBusy(false);
     await _detectAccountsWithCountAsync(clip);
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// استيراد ملف (Excel / CSV / نص / محادثة واتساب) إلى مربع النص
+  Future<void> _importFile() async {
+    if (_isBusy) return;
+    FilePickerResult? picked;
+    try {
+      picked = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ImportFileConverter.supportedExtensions,
+        allowMultiple: true,
+        withData: true,
+      );
+    } catch (e) {
+      _snack('تعذر فتح نافذة اختيار الملف: $e');
+      return;
+    }
+    if (picked == null || picked.files.isEmpty || !mounted) return;
+
+    final files = picked.files;
+    final options = ShareImportService.optionsFromSettings();
+    final conversions = <ImportConversion>[];
+    _setBusy(true);
+    try {
+      for (var i = 0; i < files.length; i++) {
+        final f = files[i];
+        _setProgress(
+          OperationProgress(
+            label: 'جارٍ قراءة ${f.name}...',
+            done: i,
+            total: files.length,
+          ),
+        );
+        await yieldToUi();
+        final bytes = f.bytes;
+        if (bytes == null) {
+          conversions.add(
+            ImportConversion.failure(f.name, 'تعذر قراءة محتوى الملف'),
+          );
+          continue;
+        }
+        conversions.add(
+          await ShareImportService.convertBytes(
+            bytes: bytes,
+            fileName: f.name,
+            options: files.length > 1
+                ? options.copyWith(labelSuffix: f.name)
+                : options,
+          ),
+        );
+      }
+    } finally {
+      _setBusy(false);
+    }
+    if (!mounted) return;
+
+    if (!conversions.any((c) => c.ok)) {
+      _snack(
+        conversions
+            .map((c) => '${c.fileName}: ${c.error ?? 'لا توجد بيانات'}')
+            .join('\n'),
+      );
+      return;
+    }
+
+    final selected = <List<ImportMessage>>[];
+    for (final c in conversions) {
+      if (c.ok && c.kind == ImportFileKind.whatsapp) {
+        final range = await pickWhatsAppRange(context, c);
+        if (range == null || !mounted) return;
+        selected.add(range);
+      } else {
+        selected.add(c.messages);
+      }
+    }
+
+    final combined = ShareImportService.combine(
+      conversions,
+      selectedMessages: selected,
+    );
+    if (combined.text.trim().isEmpty) {
+      _snack('لا توجد رسائل في الفترة المختارة');
+      return;
+    }
+
+    var text = combined.text;
+    final current = _text.text.trim();
+    if (current.isNotEmpty) {
+      final mode = await showDialog<String>(
+        context: context,
+        builder: (ctx) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text('يوجد نص في المربع'),
+            content: const Text(
+              'هل تريد استبدال النص الحالي بمحتوى الملف أم إضافة الملف بعده؟',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إلغاء'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'append'),
+                child: const Text('إضافة بعده'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, 'replace'),
+                child: const Text('استبدال'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (mode == null || !mounted) return;
+      if (mode == 'append') text = '$current\n$text';
+    }
+
+    setState(() {
+      _text.text = text;
+      _importSummary = combined.summary;
+      _importDetailsOpen = combined.summary.errors.isNotEmpty;
+    });
+    _snack('تم تجهيز ${combined.summary.messageCount} رسالة من الملف');
+    if (_selectedAccount == null) {
+      await _detectAccountsWithCountAsync(combined.text);
+    }
+  }
+
+  Widget _buildImportCard(Color color, Brightness brightness) {
+    final summary = _importSummary!;
+    final cs = Theme.of(context).colorScheme;
+    final hasDetails = summary.notes.isNotEmpty || summary.errors.isNotEmpty;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 4, 6),
+      decoration: BoxDecoration(
+        color: brightness == Brightness.dark
+            ? Colors.white.withValues(alpha: 0.05)
+            : color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: ImportSummaryHeader(summary: summary, color: color),
+              ),
+              IconButton(
+                tooltip: 'إخفاء',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => setState(() => _importSummary = null),
+                icon: const Icon(Icons.close_rounded, size: 20),
+              ),
+            ],
+          ),
+          if (hasDetails)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: TextButton.icon(
+                onPressed: () =>
+                    setState(() => _importDetailsOpen = !_importDetailsOpen),
+                icon: Icon(
+                  _importDetailsOpen
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  size: 20,
+                ),
+                label: Text(
+                  summary.errors.isNotEmpty
+                      ? 'تفاصيل القراءة (${summary.errors.length} تنبيه)'
+                      : 'تفاصيل القراءة',
+                ),
+              ),
+            ),
+          if (hasDetails && _importDetailsOpen)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 0, 8, 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final e in summary.errors)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        '⚠️ $e',
+                        style: TextStyle(color: cs.error, fontSize: 12.5),
+                      ),
+                    ),
+                  for (final n in summary.notes)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        '• $n',
+                        style: const TextStyle(fontSize: 12.5, height: 1.4),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   /// تحديد الحساب من النص على دفعات (حتى لا يتجمد التطبيق مع النصوص الطويلة)
@@ -845,6 +1095,8 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                                 selectedColor,
                               ),
                               const SizedBox(height: 14),
+                              if (_importSummary != null)
+                                _buildImportCard(selectedColor, brightness),
                               TextField(
                                 controller: _text,
                                 maxLines: 10,
@@ -897,6 +1149,31 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                                     ),
                                     backgroundColor: selectedColor,
                                     foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  onPressed: _isBusy ? null : _importFile,
+                                  icon: const Icon(Icons.upload_file_rounded),
+                                  label: const Text(
+                                    "استيراد ملف (Excel / CSV / نص)",
+                                  ),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 14,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    foregroundColor: selectedColor,
+                                    side: BorderSide(
+                                      color: selectedColor.withValues(
+                                        alpha: 0.55,
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),

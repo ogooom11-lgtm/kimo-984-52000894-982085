@@ -246,6 +246,43 @@ class NameDetectorConfig {
     return span;
   }
 
+  static final RegExp _nameLetterRe = RegExp(r'[a-zA-Z\u0621-\u064A]');
+
+  /// اسم يبدأ بكلمة مسجلة كعملة (مثل «تركي العتيبي» أو «سوري الحسن») بعد
+  /// كلمة اسم مباشرة: تُقبل الكلمة كجزء من الاسم فقط إذا كانت كلمة (لا رمزًا
+  /// مثل $) وتبعها اسم صالح في نفس السطر.
+  List<int> currencyLedSpan(
+    List<String> keys,
+    int start, {
+    Set<int>? forbiddenIdx,
+  }) {
+    var i = start;
+    while (i < keys.length && isIgnoredKey(keys[i])) {
+      i++;
+    }
+    if (i >= keys.length) return const [];
+    final k = keys[i];
+    if (containsCurrencySymbol(k) || !_nameLetterRe.hasMatch(k)) {
+      return const [];
+    }
+    if (currency.matchAt(keys, i) != 1) return const [];
+    if ((forbiddenIdx?.contains(i) ?? false) ||
+        forbidden.matchAt(keys, i) > 0 ||
+        amountKeywords.matchAt(keys, i) > 0 ||
+        nameKeywords.matchAt(keys, i) > 0 ||
+        cancelKeywords.matchAt(keys, i) > 0) {
+      return const [];
+    }
+    final rest = collectSpan(
+      keys,
+      i + 1,
+      forbiddenIdx: forbiddenIdx,
+      maxTokens: 7,
+    );
+    if (rest.isEmpty) return const [];
+    return [i, ...rest];
+  }
+
   bool _canBeNameKey(List<String> keys, int i, Set<int> forbiddenIdx) =>
       stopReasonAt(keys, i, forbiddenIdx: forbiddenIdx) == null &&
       !isIgnoredKey(keys[i]);
@@ -457,11 +494,18 @@ class NameDetector {
           continue;
         }
         final kwText = keys.sublist(i, i + len).join(' ');
-        final span = config.collectSpan(
+        var span = config.collectSpan(
           keys,
           i + len,
           forbiddenIdx: line.forbiddenIdx,
         );
+        if (span.isEmpty) {
+          span = config.currencyLedSpan(
+            keys,
+            i + len,
+            forbiddenIdx: line.forbiddenIdx,
+          );
+        }
         if (span.isNotEmpty) {
           // الكلمات القصيرة مثل «ل» و«الى» أضعف من «المستفيد»
           final specific = kwText.replaceAll(' ', '').length > 3;
@@ -479,11 +523,18 @@ class NameDetector {
         while (start < keys.length && config.isIgnoredKey(keys[start])) {
           start++;
         }
-        final span = config.collectSpan(
+        var span = config.collectSpan(
           keys,
           start,
           forbiddenIdx: line.forbiddenIdx,
         );
+        if (span.isEmpty) {
+          span = config.currencyLedSpan(
+            keys,
+            start,
+            forbiddenIdx: line.forbiddenIdx,
+          );
+        }
         addCandidate(li, span, 95, NameEvidence.previousLineKeyword);
       }
 

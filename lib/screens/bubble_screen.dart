@@ -19,6 +19,7 @@ import 'settings_screen.dart';
 import '../services/detection/name_detector.dart' as nd;
 import '../services/detection/amount_detector.dart' as ad;
 import '../services/detection/currency_detector.dart' as cd;
+import '../services/detection/segment_splitter.dart';
 import '../services/detection/text_tokens.dart' as tt;
 
 /// مراحل التحديد
@@ -203,15 +204,23 @@ class _BubbleScreenState extends State<BubbleScreen> {
         ),
       ];
     } else {
-      _segments = texts.expand(_splitByHeader).toList();
-      // رتب المقاطع زمنيًا إن أمكن
-      _segments.sort((a, b) {
-        final ta = a.timestamp, tb = b.timestamp;
-        if (ta == null && tb == null) return 0;
-        if (ta == null) return 1;
-        if (tb == null) return -1;
-        return ta.compareTo(tb);
-      });
+      final parsed = texts.expand(_splitByHeader).toList();
+      // رتب المقاطع زمنيًا إن أمكن — ترتيب ثابت: الرسائل بنفس الوقت (أو بدون
+      // وقت مثل صفوف ملف Excel) تبقى بترتيبها الأصلي
+      final order = List<int>.generate(parsed.length, (i) => i)
+        ..sort((x, y) {
+          final ta = parsed[x].timestamp, tb = parsed[y].timestamp;
+          var c = 0;
+          if (ta == null && tb != null) {
+            c = 1;
+          } else if (ta != null && tb == null) {
+            c = -1;
+          } else if (ta != null && tb != null) {
+            c = ta.compareTo(tb);
+          }
+          return c != 0 ? c : x.compareTo(y);
+        });
+      _segments = [for (final i in order) parsed[i]];
     }
 
     // التحليل يتم على دفعات بعد ظهور الشاشة حتى لا يتجمد التطبيق
@@ -421,7 +430,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _normalizeArabic(s).toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
 
   bool _segmentLooksLikeCancel(ParsedSegment seg) {
-    final text = _normalizeForSearch('${seg.header}\n${seg.lines.join('\n')}');
+    // عنوان صف الملف المستورد («صف 5 • اسم الملف») وصفي فقط ولا يُفحص
+    final header = seg.senderName.isEmpty ? '' : seg.header;
+    final text = _normalizeForSearch('$header\n${seg.lines.join('\n')}');
     if (text.isEmpty) return false;
 
     for (final word in _cancelKeywords) {
@@ -698,75 +709,16 @@ class _BubbleScreenState extends State<BubbleScreen> {
     return null;
   }
 
-  // ====== تقسيم النص حسب هيدر واتساب ======
-  final _headerRe = RegExp(
-    r'\[\s*([0-9\u0660-\u0669]{1,2})\/[\u200F\u200E]?\s*([0-9\u0660-\u0669]{1,2})\s*[,،]\s*([0-9\u0660-\u0669]{1,2})\s*:\s*([0-9\u0660-\u0669]{2})\s*\]\s*([^:\n]+?)\s*:',
-    multiLine: true,
-  );
-
-  List<ParsedSegment> _splitByHeader(String input) {
-    final text = input.replaceAll('\r', '');
-    final matches = _headerRe.allMatches(text).toList();
-    final segments = <ParsedSegment>[];
-
-    if (matches.isEmpty) {
-      final lines = text.split('\n').map((e) => e.trimRight()).toList();
-      segments.add(
-        ParsedSegment(
-          header: '',
-          senderName: '',
-          timestamp: null,
-          lines: lines,
-        ),
-      );
-      return segments;
-    }
-
-    for (var i = 0; i < matches.length; i++) {
-      final m = matches[i];
-      final start = m.end;
-      final end = (i + 1 < matches.length) ? matches[i + 1].start : text.length;
-      final body = text.substring(start, end);
-
-      final dd = _toIntDigits(m.group(1)!);
-      final MM = _toIntDigits(m.group(2)!);
-      final hh = _toIntDigits(m.group(3)!);
-      final mm = _toIntDigits(m.group(4)!);
-      final name = m.group(5)!.trim();
-
-      DateTime? ts;
-      try {
-        final now = DateTime.now();
-        ts = DateTime(now.year, MM, dd, hh, mm);
-      } catch (_) {}
-
-      final lines = body.split('\n').map((e) => e.trimRight()).toList();
-
-      segments.add(
-        ParsedSegment(
-          header: m.group(0)!.trim(),
-          senderName: name,
-          timestamp: ts,
-          lines: lines,
-        ),
-      );
-    }
-
-    return segments;
-  }
-
-  int _toIntDigits(String s) {
-    final buf = StringBuffer();
-    for (final ch in s.characters) {
-      final code = ch.codeUnitAt(0);
-      if (code >= 0x0660 && code <= 0x0669) {
-        buf.write(String.fromCharCode('0'.codeUnitAt(0) + (code - 0x0660)));
-      } else {
-        buf.write(ch);
-      }
-    }
-    return int.tryParse(buf.toString()) ?? 0;
-  }
+  // ====== تقسيم النص حسب هيدر واتساب أو فواصل صفوف الملفات ======
+  List<ParsedSegment> _splitByHeader(String input) => [
+    for (final raw in SegmentSplitter.split(input))
+      ParsedSegment(
+        header: raw.header,
+        senderName: raw.senderName,
+        timestamp: raw.timestamp,
+        lines: raw.lines,
+      ),
+  ];
 
   // ====== تنظيف التوكنات (مع حذف الرموز بين الأرقام المتتالية) ======
   bool _isAsciiDigit(int code) => code >= 0x30 && code <= 0x39;
@@ -5630,6 +5582,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final sender = seg.senderName.trim();
     final avatar = _avatarColor(sender);
     final initial = sender.isEmpty ? '${si + 1}' : sender.characters.first;
+    // صفوف الملفات المستوردة: العنوان «صف N» بدل «رسالة N»
+    final untitled = seg.header.trim().isNotEmpty
+        ? seg.header.trim()
+        : 'رسالة ${si + 1}';
 
     return Row(
       children: [
@@ -5651,7 +5607,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  sender.isEmpty ? 'رسالة ${si + 1}' : sender,
+                  sender.isEmpty ? untitled : sender,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -5670,7 +5626,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
         ] else
           Expanded(
             child: Text(
-              'رسالة ${si + 1}',
+              sender.isEmpty ? untitled : 'رسالة ${si + 1}',
               style: const TextStyle(fontWeight: FontWeight.w900),
             ),
           ),

@@ -15,6 +15,7 @@ import 'models.dart';
 import 'theme/app_theme.dart';
 import 'screens/timeline_analytics_screen.dart';
 import 'screens/transaction_watch_screen.dart';
+import 'services/share_import/share_import_controller.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -330,10 +331,22 @@ class _MainLayoutState extends State<MainLayout>
   late final AnimationController _parseController;
   late final Animation<double> _parseScale;
 
+  /// استقبال الملفات المشاركة من تطبيقات أخرى (أندرويد)
+  late final ShareImportController _shareImport = ShareImportController(
+    contextOf: () => mounted ? context : null,
+    openPage: (page) {
+      if (!mounted) return;
+      Navigator.of(context).push(_pageRoute(page));
+    },
+  );
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _shareImport.start();
+    });
 
     _pages = const [
       HomeScreen(),
@@ -370,6 +383,7 @@ class _MainLayoutState extends State<MainLayout>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _shareImport.dispose();
     _clipboardTimer?.cancel();
     _parseController.dispose();
     super.dispose();

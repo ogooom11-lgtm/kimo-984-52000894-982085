@@ -4,7 +4,6 @@
 // المضافة وتنفّذ التسليم مع تسجيل العملية في سجل العمليات.
 
 import 'dart:math' show Point;
-import 'package:characters/characters.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -17,6 +16,7 @@ import '../services/detection/amount_detector.dart' as ad;
 import '../services/detection/text_tokens.dart' as tt;
 import '../services/detection/message_noise.dart';
 import '../services/detection/receipt_extractor.dart';
+import '../services/detection/segment_splitter.dart';
 import '../services/operation_log_service.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
@@ -146,74 +146,20 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     super.dispose();
   }
 
-  // ====== تقسيم الهيدر ======
-  final _headerRe = RegExp(
-    r'\[\s*([0-9\u0660-\u0669]{1,2})\/[\u200F\u200E]?\s*([0-9\u0660-\u0669]{1,2})\s*[,،]\s*([0-9\u0660-\u0669]{1,2})\s*:\s*([0-9\u0660-\u0669]{2})\s*\]\s*([^:\n]+?)\s*:',
-    multiLine: true,
-  );
-
-  List<_ParsedSegment> _splitByHeader(String input) {
-    final text = input.replaceAll('\r', '');
-    final matches = _headerRe.allMatches(text).toList();
-    final segments = <_ParsedSegment>[];
-
-    if (matches.isEmpty) {
-      final lines = text.split('\n').map((e) => e.trimRight()).toList();
-      segments.add(
-        _ParsedSegment(
-          header: 'بدون هيدر',
-          senderName: '',
-          timestamp: null,
-          lines: lines,
-        ),
-      );
-      return segments;
-    }
-
-    for (var i = 0; i < matches.length; i++) {
-      final m = matches[i];
-      final start = m.end;
-      final end = (i + 1 < matches.length) ? matches[i + 1].start : text.length;
-      final body = text.substring(start, end);
-
-      final dd = _toIntDigits(m.group(1)!);
-      final MM = _toIntDigits(m.group(2)!);
-      final hh = _toIntDigits(m.group(3)!);
-      final mm = _toIntDigits(m.group(4)!);
-      final name = m.group(5)!.trim();
-
-      DateTime? ts;
-      try {
-        final now = DateTime.now();
-        ts = DateTime(now.year, MM, dd, hh, mm);
-      } catch (_) {}
-
-      final lines = body.split('\n').map((e) => e.trimRight()).toList();
-      segments.add(
-        _ParsedSegment(
-          header: m.group(0)!.trim(),
-          senderName: name,
-          timestamp: ts,
-          lines: lines,
-        ),
-      );
-    }
-
-    return segments;
-  }
-
-  int _toIntDigits(String s) {
-    final buf = StringBuffer();
-    for (final ch in s.characters) {
-      final code = ch.codeUnitAt(0);
-      if (code >= 0x0660 && code <= 0x0669) {
-        buf.write(String.fromCharCode('0'.codeUnitAt(0) + (code - 0x0660)));
-      } else {
-        buf.write(ch);
-      }
-    }
-    return int.tryParse(buf.toString()) ?? 0;
-  }
+  // ====== تقسيم الهيدر (هيدر واتساب أو فواصل صفوف الملفات) ======
+  List<_ParsedSegment> _splitByHeader(String input) => [
+    for (final raw in SegmentSplitter.split(
+      input,
+      headerlessLabel: 'بدون هيدر',
+    ))
+      _ParsedSegment(
+        header: raw.header,
+        senderName: raw.senderName,
+        timestamp: raw.timestamp,
+        lines: raw.lines,
+        fromImportRow: raw.fromImportRow,
+      ),
+  ];
 
   String _formatSegmentTime(DateTime dt) {
     final d = dt.day.toString().padLeft(2, '0');
@@ -1928,9 +1874,11 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                                   children: [
                                     Expanded(
                                       child: Text(
-                                        st.segment.senderName.isEmpty
-                                            ? 'مرسل غير معروف'
-                                            : st.segment.senderName,
+                                        st.segment.senderName.isNotEmpty
+                                            ? st.segment.senderName
+                                            : st.segment.fromImportRow
+                                            ? st.segment.header
+                                            : 'مرسل غير معروف',
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: Theme.of(context)
@@ -3565,11 +3513,15 @@ class _ParsedSegment {
   final String senderName;
   final DateTime? timestamp;
   final List<String> lines;
+
+  /// صف من ملف مستورد (Excel/CSV) — عنوانه «صف N»
+  final bool fromImportRow;
   _ParsedSegment({
     required this.header,
     required this.senderName,
     required this.timestamp,
     required this.lines,
+    this.fromImportRow = false,
   });
 }
 

@@ -1,0 +1,50 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="com.mylist.share_intake">
+
+  <application>
+    <!-- نشاط شفاف يستقبل الملفات المشاركة (Excel / CSV / نص) ثم يفتح التطبيق.
+         يُدمج هذا الملف تلقائيًا مع AndroidManifest الخاص بالتطبيق عند البناء. -->
+    <activity
+      android:name="com.mylist.share_intake.ShareIntakeActivity"
+      android:exported="true"
+      android:excludeFromRecents="true"
+      android:noHistory="true"
+      android:taskAffinity=""
+      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+
+      <!-- مشاركة ملف أو عدة ملفات من تطبيق آخر -->
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+        <data android:mimeType="application/vnd.ms-excel.sheet.macroEnabled.12" />
+        <data android:mimeType="application/vnd.ms-excel" />
+        <data android:mimeType="text/csv" />
+        <data android:mimeType="text/comma-separated-values" />
+        <data android:mimeType="text/x-csv" />
+        <data android:mimeType="application/csv" />
+        <data android:mimeType="text/tab-separated-values" />
+        <data android:mimeType="text/plain" />
+        <!-- تصدير محادثة واتساب مع الوسائط يكون ملفًا مضغوطًا -->
+        <data android:mimeType="application/zip" />
+        <data android:mimeType="application/x-zip-compressed" />
+      </intent-filter>
+
+      <!-- «فتح باستخدام» من مدير الملفات -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:scheme="content" />
+        <data android:scheme="file" />
+        <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+        <data android:mimeType="application/vnd.ms-excel.sheet.macroEnabled.12" />
+        <data android:mimeType="application/vnd.ms-excel" />
+        <data android:mimeType="text/csv" />
+        <data android:mimeType="text/comma-separated-values" />
+        <data android:mimeType="text/tab-separated-values" />
+        <data android:mimeType="text/plain" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>
