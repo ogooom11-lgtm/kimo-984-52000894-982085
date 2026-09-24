@@ -1,0 +1,1007 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+
+import '../database_service.dart';
+import '../models.dart';
+import 'bubble_screen.dart';
+import 'verify_receive_screen.dart';
+
+class ParseTextScreen extends StatefulWidget {
+  final String? initialText;
+  final bool pasteFromClipboardOnOpen;
+
+  const ParseTextScreen({
+    super.key,
+    this.initialText,
+    this.pasteFromClipboardOnOpen = false,
+  });
+
+  @override
+  State<ParseTextScreen> createState() => _ParseTextScreenState();
+}
+
+class _ParseTextScreenState extends State<ParseTextScreen>
+    with TickerProviderStateMixin {
+  final _text = TextEditingController();
+
+  Account? _selectedAccount;
+  bool _isBusy = false;
+  String _loadingMessage = 'جارٍ التحميل...';
+
+  late final AnimationController _pulseController;
+  late final AnimationController _fadeController;
+  late final Animation<double> _pulseAnimation;
+  late final Animation<double> _fadeAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    )..repeat(reverse: true);
+
+    _fadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    )..forward();
+
+    _pulseAnimation = Tween<double>(begin: 0.96, end: 1.04).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _fadeAnimation = CurvedAnimation(
+      parent: _fadeController,
+      curve: Curves.easeOutCubic,
+    );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final initial = widget.initialText?.trim() ?? '';
+      if (initial.isNotEmpty) {
+        setState(() => _text.text = initial);
+        unawaited(_detectAccountsWithCountAsync(initial));
+      } else if (widget.pasteFromClipboardOnOpen) {
+        unawaited(_paste());
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _text.dispose();
+    _pulseController.dispose();
+    _fadeController.dispose();
+    super.dispose();
+  }
+
+  Future<T> _runWithLoading<T>(
+    String message,
+    Future<T> Function() action,
+  ) async {
+    if (mounted) {
+      setState(() {
+        _isBusy = true;
+        _loadingMessage = message;
+      });
+    }
+
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    try {
+      return await action();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBusy = false;
+        });
+      }
+    }
+  }
+
+  Color _accountBaseColor(Account? account) {
+    if (account == null) return const Color(0xFF2E7DFF);
+    if (account.type.isCompany) return const Color(0xFF6D42C1);
+
+    final hash = account.name.trim().hashCode.abs();
+    final hue = (hash % 360).toDouble();
+
+    return HSVColor.fromAHSV(1, hue, 0.62, 0.92).toColor();
+  }
+
+  List<Color> _buildGradient(Account? account, Brightness brightness) {
+    final base = _accountBaseColor(account);
+
+    if (brightness == Brightness.dark) {
+      return [
+        Color.lerp(base, Colors.black, 0.55)!,
+        Color.lerp(base, const Color(0xFF0F172A), 0.72)!,
+        const Color(0xFF020617),
+      ];
+    }
+
+    return [
+      Color.lerp(base, Colors.white, 0.82)!,
+      Color.lerp(base, Colors.white, 0.60)!,
+      Color.lerp(base, const Color(0xFFF8FAFC), 0.20)!,
+    ];
+  }
+
+  Color _cardColorFor(Account? account, Brightness brightness) {
+    final base = _accountBaseColor(account);
+    return brightness == Brightness.dark
+        ? Color.lerp(base, const Color(0xFF111827), 0.82)!
+        : Color.lerp(base, Colors.white, 0.90)!;
+  }
+
+  Future<void> _paste() async {
+    await _runWithLoading('جارٍ لصق النص وتحليل الحسابات...', () async {
+      final data = await Clipboard.getData('text/plain');
+      final clip = data?.text ?? '';
+
+      if (clip.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text("📋 الحافظة فارغة")));
+        }
+        return;
+      }
+
+      if (mounted) {
+        setState(() => _text.text = clip);
+      }
+
+      await Future.delayed(const Duration(milliseconds: 80));
+      await _detectAccountsWithCountAsync(clip);
+    });
+  }
+
+  Future<void> _detectAccountsWithCountAsync(String text) async {
+    final accounts = DatabaseService.accountsBox.values.toList();
+    final normalizedText = _normalizeForAccountMatch(text);
+
+    final Map<Account, int> matches = {};
+
+    for (final account in accounts) {
+      var count = 0;
+
+      for (final keyword in _accountMatchKeywords(account)) {
+        final normalizedKeyword = _normalizeForAccountMatch(keyword);
+        if (normalizedKeyword.isEmpty) continue;
+
+        final regex = RegExp(RegExp.escape(normalizedKeyword));
+        count += regex.allMatches(normalizedText).length;
+      }
+
+      if (count > 0) {
+        matches[account] = count;
+      }
+    }
+
+    if (matches.isEmpty) return;
+
+    if (matches.length == 1) {
+      if (mounted) {
+        setState(() => _selectedAccount = matches.keys.first);
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final selected = await _showAccountPicker(matches);
+    if (selected != null && mounted) {
+      setState(() => _selectedAccount = selected);
+    }
+  }
+
+  String _stripDiacritics(String s) =>
+      s.replaceAll(RegExp(r'[\u064B-\u065F\u0670]'), '');
+
+  String _normalizeForAccountMatch(String value) {
+    var s = _stripDiacritics(value).toLowerCase();
+    s = s.replaceAll('أ', 'ا').replaceAll('إ', 'ا').replaceAll('آ', 'ا');
+    s = s.replaceAll('ى', 'ي').replaceAll('ئ', 'ي').replaceAll('ؤ', 'و');
+    s = s.replaceAll('ة', 'ه');
+    return s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  List<String> _accountMatchKeywords(Account account) {
+    final seen = <String>{};
+    final out = <String>[];
+
+    for (final value in <String>[account.name, ...account.keywords]) {
+      final trimmed = value.trim();
+      final normalized = _normalizeForAccountMatch(trimmed);
+      if (trimmed.isEmpty || normalized.isEmpty || !seen.add(normalized)) {
+        continue;
+      }
+      out.add(trimmed);
+    }
+
+    return out;
+  }
+
+  Future<Account?> _showAccountPicker(Map<Account, int> matches) async {
+    final sortedEntries = matches.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return showGeneralDialog<Account>(
+      context: context,
+      barrierLabel: 'accounts',
+      barrierDismissible: true,
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 260),
+      pageBuilder: (_, __, ___) {
+        final brightness = Theme.of(context).brightness;
+
+        return SafeArea(
+          child: Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: MediaQuery.of(context).size.width * 0.90,
+                constraints: const BoxConstraints(
+                  maxWidth: 520,
+                  maxHeight: 560,
+                ),
+                decoration: BoxDecoration(
+                  color: brightness == Brightness.dark
+                      ? const Color(0xFF0F172A)
+                      : Colors.white,
+                  borderRadius: BorderRadius.circular(28),
+                  boxShadow: const [
+                    BoxShadow(
+                      blurRadius: 30,
+                      color: Colors.black26,
+                      offset: Offset(0, 16),
+                    ),
+                  ],
+                ),
+                child: Directionality(
+                  textDirection: TextDirection.rtl,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+                        decoration: BoxDecoration(
+                          borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(28),
+                          ),
+                          gradient: LinearGradient(
+                            colors: _buildGradient(
+                              _selectedAccount,
+                              brightness,
+                            ),
+                            begin: Alignment.topRight,
+                            end: Alignment.bottomLeft,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.18),
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: const Icon(
+                                Icons.account_balance_wallet_rounded,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            const Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    "تم العثور على عدة حسابات",
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w800,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    "اختر الحساب الأنسب لإسناد الحركات إليه",
+                                    style: TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Flexible(
+                        child: ListView.separated(
+                          padding: const EdgeInsets.all(16),
+                          shrinkWrap: true,
+                          itemCount: sortedEntries.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            final entry = sortedEntries[index];
+                            final account = entry.key;
+                            final count = entry.value;
+                            final color = _accountBaseColor(account);
+
+                            return InkWell(
+                              borderRadius: BorderRadius.circular(20),
+                              onTap: () => Navigator.pop(context, account),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 220),
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: brightness == Brightness.dark
+                                      ? Colors.white.withOpacity(0.04)
+                                      : color.withOpacity(0.08),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                    color: color.withOpacity(0.22),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 46,
+                                      height: 46,
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          colors: [
+                                            color,
+                                            Color.lerp(
+                                              color,
+                                              Colors.white,
+                                              0.35,
+                                            )!,
+                                          ],
+                                          begin: Alignment.topRight,
+                                          end: Alignment.bottomLeft,
+                                        ),
+                                        borderRadius: BorderRadius.circular(16),
+                                      ),
+                                      child: const Icon(
+                                        Icons.wallet_rounded,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            account.name,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 15,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            "تم العثور عليه $count مرة",
+                                            style: TextStyle(
+                                              color: Theme.of(context)
+                                                  .textTheme
+                                                  .bodySmall
+                                                  ?.color
+                                                  ?.withOpacity(0.85),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    if (count > 1)
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: color.withOpacity(0.12),
+                                          borderRadius: BorderRadius.circular(
+                                            999,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              Icons.trending_up_rounded,
+                                              size: 16,
+                                              color: color,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              "أقوى تطابق",
+                                              style: TextStyle(
+                                                color: color,
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text("إلغاء"),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (_, animation, __, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.94, end: 1).animate(curved),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+
+  bool _validate() {
+    final raw = _text.text.trim();
+
+    if (_selectedAccount == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("🧾 اختر حساب أولًا")));
+      return false;
+    }
+
+    if (raw.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("✍️ ألصق النص المراد تحليله")),
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  Future<void> _goBubble() async {
+    if (!_validate()) return;
+
+    await _runWithLoading('جارٍ تجهيز البيانات...', () async {
+      await Future.delayed(const Duration(milliseconds: 220));
+    });
+
+    if (!mounted) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BubbleScreen(
+          account: _selectedAccount!,
+          rawText: _text.text.trim(),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _goVerifyReceive() async {
+    if (!_validate()) return;
+
+    await _runWithLoading('جارٍ تجهيز صفحة التسليم...', () async {
+      await Future.delayed(const Duration(milliseconds: 220));
+    });
+
+    if (!mounted) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VerifyReceiveScreen(
+          account: _selectedAccount!,
+          rawText: _text.text.trim(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeaderCard(Brightness brightness) {
+    final selectedColor = _accountBaseColor(_selectedAccount);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 380),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            selectedColor,
+            Color.lerp(selectedColor, Colors.white, 0.32)!,
+          ],
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+        ),
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [
+          BoxShadow(
+            color: selectedColor.withOpacity(0.25),
+            blurRadius: 24,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          ScaleTransition(
+            scale: _pulseAnimation,
+            child: Container(
+              width: 58,
+              height: 58,
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.16),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: const Icon(
+                Icons.auto_awesome_rounded,
+                color: Colors.white,
+                size: 30,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "تحليل النص واختيار الحساب",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _selectedAccount == null
+                      ? "اختر الحساب، ثم ألصق النص، وبعدها تابع العملية بسهولة"
+                      : "الحساب الحالي: ${_selectedAccount!.name}",
+                  style: const TextStyle(color: Colors.white70, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title, IconData icon, Color color) {
+    return Row(
+      children: [
+        Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(icon, color: color),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          title,
+          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLoadingOverlay() {
+    final color = _accountBaseColor(_selectedAccount);
+
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 220),
+      opacity: _isBusy ? 1 : 0,
+      child: IgnorePointer(
+        ignoring: !_isBusy,
+        child: Container(
+          color: Colors.black.withOpacity(0.22),
+          child: Center(
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0.96, end: 1),
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOut,
+              builder: (_, scale, child) {
+                return Transform.scale(scale: scale, child: child);
+              },
+              child: Container(
+                width: 220,
+                padding: const EdgeInsets.all(22),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFF0F172A)
+                      : Colors.white,
+                  borderRadius: BorderRadius.circular(28),
+                  boxShadow: const [
+                    BoxShadow(
+                      blurRadius: 30,
+                      color: Colors.black26,
+                      offset: Offset(0, 16),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 56,
+                      height: 56,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 4.2,
+                        valueColor: AlwaysStoppedAnimation<Color>(color),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      _loadingMessage,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      "يرجى الانتظار قليلاً",
+                      style: TextStyle(
+                        color: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.color?.withOpacity(0.8),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final brightness = theme.brightness;
+
+    return ValueListenableBuilder(
+      valueListenable: DatabaseService.accountsBox.listenable(),
+      builder: (context, Box<Account> box, _) {
+        final accounts = box.values.toList();
+        final selectedColor = _accountBaseColor(_selectedAccount);
+        final pageGradient = _buildGradient(_selectedAccount, brightness);
+        final cardColor = _cardColorFor(_selectedAccount, brightness);
+
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(
+            extendBodyBehindAppBar: true,
+            backgroundColor: Colors.transparent,
+            appBar: AppBar(
+              title: const Text("تحليل النص"),
+              centerTitle: true,
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+            ),
+            body: Stack(
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 450),
+                  curve: Curves.easeOutCubic,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: pageGradient,
+                      begin: Alignment.topRight,
+                      end: Alignment.bottomLeft,
+                    ),
+                  ),
+                ),
+                SafeArea(
+                  child: FadeTransition(
+                    opacity: _fadeAnimation,
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+                      children: [
+                        _buildHeaderCard(brightness),
+                        const SizedBox(height: 18),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 380),
+                          curve: Curves.easeOutCubic,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: cardColor,
+                            borderRadius: BorderRadius.circular(28),
+                            border: Border.all(
+                              color: selectedColor.withOpacity(0.10),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(
+                                  brightness == Brightness.dark ? 0.18 : 0.06,
+                                ),
+                                blurRadius: 20,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildSectionTitle(
+                                "الحساب",
+                                Icons.account_balance_wallet_rounded,
+                                selectedColor,
+                              ),
+                              const SizedBox(height: 14),
+                              DropdownButtonFormField<Account>(
+                                value: _selectedAccount,
+                                isExpanded: true,
+                                borderRadius: BorderRadius.circular(20),
+                                icon: Icon(
+                                  Icons.keyboard_arrow_down_rounded,
+                                  color: selectedColor,
+                                ),
+                                items: accounts
+                                    .map(
+                                      (a) => DropdownMenuItem<Account>(
+                                        value: a,
+                                        child: Row(
+                                          children: [
+                                            Container(
+                                              width: 14,
+                                              height: 14,
+                                              decoration: BoxDecoration(
+                                                shape: BoxShape.circle,
+                                                color: _accountBaseColor(a),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Expanded(
+                                              child: Text(
+                                                '${a.name} • ${a.type.label}',
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: (v) {
+                                  setState(() => _selectedAccount = v);
+                                },
+                                decoration: InputDecoration(
+                                  filled: true,
+                                  fillColor: brightness == Brightness.dark
+                                      ? Colors.white.withOpacity(0.04)
+                                      : Colors.white.withOpacity(0.72),
+                                  labelText: "اختر الحساب",
+                                  prefixIcon: Icon(
+                                    Icons.wallet_rounded,
+                                    color: selectedColor,
+                                  ),
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 18,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                    borderSide: BorderSide.none,
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                    borderSide: BorderSide(
+                                      color: selectedColor.withOpacity(0.12),
+                                    ),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                    borderSide: BorderSide(
+                                      color: selectedColor,
+                                      width: 1.4,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 380),
+                          curve: Curves.easeOutCubic,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: cardColor,
+                            borderRadius: BorderRadius.circular(28),
+                            border: Border.all(
+                              color: selectedColor.withOpacity(0.10),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(
+                                  brightness == Brightness.dark ? 0.18 : 0.06,
+                                ),
+                                blurRadius: 20,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildSectionTitle(
+                                "النص المراد تحليله",
+                                Icons.text_snippet_rounded,
+                                selectedColor,
+                              ),
+                              const SizedBox(height: 14),
+                              TextField(
+                                controller: _text,
+                                maxLines: 10,
+                                minLines: 8,
+                                style: const TextStyle(height: 1.55),
+                                decoration: InputDecoration(
+                                  hintText:
+                                      "✏️ ألصق هنا الرسائل أو النص المراد تحليله...",
+                                  filled: true,
+                                  fillColor: brightness == Brightness.dark
+                                      ? Colors.white.withOpacity(0.04)
+                                      : Colors.white.withOpacity(0.72),
+                                  alignLabelWithHint: true,
+                                  contentPadding: const EdgeInsets.all(18),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(24),
+                                    borderSide: BorderSide.none,
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(24),
+                                    borderSide: BorderSide(
+                                      color: selectedColor.withOpacity(0.12),
+                                    ),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(24),
+                                    borderSide: BorderSide(
+                                      color: selectedColor,
+                                      width: 1.4,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: _isBusy ? null : _paste,
+                                  icon: const Icon(Icons.paste_rounded),
+                                  label: const Text(
+                                    "لصق وتحليل الحساب تلقائيًا",
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    elevation: 0,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 16,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    backgroundColor: selectedColor,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TweenAnimationBuilder<double>(
+                                tween: Tween(begin: 0.98, end: 1),
+                                duration: const Duration(milliseconds: 260),
+                                builder: (_, scale, child) {
+                                  return Transform.scale(
+                                    scale: scale,
+                                    child: child,
+                                  );
+                                },
+                                child: ElevatedButton.icon(
+                                  onPressed: _isBusy ? null : _goBubble,
+                                  icon: const Icon(Icons.add_task_rounded),
+                                  label: const Text("إضافة"),
+                                  style: ElevatedButton.styleFrom(
+                                    elevation: 0,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 18,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(22),
+                                    ),
+                                    backgroundColor: selectedColor,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: _isBusy ? null : _goVerifyReceive,
+                                icon: const Icon(Icons.send_rounded),
+                                label: const Text("تسليم"),
+                                style: FilledButton.styleFrom(
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 18,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(22),
+                                  ),
+                                  backgroundColor: Color.lerp(
+                                    selectedColor,
+                                    Colors.black,
+                                    brightness == Brightness.dark ? 0.12 : 0.05,
+                                  ),
+                                  foregroundColor: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                _buildLoadingOverlay(),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}

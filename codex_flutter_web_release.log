@@ -1,0 +1,12 @@
+Launching lib\main.dart on Web Server in release mode...
+Compiling lib\main.dart for the Web...                            111.5s
+√ Built build\web
+lib\main.dart is being served at http://127.0.0.1:53124
+The web-server device requires the Dart Debug Chrome extension for debugging. Consider using the Chrome or Edge devices for an improved development workflow.
+
+Flutter run key commands.
+h List all available interactive commands.
+d Detach (terminate "flutter run" but leave application running).
+c Clear the screen
+q Quit (terminate the application on the device).
+
