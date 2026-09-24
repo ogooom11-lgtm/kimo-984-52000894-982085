@@ -3,15 +3,21 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'timeline_analytics_screen.dart';
 import '../database_service.dart';
 import '../models.dart';
+import '../services/period_stats.dart';
 import 'add_account_screen.dart';
 import 'account_screen.dart';
 import 'add_edit_transaction_screen.dart';
 import 'operations_log_screen.dart';
 
 enum _QuickStatusFilter { all, added, received, cancelled }
+
+/// عرض حركات أحد أرقام «ملخص اليوم»
+enum _HomeFocus { addedToday, receivedToday, cancelledToday, pending }
+
+/// تصفية قائمة الحسابات في الصفحة الرئيسية
+enum _AccountsView { all, office, company }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -32,6 +38,8 @@ class _HomeScreenState extends State<HomeScreen> {
   _QuickStatusFilter _quickFilter = _QuickStatusFilter.all;
   bool _todayOnly = false;
   int? _selectedAccountId;
+  _HomeFocus? _focus;
+  _AccountsView _accountsView = _AccountsView.all;
 
   final Map<dynamic, String> _searchBlobCache = {};
   final Map<dynamic, int> _searchStampCache = {};
@@ -68,7 +76,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _query.isNotEmpty ||
       _quickFilter != _QuickStatusFilter.all ||
       _todayOnly ||
-      _selectedAccountId != null;
+      _selectedAccountId != null ||
+      _focus != null;
 
   void _clearAllSearch() {
     _searchCtrl.clear();
@@ -79,6 +88,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _quickFilter = _QuickStatusFilter.all;
       _todayOnly = false;
       _selectedAccountId = null;
+      _focus = null;
     });
   }
 
@@ -140,9 +150,25 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// ألوان هادئة ومتناسقة للحسابات (ثابتة لكل حساب)
+  static const List<Color> _accentPalette = [
+    Color(0xFF2563EB),
+    Color(0xFF059669),
+    Color(0xFF7C3AED),
+    Color(0xFFD97706),
+    Color(0xFFDB2777),
+    Color(0xFF0891B2),
+    Color(0xFFEA580C),
+    Color(0xFF4F46E5),
+    Color(0xFF0D9488),
+    Color(0xFFDC2626),
+    Color(0xFF0284C7),
+    Color(0xFF65A30D),
+  ];
+
   Color _accountAccent(int accountId) {
-    final hue = ((accountId * 47) % 360).toDouble();
-    return HSLColor.fromAHSL(1, hue, .70, .56).toColor();
+    final mixed = (accountId ~/ 7) + (accountId % 97);
+    return _accentPalette[mixed.abs() % _accentPalette.length];
   }
 
   String _normalizeText(String text) {
@@ -267,6 +293,151 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _isTodayTx(TransactionModel t) =>
       _isSameDay(_displayMomentOf(t), DateTime.now());
+
+  // ---------------- ملخص اليوم / تركيز النتائج ----------------
+
+  /// لحظة إلغاء الحركة: للمكاتب تاريخ الإلغاء، وللشركات نفس منطق الإحصائيات.
+  DateTime? _cancelMomentOf(TransactionModel t) => t.companyMovementType != null
+      ? PeriodStats.companyCancelMoment(t)
+      : t.cancelledAt;
+
+  /// حركة مكتب لم تُستلم بعد
+  bool _isPendingTx(TransactionModel t) =>
+      t.companyMovementType == null && t.status == TransactionStatus.added;
+
+  /// آخر نشاط على الحركة (إضافة/تسليم/إلغاء)
+  DateTime _lastActivityOf(TransactionModel t) {
+    var m = t.date;
+    final r = t.receivedAt;
+    final c = t.cancelledAt;
+    if (r != null && r.isAfter(m)) m = r;
+    if (c != null && c.isAfter(m)) m = c;
+    return m;
+  }
+
+  bool _matchesFocus(TransactionModel t) {
+    final focus = _focus;
+    if (focus == null) return true;
+    final now = DateTime.now();
+    switch (focus) {
+      case _HomeFocus.addedToday:
+        return _isSameDay(t.date, now);
+      case _HomeFocus.receivedToday:
+        return t.companyMovementType == null &&
+            t.receivedAt != null &&
+            _isSameDay(t.receivedAt!, now);
+      case _HomeFocus.cancelledToday:
+        final c = _cancelMomentOf(t);
+        return c != null && _isSameDay(c, now);
+      case _HomeFocus.pending:
+        return _isPendingTx(t);
+    }
+  }
+
+  String _focusLabel(_HomeFocus f) {
+    switch (f) {
+      case _HomeFocus.addedToday:
+        return 'مضافة اليوم';
+      case _HomeFocus.receivedToday:
+        return 'مستلمة اليوم';
+      case _HomeFocus.cancelledToday:
+        return 'ملغاة اليوم';
+      case _HomeFocus.pending:
+        return 'غير مستلمة';
+    }
+  }
+
+  IconData _focusIcon(_HomeFocus f) {
+    switch (f) {
+      case _HomeFocus.addedToday:
+        return Icons.add_circle_outline_rounded;
+      case _HomeFocus.receivedToday:
+        return Icons.task_alt_rounded;
+      case _HomeFocus.cancelledToday:
+        return Icons.cancel_outlined;
+      case _HomeFocus.pending:
+        return Icons.hourglass_top_rounded;
+    }
+  }
+
+  Color _focusColor(_HomeFocus f) {
+    switch (f) {
+      case _HomeFocus.addedToday:
+        return const Color(0xFF1E88E5);
+      case _HomeFocus.receivedToday:
+        return const Color(0xFF00A76F);
+      case _HomeFocus.cancelledToday:
+        return const Color(0xFFE53935);
+      case _HomeFocus.pending:
+        return const Color(0xFFF59E0B);
+    }
+  }
+
+  /// الضغط على أحد أرقام ملخص اليوم يعرض حركاته مباشرة
+  void _applyFocus(_HomeFocus f) {
+    _searchFocus.unfocus();
+    setState(() {
+      _focus = f;
+      _quickFilter = _QuickStatusFilter.all;
+      _todayOnly = false;
+    });
+  }
+
+  bool _isMorning() {
+    final h = DateTime.now().hour;
+    return h >= 4 && h < 12;
+  }
+
+  String _greeting() => _isMorning() ? 'صباح الخير' : 'مساء الخير';
+
+  static const List<String> _weekdayNames = [
+    'الاثنين',
+    'الثلاثاء',
+    'الأربعاء',
+    'الخميس',
+    'الجمعة',
+    'السبت',
+    'الأحد',
+  ];
+
+  static const List<String> _monthNames = [
+    'يناير',
+    'فبراير',
+    'مارس',
+    'أبريل',
+    'مايو',
+    'يونيو',
+    'يوليو',
+    'أغسطس',
+    'سبتمبر',
+    'أكتوبر',
+    'نوفمبر',
+    'ديسمبر',
+  ];
+
+  String _todayLabel() {
+    final now = DateTime.now();
+    return '${_weekdayNames[(now.weekday - 1) % 7]} ${now.day} ${_monthNames[(now.month - 1) % 12]}';
+  }
+
+  /// وقت نسبي مختصر لآخر نشاط على الحساب
+  String _relativeTime(DateTime d) {
+    final now = DateTime.now();
+    final diff = now.difference(d);
+    if (diff.isNegative || diff.inMinutes < 1) return 'الآن';
+    if (diff.inMinutes < 60) return 'منذ ${diff.inMinutes} د';
+    if (_isSameDay(d, now)) return 'اليوم ${_formatTime(d)}';
+    final days = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).difference(DateTime(d.year, d.month, d.day)).inDays;
+    if (days == 1) return 'أمس';
+    if (days == 2) return 'منذ يومين';
+    if (days <= 10) return 'منذ $days أيام';
+    if (d.year == now.year) return '${d.day} ${_monthNames[d.month - 1]}';
+    return _formatDay(d);
+  }
 
   int _cacheStampForTx(TransactionModel t) {
     return Object.hash(
@@ -460,6 +631,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_matchesQuickFilter(t)) return false;
 
     if (_todayOnly && !_isTodayTx(t)) return false;
+
+    if (!_matchesFocus(t)) return false;
 
     if (parsed.status != null && !_matchesStatusText(t, parsed.status!)) {
       return false;
@@ -714,6 +887,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   _quickFilter = _QuickStatusFilter.all;
                                   _todayOnly = false;
                                   _selectedAccountId = null;
+                                  _focus = null;
                                 });
                                 Navigator.pop(ctx);
                               },
@@ -874,7 +1048,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
+    final pageBg = _pageBg(context);
 
     return ValueListenableBuilder(
       valueListenable: DatabaseService.accountsBox.listenable(),
@@ -898,78 +1072,112 @@ class _HomeScreenState extends State<HomeScreen> {
                 ? _buildSearchResults(allTx, accountsById)
                 : <_RankedTx>[];
 
-            final txCountByAccount = <int, int>{};
-            int receivedToday = 0;
-            int cancelledToday = 0;
-            int addedCount = 0;
-            int officeMovementCount = 0;
-            int companyMovementCount = 0;
+            // ملخص اليوم + إحصائيات كل حساب (نفس منطق صفحة الإحصائيات:
+            // الإضافة بتاريخ الإضافة، والإلغاء بتاريخ الإلغاء)
+            final now = DateTime.now();
+            final statsByAccount = <int, _AccountStats>{};
+            var addedToday = 0;
+            var receivedToday = 0;
+            var cancelledToday = 0;
+            var pendingTotal = 0;
 
             for (final tx in allTx) {
-              txCountByAccount[tx.accountId] =
-                  (txCountByAccount[tx.accountId] ?? 0) + 1;
-
-              if (accountsById[tx.accountId]?.type == AccountType.company) {
-                companyMovementCount++;
-              } else {
-                officeMovementCount++;
+              final st = statsByAccount.putIfAbsent(
+                tx.accountId,
+                _AccountStats.new,
+              );
+              st.total++;
+              if (_isSameDay(tx.date, now)) {
+                st.today++;
+                addedToday++;
               }
-
-              if (tx.status == TransactionStatus.added) addedCount++;
-              if (tx.receivedAt != null &&
-                  _isSameDay(tx.receivedAt!, DateTime.now())) {
+              if (_isPendingTx(tx)) {
+                st.pending++;
+                pendingTotal++;
+              }
+              if (tx.companyMovementType == null &&
+                  tx.receivedAt != null &&
+                  _isSameDay(tx.receivedAt!, now)) {
                 receivedToday++;
               }
-              if (tx.cancelledAt != null &&
-                  _isSameDay(tx.cancelledAt!, DateTime.now())) {
+              final cancelAt = _cancelMomentOf(tx);
+              if (cancelAt != null && _isSameDay(cancelAt, now)) {
                 cancelledToday++;
               }
+              final last = _lastActivityOf(tx);
+              final prev = st.lastActivity;
+              if (prev == null || last.isAfter(prev)) st.lastActivity = last;
             }
+
+            final showSegments =
+                officeAccounts.isNotEmpty && companyAccounts.isNotEmpty;
+            final view = showSegments ? _accountsView : _AccountsView.all;
+            final sections = <_AccountSection>[
+              if (view == _AccountsView.all && showSegments) ...[
+                _AccountSection(
+                  title: 'حسابات المكاتب',
+                  icon: Icons.storefront_rounded,
+                  accounts: officeAccounts,
+                ),
+                _AccountSection(
+                  title: 'حسابات الشركات',
+                  icon: Icons.business_rounded,
+                  accounts: companyAccounts,
+                ),
+              ] else if (view == _AccountsView.office)
+                _AccountSection(accounts: officeAccounts)
+              else if (view == _AccountsView.company)
+                _AccountSection(accounts: companyAccounts)
+              else
+                _AccountSection(accounts: accounts),
+            ];
+
+            final focus = _focus;
+            final resultsTitle = focus != null && _query.isEmpty
+                ? _focusLabel(focus)
+                : "نتائج البحث";
 
             return Directionality(
               textDirection: TextDirection.rtl,
               child: Scaffold(
-                backgroundColor: cs.surface,
+                backgroundColor: pageBg,
                 floatingActionButtonLocation:
                     FloatingActionButtonLocation.endFloat,
                 floatingActionButton: SafeArea(
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 70),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        FloatingActionButton(
-                          heroTag: 'addAccountFab',
-                          tooltip: 'إضافة حساب',
-                          backgroundColor: cs.primary,
-                          foregroundColor: cs.onPrimary,
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const AddAccountScreen(),
-                              ),
-                            );
-                          },
-                          child: const Icon(Icons.add_rounded),
-                        ),
-                      ],
+                    child: FloatingActionButton(
+                      heroTag: 'addAccountFab',
+                      tooltip: 'إضافة حساب',
+                      backgroundColor: cs.primary,
+                      foregroundColor: cs.onPrimary,
+                      onPressed: _openAddAccount,
+                      child: const Icon(Icons.add_rounded),
                     ),
                   ),
                 ),
                 body: CustomScrollView(
                   physics: const BouncingScrollPhysics(),
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
                   slivers: [
                     SliverAppBar(
                       pinned: true,
-                      expandedHeight: 150,
-                      backgroundColor: cs.surface,
+                      toolbarHeight: 72,
+                      centerTitle: false,
+                      titleSpacing: 20,
+                      backgroundColor: pageBg,
                       foregroundColor: cs.onSurface,
                       surfaceTintColor: Colors.transparent,
+                      scrolledUnderElevation: 0,
+                      title: _HomeGreeting(
+                        greeting: _greeting(),
+                        morning: _isMorning(),
+                      ),
                       actions: [
-                        IconButton(
+                        _HeaderIconButton(
+                          icon: Icons.history_rounded,
                           tooltip: 'سجل العمليات',
-                          icon: const Icon(Icons.history_rounded),
                           onPressed: () => Navigator.push(
                             context,
                             MaterialPageRoute(
@@ -977,41 +1185,51 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 14),
                       ],
-                      flexibleSpace: FlexibleSpaceBar(
-                        titlePadding: const EdgeInsetsDirectional.only(
-                          start: 20,
-                          bottom: 18,
-                        ),
-                        title: Text(
-                          "الحسابات",
-                          style: TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 24,
-                            color: cs.onSurface,
-                          ),
-                        ),
-                        background: Container(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topRight,
-                              end: Alignment.bottomLeft,
-                              colors: [cs.primary.withOpacity(.14), cs.surface],
-                            ),
-                          ),
-                        ),
-                      ),
                     ),
 
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
                         child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
+                            AnimatedSize(
+                              duration: const Duration(milliseconds: 260),
+                              curve: Curves.easeOutCubic,
+                              alignment: Alignment.topCenter,
+                              child: _hasActiveSearch
+                                  ? const SizedBox(width: double.infinity)
+                                  : Padding(
+                                      padding: const EdgeInsets.only(
+                                        bottom: 16,
+                                      ),
+                                      child: _TodayHero(
+                                        dateText: _todayLabel(),
+                                        added: addedToday,
+                                        received: receivedToday,
+                                        cancelled: cancelledToday,
+                                        pending: pendingTotal,
+                                        officeCount: officeAccounts.length,
+                                        companyCount: companyAccounts.length,
+                                        totalMovements: allTx.length,
+                                        onTapMetric: _applyFocus,
+                                      ),
+                                    ),
+                            ),
                             _buildSearchBox(context, accounts),
-                            const SizedBox(height: 10),
-                            _buildQuickFilters(accounts),
+                            AnimatedSize(
+                              duration: const Duration(milliseconds: 220),
+                              curve: Curves.easeOutCubic,
+                              alignment: Alignment.topCenter,
+                              child: (_searchFocused || _hasActiveSearch)
+                                  ? Padding(
+                                      padding: const EdgeInsets.only(top: 10),
+                                      child: _buildQuickFilters(accounts),
+                                    )
+                                  : const SizedBox(width: double.infinity),
+                            ),
                           ],
                         ),
                       ),
@@ -1020,175 +1238,114 @@ class _HomeScreenState extends State<HomeScreen> {
                     if (!_hasActiveSearch) ...[
                       SliverToBoxAdapter(
                         child: Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                          child: SizedBox(
-                            height: 96,
-                            child: ListView(
-                              scrollDirection: Axis.horizontal,
-                              children: [
-                                _StatCard(
-                                  title: "حسابات المكاتب",
-                                  value: officeAccounts.length.toString(),
-                                  icon: Icons.account_balance_wallet_rounded,
-                                  accent: const Color(0xFF2563EB),
-                                ),
-                                _StatCard(
-                                  title: "حسابات الشركات",
-                                  value: companyAccounts.length.toString(),
-                                  icon: Icons.business_rounded,
-                                  accent: const Color(0xFF7C3AED),
-                                ),
-                                _StatCard(
-                                  title: "حركات المكاتب",
-                                  value: officeMovementCount.toString(),
-                                  icon: Icons.receipt_long_rounded,
-                                  accent: const Color(0xFF0891B2),
-                                ),
-                                _StatCard(
-                                  title: "حركات الشركات",
-                                  value: companyMovementCount.toString(),
-                                  icon: Icons.swap_horiz_rounded,
-                                  accent: const Color(0xFF0F766E),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(18, 8, 18, 10),
-                          child: Text(
-                            "دليل الحسابات",
-                            style: textTheme.titleMedium?.copyWith(
-                              color: cs.onSurface,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (accounts.isEmpty)
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
-                            child: _EmptyStateCard(
-                              icon: Icons.account_balance_wallet_outlined,
-                              title: "لا يوجد حسابات حاليًا",
-                              subtitle: "ابدأ بإضافة حساب جديد من الزر العائم",
-                            ),
-                          ),
-                        )
-                      else ...[
-                        if (officeAccounts.isNotEmpty) ...[
-                          SliverToBoxAdapter(
-                            child: _AccountGroupHeader(
-                              title: 'حسابات المكاتب',
-                              subtitle: '${officeAccounts.length} حساب',
-                              icon: Icons.account_balance_wallet_rounded,
-                              accent: const Color(0xFF2563EB),
-                            ),
-                          ),
-                          SliverList.builder(
-                            itemCount: officeAccounts.length,
-                            itemBuilder: (context, index) {
-                              final account = officeAccounts[index];
-                              final txCount = txCountByAccount[account.id] ?? 0;
-
-                              return _AnimatedEntrance(
-                                index: index,
-                                child: _AccountCard(
-                                  account: account,
-                                  accent: _accountAccent(account.id),
-                                  txCount: txCount,
-                                  onTap: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            AccountScreen(account: account),
-                                      ),
-                                    );
-                                  },
-                                  onMore: () =>
-                                      _showAccountActions(context, account),
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                        if (companyAccounts.isNotEmpty) ...[
-                          SliverToBoxAdapter(
-                            child: _AccountGroupHeader(
-                              title: 'حسابات الشركات',
-                              subtitle: '${companyAccounts.length} حساب',
-                              icon: Icons.business_rounded,
-                              accent: const Color(0xFF7C3AED),
-                            ),
-                          ),
-                          SliverList.builder(
-                            itemCount: companyAccounts.length,
-                            itemBuilder: (context, index) {
-                              final account = companyAccounts[index];
-                              final txCount = txCountByAccount[account.id] ?? 0;
-
-                              return _AnimatedEntrance(
-                                index: officeAccounts.length + index,
-                                child: _AccountCard(
-                                  account: account,
-                                  accent: const Color(0xFF7C3AED),
-                                  txCount: txCount,
-                                  onTap: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            AccountScreen(account: account),
-                                      ),
-                                    );
-                                  },
-                                  onMore: () =>
-                                      _showAccountActions(context, account),
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                      ],
-                    ] else ...[
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+                          padding: const EdgeInsets.fromLTRB(20, 24, 16, 12),
                           child: Row(
                             children: [
                               Text(
-                                "نتائج البحث",
-                                style: textTheme.titleMedium?.copyWith(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w800,
+                                "الحسابات",
+                                style: TextStyle(
+                                  color: cs.onSurface,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 18,
                                 ),
                               ),
                               const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 4,
+                              _CountBadge(count: accounts.length),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (showSegments)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                            child: _AccountsSegment(
+                              value: view,
+                              total: accounts.length,
+                              office: officeAccounts.length,
+                              company: companyAccounts.length,
+                              onChanged: (v) =>
+                                  setState(() => _accountsView = v),
+                            ),
+                          ),
+                        ),
+                      if (accounts.isEmpty)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                            child: _NoAccountsCard(onAdd: _openAddAccount),
+                          ),
+                        )
+                      else
+                        for (final section in sections) ...[
+                          if (section.title != null)
+                            SliverToBoxAdapter(
+                              child: _SectionHeader(
+                                title: section.title!,
+                                icon: section.icon ?? Icons.folder_rounded,
+                                count: section.accounts.length,
+                              ),
+                            ),
+                          SliverList.builder(
+                            itemCount: section.accounts.length,
+                            itemBuilder: (context, index) {
+                              final account = section.accounts[index];
+                              final stats =
+                                  statsByAccount[account.id] ?? _AccountStats();
+                              final last = stats.lastActivity;
+
+                              return _AnimatedEntrance(
+                                index: index,
+                                child: _AccountTile(
+                                  account: account,
+                                  accent: _accountAccent(account.id),
+                                  stats: stats,
+                                  lastActivityText: last == null
+                                      ? null
+                                      : _relativeTime(last),
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            AccountScreen(account: account),
+                                      ),
+                                    );
+                                  },
+                                  onMore: () =>
+                                      _showAccountActions(context, account),
                                 ),
-                                decoration: BoxDecoration(
-                                  color: cs.primary.withOpacity(.14),
-                                  borderRadius: BorderRadius.circular(999),
-                                  border: Border.all(
-                                    color: cs.primary.withOpacity(.28),
-                                  ),
-                                ),
-                                child: Text(
-                                  "${searchResults.length}",
-                                  style: TextStyle(
-                                    color: cs.primary,
-                                    fontWeight: FontWeight.w700,
-                                  ),
+                              );
+                            },
+                          ),
+                          const SliverToBoxAdapter(child: SizedBox(height: 6)),
+                        ],
+                    ] else ...[
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 18, 12, 8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        resultsTitle,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: cs.onSurface,
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 17,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _CountBadge(count: searchResults.length),
+                                  ],
                                 ),
                               ),
-                              const Spacer(),
                               TextButton.icon(
                                 onPressed: _clearAllSearch,
                                 icon: const Icon(Icons.close_rounded),
@@ -1199,9 +1356,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       if (searchResults.isEmpty)
-                        SliverToBoxAdapter(
+                        const SliverToBoxAdapter(
                           child: Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 30, 16, 0),
+                            padding: EdgeInsets.fromLTRB(16, 18, 16, 0),
                             child: _EmptyStateCard(
                               icon: Icons.search_off_rounded,
                               title: "لا توجد نتائج مطابقة",
@@ -1310,28 +1467,39 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _openAddAccount() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AddAccountScreen()),
+    );
+  }
+
   Widget _buildSearchBox(BuildContext context, List<Account> accounts) {
     final cs = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _isDark(context);
+    final filtersActive =
+        _quickFilter != _QuickStatusFilter.all ||
+        _todayOnly ||
+        _selectedAccountId != null ||
+        _focus != null;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
       decoration: BoxDecoration(
-        color: isDark
-            ? Colors.white.withOpacity(.08)
-            : cs.surfaceContainerHighest.withOpacity(.75),
-        borderRadius: BorderRadius.circular(22),
+        color: _cardBg(context),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: _searchFocused
-              ? cs.primary.withOpacity(.55)
-              : cs.outlineVariant.withOpacity(.55),
+              ? cs.primary.withValues(alpha: .70)
+              : _outline(context),
+          width: _searchFocused ? 1.4 : 1,
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(isDark ? .18 : .06),
-            blurRadius: 18,
-            offset: const Offset(0, 10),
+            color: Colors.black.withValues(alpha: isDark ? .16 : .04),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
           ),
         ],
       ),
@@ -1341,14 +1509,15 @@ class _HomeScreenState extends State<HomeScreen> {
         textInputAction: TextInputAction.search,
         style: TextStyle(color: cs.onSurface, fontWeight: FontWeight.w600),
         decoration: InputDecoration(
-          hintText: "ابحث عن حركة، حساب، عملة، حالة، تاريخ...",
-          hintStyle: TextStyle(color: cs.onSurfaceVariant.withOpacity(.92)),
+          hintText: "ابحث عن حركة، حساب، عملة، تاريخ…",
+          hintStyle: TextStyle(color: cs.onSurfaceVariant),
           prefixIcon: Icon(Icons.search_rounded, color: cs.onSurfaceVariant),
           suffixIcon: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               if (_liveQuery.isNotEmpty)
                 IconButton(
+                  tooltip: 'مسح',
                   onPressed: () {
                     _searchCtrl.clear();
                     _debounce?.cancel();
@@ -1360,12 +1529,22 @@ class _HomeScreenState extends State<HomeScreen> {
                   icon: Icon(Icons.close_rounded, color: cs.onSurfaceVariant),
                 ),
               IconButton(
+                tooltip: 'فلترة',
                 onPressed: () => _showSearchFilterSheet(context, accounts),
-                icon: Icon(Icons.tune_rounded, color: cs.primary),
+                icon: Badge(
+                  isLabelVisible: filtersActive,
+                  smallSize: 8,
+                  backgroundColor: cs.primary,
+                  child: Icon(Icons.tune_rounded, color: cs.primary),
+                ),
               ),
+              const SizedBox(width: 4),
             ],
           ),
+          filled: false,
           border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 16,
             vertical: 16,
@@ -1381,12 +1560,22 @@ class _HomeScreenState extends State<HomeScreen> {
         .where((a) => a.id == _selectedAccountId)
         .cast<Account?>()
         .firstOrNull;
+    final focus = _focus;
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       physics: const BouncingScrollPhysics(),
       child: Row(
         children: [
+          if (focus != null)
+            _QuickChip(
+              text: _focusLabel(focus),
+              icon: _focusIcon(focus),
+              selected: true,
+              closable: true,
+              accent: _focusColor(focus),
+              onTap: () => setState(() => _focus = null),
+            ),
           _QuickChip(
             text: "الكل",
             selected: _quickFilter == _QuickStatusFilter.all,
@@ -1394,19 +1583,23 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           _QuickChip(
             text: "مضافة",
+            icon: Icons.schedule_rounded,
             selected: _quickFilter == _QuickStatusFilter.added,
+            accent: const Color(0xFF1E88E5),
             onTap: () =>
                 setState(() => _quickFilter = _QuickStatusFilter.added),
           ),
           _QuickChip(
             text: "مستلمة",
+            icon: Icons.check_circle_outline_rounded,
             selected: _quickFilter == _QuickStatusFilter.received,
-            accent: const Color(0xFF00C853),
+            accent: const Color(0xFF00A76F),
             onTap: () =>
                 setState(() => _quickFilter = _QuickStatusFilter.received),
           ),
           _QuickChip(
             text: "ملغية",
+            icon: Icons.cancel_outlined,
             selected: _quickFilter == _QuickStatusFilter.cancelled,
             accent: const Color(0xFFE53935),
             onTap: () =>
@@ -1414,6 +1607,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           _QuickChip(
             text: "اليوم",
+            icon: Icons.today_rounded,
             selected: _todayOnly,
             accent: cs.primary,
             onTap: () => setState(() => _todayOnly = !_todayOnly),
@@ -1422,6 +1616,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _QuickChip(
               text: "حساب: ${selectedAccount.name}",
               selected: true,
+              closable: true,
               accent: _accountAccent(selectedAccount.id),
               onTap: () => setState(() => _selectedAccountId = null),
             ),
@@ -1538,7 +1733,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (newName.isNotEmpty && newName != account.name) {
         account.name = newName;
         await account.save();
-        if (mounted) {
+        if (context.mounted) {
           ScaffoldMessenger.of(
             context,
           ).showSnackBar(const SnackBar(content: Text('تم تعديل الاسم')));
@@ -1583,7 +1778,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (ok == true) {
       await account.delete();
-      if (mounted) {
+      if (context.mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('تم حذف الحساب')));
@@ -1647,53 +1842,508 @@ class _AnimatedEntrance extends StatelessWidget {
   }
 }
 
+/// إحصائيات مختصرة لكل حساب (تُحسب مرة واحدة في كل بناء)
+class _AccountStats {
+  int total = 0;
+  int today = 0;
+  int pending = 0;
+  DateTime? lastActivity;
+}
+
+class _AccountSection {
+  final String? title;
+  final IconData? icon;
+  final List<Account> accounts;
+
+  const _AccountSection({required this.accounts, this.title, this.icon});
+}
+
+// ---------------- ألوان مشتركة ----------------
+
+bool _isDark(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark;
+
+Color _pageBg(BuildContext context) {
+  final cs = Theme.of(context).colorScheme;
+  return _isDark(context) ? cs.surface : cs.surfaceContainerLow;
+}
+
+Color _cardBg(BuildContext context) {
+  final cs = Theme.of(context).colorScheme;
+  return _isDark(context) ? cs.surfaceContainer : cs.surfaceContainerLowest;
+}
+
+Color _outline(BuildContext context) {
+  final cs = Theme.of(context).colorScheme;
+  return cs.outlineVariant.withValues(alpha: _isDark(context) ? .30 : .55);
+}
+
+/// لون نص/أيقونة ملوّن بتباين مناسب للوضعين الفاتح والداكن
+Color _fg(BuildContext context, Color c) => _isDark(context)
+    ? Color.lerp(c, Colors.white, .25)!
+    : Color.lerp(c, Colors.black, .10)!;
+
+// ---------------- الترويسة ----------------
+
+class _HomeGreeting extends StatelessWidget {
+  final String greeting;
+  final bool morning;
+
+  const _HomeGreeting({required this.greeting, required this.morning});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              morning ? Icons.wb_sunny_rounded : Icons.nightlight_round,
+              size: 16,
+              color: morning
+                  ? const Color(0xFFF59E0B)
+                  : _fg(context, const Color(0xFF6366F1)),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              greeting,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'مدير الحسابات',
+          style: TextStyle(
+            fontSize: 23,
+            height: 1.15,
+            fontWeight: FontWeight.w900,
+            color: cs.onSurface,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HeaderIconButton extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  const _HeaderIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      style: IconButton.styleFrom(
+        backgroundColor: _cardBg(context),
+        foregroundColor: cs.onSurface,
+        side: BorderSide(color: _outline(context)),
+      ),
+      icon: Icon(icon),
+    );
+  }
+}
+
+// ---------------- ملخص اليوم ----------------
+
+class _TodayHero extends StatelessWidget {
+  final String dateText;
+  final int added;
+  final int received;
+  final int cancelled;
+  final int pending;
+  final int officeCount;
+  final int companyCount;
+  final int totalMovements;
+  final ValueChanged<_HomeFocus> onTapMetric;
+
+  const _TodayHero({
+    required this.dateText,
+    required this.added,
+    required this.received,
+    required this.cancelled,
+    required this.pending,
+    required this.officeCount,
+    required this.companyCount,
+    required this.totalMovements,
+    required this.onTapMetric,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = _isDark(context);
+    final colors = dark
+        ? const [Color(0xFF0B4F4A), Color(0xFF137A70)]
+        : const [Color(0xFF0F766E), Color(0xFF26A69A)];
+    const white = Colors.white;
+
+    Widget glow(double size, double alpha) => Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: white.withValues(alpha: alpha),
+      ),
+    );
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: colors,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: colors.last.withValues(alpha: dark ? .22 : .30),
+            blurRadius: 24,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          PositionedDirectional(top: -46, end: -34, child: glow(160, .08)),
+          PositionedDirectional(bottom: -60, start: -26, child: glow(140, .06)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.insights_rounded, color: white, size: 20),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'ملخص اليوم',
+                        style: TextStyle(
+                          color: white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: white.withValues(alpha: .16),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        dateText,
+                        style: const TextStyle(
+                          color: white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _HeroMetric(
+                        value: added,
+                        label: 'مضافة اليوم',
+                        icon: Icons.add_circle_outline_rounded,
+                        onTap: added > 0
+                            ? () => onTapMetric(_HomeFocus.addedToday)
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _HeroMetric(
+                        value: received,
+                        label: 'مستلمة اليوم',
+                        icon: Icons.task_alt_rounded,
+                        onTap: received > 0
+                            ? () => onTapMetric(_HomeFocus.receivedToday)
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _HeroMetric(
+                        value: cancelled,
+                        label: 'ملغاة اليوم',
+                        icon: Icons.cancel_outlined,
+                        onTap: cancelled > 0
+                            ? () => onTapMetric(_HomeFocus.cancelledToday)
+                            : null,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Material(
+                  color: white.withValues(alpha: .14),
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: pending > 0
+                        ? () => onTapMetric(_HomeFocus.pending)
+                        : null,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 11,
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.hourglass_top_rounded,
+                            color: white,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              pending > 0
+                                  ? 'غير مستلمة: $pending حركة'
+                                  : 'لا توجد حركات غير مستلمة',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: white,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                          ),
+                          if (pending > 0)
+                            Icon(
+                              Icons.chevron_right_rounded,
+                              color: white.withValues(alpha: .85),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'المكاتب: $officeCount  •  الشركات: $companyCount  •  كل الحركات: $totalMovements',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: white.withValues(alpha: .80),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeroMetric extends StatelessWidget {
+  final int value;
+  final String label;
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  const _HeroMetric({
+    required this.value,
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const white = Colors.white;
+    return Material(
+      color: white.withValues(alpha: .14),
+      borderRadius: BorderRadius.circular(18),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: white.withValues(alpha: .90), size: 19),
+              const SizedBox(height: 6),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  '$value',
+                  style: const TextStyle(
+                    color: white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 24,
+                    height: 1.1,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: white.withValues(alpha: .86),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 11.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- عناصر صغيرة ----------------
+
+class _CountBadge extends StatelessWidget {
+  final int count;
+
+  const _CountBadge({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 26),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$count',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: _fg(context, cs.primary),
+          fontWeight: FontWeight.w800,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final String text;
+  final Color color;
+
+  const _StatusPill({required this.text, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: .28)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: _fg(context, color),
+          fontWeight: FontWeight.w700,
+          fontSize: 11,
+        ),
+      ),
+    );
+  }
+}
+
 class _QuickChip extends StatelessWidget {
   final String text;
   final bool selected;
   final VoidCallback onTap;
   final Color? accent;
+  final IconData? icon;
+  final bool closable;
 
   const _QuickChip({
     required this.text,
     required this.selected,
     required this.onTap,
     this.accent,
+    this.icon,
+    this.closable = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-    final isDark = theme.brightness == Brightness.dark;
+    final cs = Theme.of(context).colorScheme;
+    final dark = _isDark(context);
     final c = accent ?? cs.primary;
-
+    final fg = selected ? _fg(context, c) : cs.onSurface;
     final bg = selected
-        ? c.withOpacity(isDark ? .20 : .12)
-        : (isDark ? cs.surfaceContainerHigh : cs.surface);
-
+        ? c.withValues(alpha: dark ? .22 : .13)
+        : _cardBg(context);
     final border = selected
-        ? c.withOpacity(isDark ? .55 : .38)
-        : cs.outlineVariant.withOpacity(isDark ? .55 : .85);
-
-    final textColor = selected ? c : cs.onSurface;
+        ? c.withValues(alpha: dark ? .55 : .40)
+        : _outline(context);
 
     return Padding(
       padding: const EdgeInsetsDirectional.only(end: 8),
       child: Material(
         color: bg,
-        borderRadius: BorderRadius.circular(999),
+        shape: StadiumBorder(side: BorderSide(color: border)),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(999),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: border),
-            ),
-            child: Text(
-              text,
-              style: TextStyle(color: textColor, fontWeight: FontWeight.w700),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (icon != null) ...[
+                  Icon(icon, size: 16, color: selected ? fg : _fg(context, c)),
+                  const SizedBox(width: 6),
+                ],
+                Text(
+                  text,
+                  style: TextStyle(
+                    color: fg,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+                if (closable) ...[
+                  const SizedBox(width: 6),
+                  Icon(Icons.close_rounded, size: 15, color: fg),
+                ],
+              ],
             ),
           ),
         ),
@@ -1702,65 +2352,464 @@ class _QuickChip extends StatelessWidget {
   }
 }
 
-class _StatCard extends StatelessWidget {
-  final String title;
-  final String value;
-  final IconData icon;
-  final Color accent;
+class _AccountsSegment extends StatelessWidget {
+  final _AccountsView value;
+  final int total;
+  final int office;
+  final int company;
+  final ValueChanged<_AccountsView> onChanged;
 
-  const _StatCard({
-    required this.title,
+  const _AccountsSegment({
     required this.value,
-    required this.icon,
-    required this.accent,
+    required this.total,
+    required this.office,
+    required this.company,
+    required this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final items = <(_AccountsView, String, int)>[
+      (_AccountsView.all, 'الكل', total),
+      (_AccountsView.office, 'المكاتب', office),
+      (_AccountsView.company, 'الشركات', company),
+    ];
+
     return Container(
-      width: 168,
-      margin: const EdgeInsetsDirectional.only(end: 10),
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        gradient: LinearGradient(
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-          colors: [accent.withOpacity(.22), Colors.white.withOpacity(.04)],
-        ),
-        border: Border.all(color: accent.withOpacity(.24)),
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
         children: [
-          CircleAvatar(
-            radius: 22,
-            backgroundColor: accent.withOpacity(.16),
-            child: Icon(icon, color: accent),
+          for (final item in items)
+            Expanded(
+              child: _SegmentButton(
+                label: item.$2,
+                count: item.$3,
+                selected: value == item.$1,
+                onTap: () => onChanged(item.$1),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SegmentButton extends StatelessWidget {
+  final String label;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _SegmentButton({
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 4),
+          decoration: BoxDecoration(
+            color: selected ? _cardBg(context) : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withValues(
+                        alpha: _isDark(context) ? .20 : .06,
+                      ),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  value,
-                  style: const TextStyle(
-                    color: Colors.white,
+                  label,
+                  style: TextStyle(
                     fontWeight: FontWeight.w800,
-                    fontSize: 20,
+                    fontSize: 13,
+                    color: selected ? cs.onSurface : cs.onSurfaceVariant,
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(width: 6),
                 Text(
-                  title,
+                  '$count',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(.72),
+                    fontWeight: FontWeight.w800,
                     fontSize: 12,
+                    color: selected
+                        ? _fg(context, cs.primary)
+                        : cs.onSurfaceVariant,
                   ),
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final int count;
+
+  const _SectionHeader({
+    required this.title,
+    required this.icon,
+    required this.count,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(22, 6, 22, 10),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: muted),
+          const SizedBox(width: 6),
+          Text(
+            title,
+            style: TextStyle(
+              color: muted,
+              fontWeight: FontWeight.w800,
+              fontSize: 13.5,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '• $count',
+            style: TextStyle(
+              color: muted.withValues(alpha: .8),
+              fontWeight: FontWeight.w700,
+              fontSize: 12.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------- بطاقة الحساب ----------------
+
+class _AccountTile extends StatelessWidget {
+  final Account account;
+  final Color accent;
+  final _AccountStats stats;
+  final String? lastActivityText;
+  final VoidCallback onTap;
+  final VoidCallback onMore;
+
+  const _AccountTile({
+    required this.account,
+    required this.accent,
+    required this.stats,
+    required this.lastActivityText,
+    required this.onTap,
+    required this.onMore,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final muted = cs.onSurfaceVariant;
+    final isCompany = account.type == AccountType.company;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+      child: Material(
+        color: _cardBg(context),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(22),
+          side: BorderSide(color: _outline(context)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onMore,
+          child: Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(14, 12, 4, 12),
+            child: Row(
+              children: [
+                _AccountAvatar(name: account.name, color: accent),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              account.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: cs.onSurface,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          _TypeBadge(isCompany: isCompany),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 4,
+                        children: [
+                          _MetaText(
+                            icon: Icons.receipt_long_rounded,
+                            text: '${stats.total} حركة',
+                            color: muted,
+                          ),
+                          if (stats.pending > 0)
+                            _MetaText(
+                              icon: Icons.hourglass_top_rounded,
+                              text: '${stats.pending} غير مستلمة',
+                              color: _fg(context, const Color(0xFFEA580C)),
+                            ),
+                          if (stats.today > 0)
+                            _MetaText(
+                              icon: Icons.bolt_rounded,
+                              text: '${stats.today} اليوم',
+                              color: _fg(context, const Color(0xFF0D9488)),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    IconButton(
+                      tooltip: 'خيارات الحساب',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: onMore,
+                      icon: Icon(Icons.more_horiz_rounded, color: muted),
+                    ),
+                    if (lastActivityText != null)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(end: 10),
+                        child: Text(
+                          lastActivityText!,
+                          style: TextStyle(
+                            color: muted.withValues(alpha: .85),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountAvatar extends StatelessWidget {
+  final String name;
+  final Color color;
+
+  const _AccountAvatar({required this.name, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final trimmed = name.trim();
+    final initial = trimmed.isEmpty
+        ? '؟'
+        : trimmed.characters.first.toUpperCase();
+    return Container(
+      width: 48,
+      height: 48,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        gradient: LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: [color, Color.lerp(color, Colors.white, .30)!],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(alpha: .28),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w900,
+          fontSize: 20,
+        ),
+      ),
+    );
+  }
+}
+
+class _TypeBadge extends StatelessWidget {
+  final bool isCompany;
+
+  const _TypeBadge({required this.isCompany});
+
+  @override
+  Widget build(BuildContext context) {
+    final base = isCompany ? const Color(0xFF8B5CF6) : const Color(0xFF3B82F6);
+    final fg = _fg(context, base);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: base.withValues(alpha: _isDark(context) ? .20 : .11),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isCompany ? Icons.business_rounded : Icons.storefront_rounded,
+            size: 12,
+            color: fg,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isCompany ? 'شركة' : 'مكتب',
+            style: TextStyle(
+              color: fg,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetaText extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  const _MetaText({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 4),
+        Text(
+          text,
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------- الحالات الفارغة ----------------
+
+class _NoAccountsCard extends StatelessWidget {
+  final VoidCallback onAdd;
+
+  const _NoAccountsCard({required this.onAdd});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 26, 20, 22),
+      decoration: BoxDecoration(
+        color: _cardBg(context),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: _outline(context)),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 72,
+            height: 72,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                begin: Alignment.topRight,
+                end: Alignment.bottomLeft,
+                colors: [Color(0xFF0F766E), Color(0xFF26A69A)],
+              ),
+            ),
+            child: const Icon(
+              Icons.account_balance_wallet_rounded,
+              color: Colors.white,
+              size: 34,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'ابدأ بإضافة أول حساب',
+            style: TextStyle(
+              color: cs.onSurface,
+              fontWeight: FontWeight.w900,
+              fontSize: 18,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'أنشئ حساب مكتب أو شركة لتبدأ بتسجيل الحركات وتحليل الرسائل.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: cs.onSurfaceVariant, height: 1.5),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: onAdd,
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('إضافة حساب'),
           ),
         ],
       ),
@@ -1786,14 +2835,22 @@ class _EmptyStateCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(22),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerLow,
+        color: _cardBg(context),
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: cs.outlineVariant.withOpacity(.45)),
+        border: Border.all(color: _outline(context)),
       ),
       child: Column(
         children: [
-          Icon(icon, size: 44, color: cs.onSurfaceVariant),
-          const SizedBox(height: 12),
+          Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: cs.primary.withValues(alpha: .10),
+            ),
+            child: Icon(icon, size: 32, color: _fg(context, cs.primary)),
+          ),
+          const SizedBox(height: 14),
           Text(
             title,
             style: TextStyle(
@@ -1809,229 +2866,6 @@ class _EmptyStateCard extends StatelessWidget {
             style: TextStyle(color: cs.onSurfaceVariant),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _AccountGroupHeader extends StatelessWidget {
-  final String title;
-  final String subtitle;
-  final IconData icon;
-  final Color accent;
-
-  const _AccountGroupHeader({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-    required this.accent,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          gradient: LinearGradient(
-            begin: Alignment.topRight,
-            end: Alignment.bottomLeft,
-            colors: [
-              accent.withOpacity(.18),
-              cs.surfaceContainerHigh.withOpacity(.72),
-            ],
-          ),
-          border: Border.all(color: accent.withOpacity(.30)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: accent.withOpacity(.16),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Icon(icon, color: accent),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                title,
-                style: TextStyle(
-                  color: cs.onSurface,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: accent.withOpacity(.12),
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                subtitle,
-                style: TextStyle(
-                  color: accent,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AccountCard extends StatelessWidget {
-  final Account account;
-  final Color accent;
-  final int txCount;
-  final VoidCallback onTap;
-  final VoidCallback onMore;
-
-  const _AccountCard({
-    required this.account,
-    required this.accent,
-    required this.txCount,
-    required this.onTap,
-    required this.onMore,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final light = HSLColor.fromColor(accent).withLightness(.62).toColor();
-    final isCompany = account.type == AccountType.company;
-    final typeColor = isCompany
-        ? const Color(0xFFE9D5FF)
-        : const Color(0xFFDBEAFE);
-    final typeIcon = isCompany
-        ? Icons.business_rounded
-        : Icons.account_balance_wallet_rounded;
-    final typeLabel = isCompany ? 'شركة' : 'مكتب';
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(26),
-        gradient: LinearGradient(
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-          colors: [accent.withOpacity(.95), light.withOpacity(.92)],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: accent.withOpacity(.28),
-            blurRadius: 24,
-            offset: const Offset(0, 12),
-          ),
-        ],
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(26),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        account.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 20,
-                        ),
-                      ),
-                    ),
-                    Container(
-                      margin: const EdgeInsetsDirectional.only(end: 8),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 7,
-                      ),
-                      decoration: BoxDecoration(
-                        color: typeColor.withOpacity(.28),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(color: typeColor.withOpacity(.50)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(typeIcon, color: Colors.white, size: 15),
-                          const SizedBox(width: 5),
-                          Text(
-                            typeLabel,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w800,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: onMore,
-                      icon: const Icon(
-                        Icons.more_horiz_rounded,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.14),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        "$txCount حركة",
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    const Spacer(),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.18),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.arrow_forward_rounded,
-                        color: Colors.white,
-                        size: 18,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -2119,8 +2953,7 @@ class _SearchTxCardState extends State<_SearchTxCard>
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final cardBg = isDark ? cs.surfaceContainerLow : cs.surface;
+    final isDark = _isDark(context);
     final primaryText = cs.onSurface;
     final secondaryText = cs.onSurfaceVariant;
 
@@ -2128,49 +2961,54 @@ class _SearchTxCardState extends State<_SearchTxCard>
         widget.tx.companyMovementType?.isCancelled == true ||
         widget.tx.status == TransactionStatus.cancelled;
 
+    final swipeBase = primaryIsReactivate
+        ? const Color(0xFF16A34A)
+        : const Color(0xFFDC2626);
+    final swipeFg = _fg(context, swipeBase);
+    const editBase = Color(0xFF2563EB);
+    final editFg = _fg(context, editBase);
+
+    // السحب باتجاه القراءة (من اليمين لليسار): إلغاء / إعادة تفعيل
     final primaryBg = Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(24),
-        color: primaryIsReactivate
-            ? const Color(0xFFE8F5E9)
-            : const Color(0xFFFFEBEE),
+        borderRadius: BorderRadius.circular(22),
+        color: swipeBase.withValues(alpha: isDark ? .22 : .12),
       ),
-      alignment: Alignment.centerLeft,
+      alignment: AlignmentDirectional.centerStart,
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
             primaryIsReactivate ? Icons.refresh_rounded : Icons.cancel_rounded,
-            color: primaryIsReactivate ? Colors.green : Colors.red,
+            color: swipeFg,
           ),
           const SizedBox(width: 8),
           Text(
             primaryIsReactivate ? "إعادة تفعيل" : "إلغاء",
-            style: TextStyle(
-              color: primaryIsReactivate ? Colors.green : Colors.red,
-              fontWeight: FontWeight.bold,
-            ),
+            style: TextStyle(color: swipeFg, fontWeight: FontWeight.bold),
           ),
         ],
       ),
     );
 
+    // السحب بالعكس: تعديل
     final secondaryBg = Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(24),
-        color: const Color(0xFFE3F2FD),
+        borderRadius: BorderRadius.circular(22),
+        color: editBase.withValues(alpha: isDark ? .22 : .12),
       ),
-      alignment: Alignment.centerRight,
+      alignment: AlignmentDirectional.centerEnd,
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: const Row(
-        mainAxisAlignment: MainAxisAlignment.end,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Text(
             "تعديل",
-            style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
+            style: TextStyle(color: editFg, fontWeight: FontWeight.bold),
           ),
-          SizedBox(width: 8),
-          Icon(Icons.edit_rounded, color: Colors.blue),
+          const SizedBox(width: 8),
+          Icon(Icons.edit_rounded, color: editFg),
         ],
       ),
     );
@@ -2206,41 +3044,35 @@ class _SearchTxCardState extends State<_SearchTxCard>
         return false;
       },
       child: Container(
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(24),
-          color: cardBg,
-          border: Border.all(
-            color: widget.accent.withOpacity(isDark ? .40 : .24),
-          ),
+          borderRadius: BorderRadius.circular(22),
+          color: _cardBg(context),
+          border: Border.all(color: _outline(context)),
           boxShadow: [
             BoxShadow(
-              color: widget.accent.withOpacity(.09),
-              blurRadius: 16,
-              offset: const Offset(0, 10),
+              color: Colors.black.withValues(alpha: isDark ? .14 : .04),
+              blurRadius: 14,
+              offset: const Offset(0, 6),
             ),
           ],
         ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(24),
-          onTap: widget.onTapDetails,
-          child: Row(
-            children: [
-              // نفس المحتوى الحالي كما هو
-              Container(
-                width: 6,
-                height: 132,
-                decoration: BoxDecoration(
-                  color: widget.statusColor,
-                  borderRadius: const BorderRadiusDirectional.only(
-                    topStart: Radius.circular(24),
-                    bottomStart: Radius.circular(24),
-                  ),
+        clipBehavior: Clip.antiAlias,
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            onTap: widget.onTapDetails,
+            child: Stack(
+              children: [
+                // شريط لون الحالة على طرف البطاقة
+                PositionedDirectional(
+                  start: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 5,
+                  child: ColoredBox(color: widget.statusColor),
                 ),
-              ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 14, 12, 14),
+                Padding(
+                  padding: const EdgeInsetsDirectional.fromSTEB(17, 14, 8, 4),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2259,29 +3091,33 @@ class _SearchTxCardState extends State<_SearchTxCard>
                             ),
                           ),
                           const SizedBox(width: 10),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: widget.statusColor.withOpacity(.12),
-                              borderRadius: BorderRadius.circular(999),
-                              border: Border.all(
-                                color: widget.statusColor.withOpacity(.28),
-                              ),
-                            ),
-                            child: Text(
-                              widget.statusText,
-                              style: TextStyle(
-                                color: widget.statusColor,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 11,
-                              ),
-                            ),
+                          _StatusPill(
+                            text: widget.statusText,
+                            color: widget.statusColor,
                           ),
+                          const SizedBox(width: 6),
                         ],
                       ),
+                      const SizedBox(height: 8),
+                      Text(
+                        widget.firstAmountText,
+                        style: TextStyle(
+                          color: primaryText,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 17,
+                        ),
+                      ),
+                      if (widget.secondAmountText != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.secondAmountText!,
+                          style: TextStyle(
+                            color: primaryText.withValues(alpha: .90),
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 10),
                       Wrap(
                         spacing: 8,
@@ -2290,7 +3126,7 @@ class _SearchTxCardState extends State<_SearchTxCard>
                           _MiniInfoChip(
                             icon: Icons.account_balance_wallet_rounded,
                             label: widget.accountName,
-                            color: widget.statusColor,
+                            color: _fg(context, widget.accent),
                           ),
                           _MiniInfoChip(
                             icon: Icons.event_rounded,
@@ -2304,32 +3140,7 @@ class _SearchTxCardState extends State<_SearchTxCard>
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.firstAmountText,
-                            style: TextStyle(
-                              color: primaryText,
-                              fontWeight: FontWeight.w800,
-                              fontSize: 15,
-                            ),
-                          ),
-                          if (widget.secondAmountText != null) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              widget.secondAmountText!,
-                              style: TextStyle(
-                                color: primaryText.withOpacity(.92),
-                                fontWeight: FontWeight.w800,
-                                fontSize: 15,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 4),
                       Row(
                         children: [
                           TextButton.icon(
@@ -2413,53 +3224,56 @@ class _SearchTxCardState extends State<_SearchTxCard>
                     ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
     );
 
-    return AnimatedBuilder(
-      animation: _deleteController,
-      builder: (context, child) {
-        final p = _deleteController.value;
-        final fade = 1 - p;
-        final scale = 1 - (0.16 * Curves.easeIn.transform(p));
-        final slideX = 36 * Curves.easeInOut.transform(p);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: AnimatedBuilder(
+        animation: _deleteController,
+        builder: (context, child) {
+          final p = _deleteController.value;
+          final fade = 1 - p;
+          final scale = 1 - (0.16 * Curves.easeIn.transform(p));
+          final slideX = 36 * Curves.easeInOut.transform(p);
 
-        return IgnorePointer(
-          ignoring: _busy,
-          child: Transform.translate(
-            offset: Offset(slideX, 0),
-            child: Transform.scale(
-              alignment: Alignment.center,
-              scale: scale,
-              child: Opacity(
-                opacity: fade.clamp(0, 1),
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    child!,
-                    if (_deleting)
-                      Positioned.fill(
-                        child: IgnorePointer(
-                          child: CustomPaint(
-                            painter: _ShatterPainter(
-                              progress: p,
-                              color: widget.statusColor,
+          return IgnorePointer(
+            ignoring: _busy,
+            child: Transform.translate(
+              offset: Offset(slideX, 0),
+              child: Transform.scale(
+                alignment: Alignment.center,
+                scale: scale,
+                child: Opacity(
+                  opacity: fade.clamp(0, 1),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      child!,
+                      if (_deleting)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _ShatterPainter(
+                                progress: p,
+                                color: widget.statusColor,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        );
-      },
-      child: card,
+          );
+        },
+        child: card,
+      ),
     );
   }
 }
@@ -2477,13 +3291,13 @@ class _MiniInfoChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _isDark(context);
 
-    final border = color.withOpacity(isDark ? .34 : .22);
-    final fill = color.withOpacity(isDark ? .14 : .08);
+    final border = color.withValues(alpha: isDark ? .34 : .22);
+    final fill = color.withValues(alpha: isDark ? .14 : .08);
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: fill,
         borderRadius: BorderRadius.circular(999),

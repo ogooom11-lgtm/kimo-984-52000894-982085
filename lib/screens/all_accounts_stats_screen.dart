@@ -412,31 +412,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     return a.account.name.compareTo(b.account.name);
   }
 
-  /// توضيح طريقة حساب الشركات (نفس منطق المكاتب)
-  Widget _companyRuleNote(ColorScheme cs) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: cs.secondaryContainer.withValues(alpha: .35),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.secondary.withValues(alpha: .20)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.info_outline_rounded, size: 18, color: cs.secondary),
-          const SizedBox(width: 8),
-          const Expanded(
-            child: Text(
-              PeriodStats.companyRuleText,
-              style: TextStyle(fontSize: 12.5, height: 1.45),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildHeader(ColorScheme cs, String title, String subtitle) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
@@ -2166,11 +2141,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                     ),
 
                                   if (_showHeader) const SizedBox(height: 12),
-
-                                  if (_isCompanyStatsView) ...[
-                                    _companyRuleNote(cs),
-                                    const SizedBox(height: 12),
-                                  ],
 
                                   if (_showQuickStats) ...[
                                     _buildQuickStats(stats, global),

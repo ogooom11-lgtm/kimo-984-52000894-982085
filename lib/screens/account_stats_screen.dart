@@ -608,12 +608,6 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
                       child: ListView(
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                         children: [
-                          if (isCompany) ...[
-                            const _RuleNoteCard(
-                              text: PeriodStats.companyRuleText,
-                            ),
-                            const SizedBox(height: 12),
-                          ],
                           _AnimatedStatsGrid(
                             buckets: buckets,
                             onTapBucket: _openBucketDetails,
@@ -707,38 +701,6 @@ class _StatsBucket {
     required this.timeOf,
     this.noteOf,
   });
-}
-
-class _RuleNoteCard extends StatelessWidget {
-  final String text;
-
-  const _RuleNoteCard({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: cs.secondaryContainer.withValues(alpha: .35),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.secondary.withValues(alpha: .20)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.info_outline_rounded, size: 18, color: cs.secondary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(fontSize: 12.5, height: 1.45),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _HeroHeaderCard extends StatelessWidget {
