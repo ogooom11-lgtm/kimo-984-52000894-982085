@@ -343,6 +343,9 @@ class BackupService {
           )
           .toList(),
       'companyUserNames': s.companyUserNames,
+      'forbiddenWords': s.forbiddenWords,
+      'forbiddenPhrases': s.forbiddenPhrases,
+      'bubbleUiPrefs': s.bubbleUiPrefs,
     };
   }
 
@@ -360,6 +363,13 @@ class BackupService {
       bubbleReadyNames: _stringList(map['bubbleReadyNames']),
       bubbleQuickActions: _bubbleActionsFromAny(map['bubbleQuickActions']),
       companyUserNames: _stringList(map['companyUserNames']),
+      forbiddenWords: _stringList(map['forbiddenWords']),
+      forbiddenPhrases: _stringList(map['forbiddenPhrases']),
+      bubbleUiPrefs: map['bubbleUiPrefs'] is Map
+          ? (map['bubbleUiPrefs'] as Map).map(
+              (key, value) => MapEntry(key.toString(), value),
+            )
+          : <String, dynamic>{},
     );
   }
 

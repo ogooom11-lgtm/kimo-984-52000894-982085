@@ -157,13 +157,24 @@ class SettingsAdapter extends TypeAdapter<Settings> {
       companyUserNames: fields[9] == null
           ? const <String>[]
           : (fields[9] as List).cast<String>(),
+      forbiddenWords: fields[10] is List
+          ? (fields[10] as List).map((e) => e.toString()).toList()
+          : const <String>[],
+      forbiddenPhrases: fields[11] is List
+          ? (fields[11] as List).map((e) => e.toString()).toList()
+          : const <String>[],
+      bubbleUiPrefs: fields[12] is Map
+          ? (fields[12] as Map).map(
+              (key, value) => MapEntry(key.toString(), value),
+            )
+          : const <String, dynamic>{},
     );
   }
 
   @override
   void write(BinaryWriter writer, Settings obj) {
     writer
-      ..writeByte(10)
+      ..writeByte(13)
       ..writeByte(0)
       ..write(obj.nameKeywords)
       ..writeByte(1)
@@ -183,7 +194,13 @@ class SettingsAdapter extends TypeAdapter<Settings> {
       ..writeByte(8)
       ..write(obj.bubbleQuickActions)
       ..writeByte(9)
-      ..write(obj.companyUserNames);
+      ..write(obj.companyUserNames)
+      ..writeByte(10)
+      ..write(obj.forbiddenWords)
+      ..writeByte(11)
+      ..write(obj.forbiddenPhrases)
+      ..writeByte(12)
+      ..write(obj.bubbleUiPrefs);
   }
 
   @override

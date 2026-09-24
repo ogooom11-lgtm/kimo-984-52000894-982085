@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/operation_log_service.dart';
 import 'settings_screen.dart';
 
 class AddEditTransactionScreen extends StatefulWidget {
@@ -34,6 +35,42 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
 
   bool _isSaving = false;
   CompanyMovementType _companyMovement = CompanyMovementType.received;
+
+  // ===== ألوان متوافقة مع الوضع الفاتح والداكن =====
+  ColorScheme get _cs => Theme.of(context).colorScheme;
+  bool get _isDark => Theme.of(context).brightness == Brightness.dark;
+  Color get _cardColor => _isDark ? _cs.surfaceContainerLow : Colors.white;
+  Color get _fieldFill => _isDark
+      ? _cs.surfaceContainerHighest.withValues(alpha: .55)
+      : Colors.grey.shade50;
+  Color get _fieldBorder => _isDark ? _cs.outlineVariant : Colors.grey.shade300;
+  Color get _softBorder =>
+      _isDark ? _cs.outlineVariant.withValues(alpha: .6) : Colors.grey.shade200;
+  Color get _focusBorder => _isDark ? _cs.primary : Colors.blue.shade400;
+  Color get _shadowColor =>
+      Colors.black.withValues(alpha: _isDark ? 0.25 : 0.05);
+
+  InputDecoration _fieldDecoration({String? hintText, String? labelText}) {
+    return InputDecoration(
+      hintText: hintText,
+      labelText: labelText,
+      filled: true,
+      fillColor: _fieldFill,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide(color: _fieldBorder),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide(color: _fieldBorder),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide(color: _focusBorder, width: 1.3),
+      ),
+    );
+  }
 
   final Map<String, List<String>> _undoStacks = {
     'beneficiary': <String>[],
@@ -270,6 +307,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     try {
       if (widget.existing != null) {
         final tx = widget.existing!;
+        final before = OperationLogService.snapshot(tx);
         tx.beneficiary = _beneficiaryController.text.trim();
         tx.amount = amount1;
         tx.secondAmount = secondAmount;
@@ -282,9 +320,20 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           tx.companyMovementType = _companyMovement;
         }
         await tx.save();
+        await OperationLogService.log(
+          kind: OperationKind.manualEdit,
+          title: 'تعديل حركة «${tx.beneficiary}» في «${widget.account.name}»',
+          records: [
+            OperationTxRecord(
+              txId: tx.id,
+              before: before,
+              after: OperationLogService.snapshot(tx),
+            ),
+          ],
+        );
       } else {
         final tx = TransactionModel(
-          id: DateTime.now().millisecondsSinceEpoch,
+          id: DatabaseService.newTransactionId(),
           accountId: widget.account.id,
           beneficiary: _beneficiaryController.text.trim(),
           amount: amount1,
@@ -300,6 +349,16 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         );
 
         await DatabaseService.addTransaction(tx);
+        await OperationLogService.log(
+          kind: OperationKind.manualAdd,
+          title: 'إضافة حركة «${tx.beneficiary}» إلى «${widget.account.name}»',
+          records: [
+            OperationTxRecord(
+              txId: tx.id,
+              after: OperationLogService.snapshot(tx),
+            ),
+          ],
+        );
       }
 
       if (!mounted) return;
@@ -337,7 +396,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.indigo.withOpacity(0.18),
+            color: Colors.indigo.withValues(alpha: 0.18),
             blurRadius: 18,
             offset: const Offset(0, 8),
           ),
@@ -379,9 +438,11 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.deepPurple.withOpacity(.06),
+        color: Colors.deepPurple.withValues(alpha: _isDark ? .16 : .06),
         borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.deepPurple.withOpacity(.2)),
+        border: Border.all(
+          color: Colors.deepPurple.withValues(alpha: _isDark ? .45 : .2),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -407,11 +468,17 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                           type.isSent
                               ? Icons.call_made_rounded
                               : Icons.call_received_rounded,
-                          color: selected ? Colors.deepPurple : null,
+                          color: selected
+                              ? (_isDark
+                                    ? Colors.deepPurple.shade200
+                                    : Colors.deepPurple)
+                              : null,
                         ),
                         onSelected: (_) =>
                             setState(() => _companyMovement = type),
-                        selectedColor: Colors.deepPurple.withOpacity(.14),
+                        selectedColor: Colors.deepPurple.withValues(
+                          alpha: _isDark ? .35 : .14,
+                        ),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(15),
                         ),
@@ -433,11 +500,11 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
       duration: const Duration(milliseconds: 260),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: _cardColor,
         borderRadius: BorderRadius.circular(26),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: _shadowColor,
             blurRadius: 18,
             offset: const Offset(0, 8),
           ),
@@ -466,18 +533,18 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
               hintText:
                   'ألصق النص هنا...\nثم اسحب الكلمات أو السطور إلى الحقول أدناه',
               filled: true,
-              fillColor: Colors.grey.shade50,
+              fillColor: _fieldFill,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(18),
-                borderSide: BorderSide(color: Colors.grey.shade300),
+                borderSide: BorderSide(color: _fieldBorder),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(18),
-                borderSide: BorderSide(color: Colors.grey.shade300),
+                borderSide: BorderSide(color: _fieldBorder),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(18),
-                borderSide: BorderSide(color: Colors.blue.shade400, width: 1.4),
+                borderSide: BorderSide(color: _focusBorder, width: 1.4),
               ),
               suffixIcon: _rawController.text.trim().isEmpty
                   ? null
@@ -515,14 +582,18 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(18),
-        color: Colors.blue.shade50,
-        border: Border.all(color: Colors.blue.shade100),
+        color: _isDark ? _cs.primaryContainer : Colors.blue.shade50,
+        border: Border.all(
+          color: _isDark
+              ? _cs.primary.withValues(alpha: .35)
+              : Colors.blue.shade100,
+        ),
       ),
       child: Text(
         text,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
-          color: Colors.blueGrey.shade900,
+          color: _isDark ? _cs.onPrimaryContainer : Colors.blueGrey.shade900,
           fontWeight: FontWeight.w600,
         ),
       ),
@@ -542,7 +613,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
               color: Colors.indigo.shade400,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.indigo.withOpacity(0.28),
+                  color: Colors.indigo.withValues(alpha: 0.28),
                   blurRadius: 16,
                   offset: const Offset(0, 8),
                 ),
@@ -585,17 +656,19 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           duration: const Duration(milliseconds: 220),
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: isHovering ? Colors.blue.shade50 : Colors.white,
+            color: isHovering
+                ? (_isDark ? _cs.primaryContainer : Colors.blue.shade50)
+                : _cardColor,
             borderRadius: BorderRadius.circular(22),
             border: Border.all(
-              color: isHovering ? Colors.blue.shade400 : Colors.grey.shade200,
+              color: isHovering ? _focusBorder : _softBorder,
               width: isHovering ? 1.4 : 1.0,
             ),
             boxShadow: [
               BoxShadow(
                 color: isHovering
-                    ? Colors.blue.withOpacity(0.10)
-                    : Colors.black.withOpacity(0.04),
+                    ? Colors.blue.withValues(alpha: 0.10)
+                    : _shadowColor,
                 blurRadius: 16,
                 offset: const Offset(0, 7),
               ),
@@ -631,37 +704,14 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                 controller: controller,
                 keyboardType: keyboardType,
                 inputFormatters: inputFormatters,
-                decoration: InputDecoration(
-                  hintText: hint,
-                  filled: true,
-                  fillColor: Colors.grey.shade50,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 14,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide(color: Colors.grey.shade300),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide(color: Colors.grey.shade300),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide(
-                      color: Colors.blue.shade400,
-                      width: 1.3,
-                    ),
-                  ),
-                ),
+                decoration: _fieldDecoration(hintText: hint),
               ),
               if (isHovering) ...[
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   'أفلِت هنا للاستبدال',
                   style: TextStyle(
-                    color: Colors.blue,
+                    color: _focusBorder,
                     fontWeight: FontWeight.w700,
                     fontSize: 12.5,
                   ),
@@ -684,11 +734,11 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
       duration: const Duration(milliseconds: 220),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: _cardColor,
         borderRadius: BorderRadius.circular(22),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
+            color: _shadowColor,
             blurRadius: 16,
             offset: const Offset(0, 7),
           ),
@@ -700,23 +750,8 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
             .map((c) => DropdownMenuItem<String>(value: c, child: Text(c)))
             .toList(),
         onChanged: noCurrencies ? null : onChanged,
-        decoration: InputDecoration(
-          labelText: label,
-          filled: true,
-          fillColor: Colors.grey.shade50,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: BorderSide(color: Colors.grey.shade300),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: BorderSide(color: Colors.grey.shade300),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: BorderSide(color: Colors.blue.shade400, width: 1.3),
-          ),
-        ),
+        dropdownColor: _isDark ? _cs.surfaceContainerHigh : null,
+        decoration: _fieldDecoration(labelText: label),
       ),
     );
   }
@@ -725,11 +760,11 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: _cardColor,
         borderRadius: BorderRadius.circular(22),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
+            color: _shadowColor,
             blurRadius: 16,
             offset: const Offset(0, 7),
           ),
@@ -754,13 +789,17 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.grey.shade50,
+          color: _fieldFill,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.grey.shade200),
+          border: Border.all(color: _softBorder),
         ),
         child: Row(
           children: [
-            Icon(icon, size: 18, color: Colors.indigo.shade400),
+            Icon(
+              icon,
+              size: 18,
+              color: _isDark ? _cs.primary : Colors.indigo.shade400,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Column(
@@ -770,7 +809,9 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                     title,
                     style: TextStyle(
                       fontSize: 11.5,
-                      color: Colors.grey.shade700,
+                      color: _isDark
+                          ? _cs.onSurfaceVariant
+                          : Colors.grey.shade700,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -803,14 +844,16 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
             borderRadius: BorderRadius.circular(20),
             gradient: LinearGradient(
               colors: _isSaving
-                  ? [Colors.grey.shade400, Colors.grey.shade500]
+                  ? (_isDark
+                        ? [Colors.grey.shade700, Colors.grey.shade800]
+                        : [Colors.grey.shade400, Colors.grey.shade500])
                   : [Colors.indigo.shade500, Colors.blue.shade600],
               begin: Alignment.centerRight,
               end: Alignment.centerLeft,
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.indigo.withOpacity(0.22),
+                color: Colors.indigo.withValues(alpha: _isDark ? 0.35 : 0.22),
                 blurRadius: 18,
                 offset: const Offset(0, 10),
               ),
@@ -861,12 +904,12 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
-        backgroundColor: const Color(0xFFF6F8FC),
+        backgroundColor: _isDark ? null : const Color(0xFFF6F8FC),
         appBar: AppBar(
           elevation: 0,
           centerTitle: true,
           backgroundColor: Colors.transparent,
-          foregroundColor: Colors.black87,
+          foregroundColor: _cs.onSurface,
           title: Text(isEdit ? 'تعديل الحركة' : 'إضافة حركة'),
         ),
         body: ListView(
@@ -883,9 +926,15 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
               Container(
                 margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
-                  color: Colors.amber.shade50,
+                  color: _isDark
+                      ? Colors.amber.withValues(alpha: .12)
+                      : Colors.amber.shade50,
                   borderRadius: BorderRadius.circular(22),
-                  border: Border.all(color: Colors.amber.shade200),
+                  border: Border.all(
+                    color: _isDark
+                        ? Colors.amber.withValues(alpha: .40)
+                        : Colors.amber.shade200,
+                  ),
                 ),
                 child: ListTile(
                   leading: const Icon(Icons.info_outline_rounded),

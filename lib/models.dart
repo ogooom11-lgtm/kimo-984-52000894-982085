@@ -243,6 +243,20 @@ class Settings extends HiveObject {
   @HiveField(9)
   List<String> companyUserNames;
 
+  /// كلمات ممنوعة: لا يمكن أن تكون جزءًا من الاسم، ويتوقف عندها تمديد الاسم،
+  /// وإذا انتهى بها السطر فالسطر الذي يليه لا يُعتبر سطر اسم.
+  @HiveField(10)
+  List<String> forbiddenWords;
+
+  /// جمل ممنوعة: عند ظهورها في الرسالة يتم تنبيه المستخدم وإظهارها بوضوح.
+  @HiveField(11)
+  List<String> forbiddenPhrases;
+
+  /// تفضيلات تصميم شاشة الفقاعات (حجم الخط، الألوان، ...).
+  /// تُقرأ عبر [BubbleUiPrefs] في lib/bubble_prefs.dart.
+  @HiveField(12)
+  Map<String, dynamic> bubbleUiPrefs;
+
   Settings({
     required this.nameKeywords,
     required this.amountKeywords,
@@ -254,6 +268,9 @@ class Settings extends HiveObject {
     this.bubbleReadyNames = const [],
     this.bubbleQuickActions = const [],
     this.companyUserNames = const [],
+    this.forbiddenWords = const [],
+    this.forbiddenPhrases = const [],
+    this.bubbleUiPrefs = const {},
   });
 }
 

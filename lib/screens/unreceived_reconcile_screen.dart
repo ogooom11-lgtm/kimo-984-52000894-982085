@@ -9,6 +9,8 @@ import 'package:flutter/services.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../utils/chunked_task.dart';
+import '../widgets/operation_progress_bar.dart';
 
 class UnreceivedReconcileScreen extends StatefulWidget {
   final Account? account;
@@ -51,9 +53,30 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   _ResultFilter _filter = _ResultFilter.all;
   final TextEditingController _resultsSearchCtrl = TextEditingController();
 
+  /// العملة المختارة لكل عمود مبالغ (null = استنتاج تلقائي من عنوان العمود)
+  final Map<String, String?> _amountColCurrency = {};
+
+  /// عمود اختياري يحتوي عملة كل صف (مثل ملفات: الاسم - المبلغ - العملة)
+  String? _currencyColumn;
+
+  /// عملات التطبيق (الاسم المعروض) + خريطة الاختصارات
+  List<String> _appCurrencies = const [];
+  Map<String, String> _appCurrencyMap = const {};
+
+  final ValueNotifier<OperationProgress?> _progress =
+      ValueNotifier<OperationProgress?>(null);
+
+  static const String _dashNameHeader = 'الاسم';
+  static const String _dashAmountHeader = 'المبلغ';
+  static const String _dashCurrencyHeader = 'العملة';
+
   @override
   void initState() {
     super.initState();
+    final settings = DatabaseService.getSettings();
+    _appCurrencyMap = Map<String, String>.from(settings?.currencyMap ?? {});
+    _appCurrencies =
+        _appCurrencyMap.values.map((e) => e.trim()).toSet().toList()..sort();
     final now = DateTime.now();
     _selectedDateRange = DateTimeRange(
       start: now.subtract(const Duration(days: 1)),
@@ -70,6 +93,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       t.cancel();
     }
     _resultsSearchCtrl.dispose();
+    _progress.dispose();
     super.dispose();
   }
 
@@ -78,7 +102,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     try {
       final res = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: const ['xlsx', 'xls', 'csv'],
+        allowedExtensions: const ['xlsx', 'xls', 'csv', 'txt'],
         withData: true,
       );
 
@@ -91,8 +115,14 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       await _parseFile(bytes, ext);
       if (!mounted) return;
       setState(() {
-        _currentStep = 1;
+        // صيغة «الاسم - المبلغ - العملة» تُحدَّد أعمدتها تلقائيًا
+        _currentStep = _isDashFormat ? 2 : 1;
       });
+      if (_isDashFormat) {
+        _showSnack(
+          'تم التعرف على ${_rows.length} سطر بصيغة الاسم - المبلغ - العملة',
+        );
+      }
     } catch (e) {
       _showSnack('خطأ في قراءة الملف: $e', isError: true);
     } finally {
@@ -100,11 +130,17 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     }
   }
 
-  Future<void> _parseFile(Uint8List bytes, String ext) async {
+  void _setProgress(OperationProgress? p) {
+    if (mounted) _progress.value = p;
+  }
+
+  void _resetParsedData() {
     _headers.clear();
     _rows.clear();
     _selectedNameCols.clear();
     _selectedAmountCols.clear();
+    _amountColCurrency.clear();
+    _currencyColumn = null;
     _results.clear();
     _manualExcelItems.clear();
     _manualSysItems.clear();
@@ -112,6 +148,175 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     _sysDupNotes.clear();
     _resultsSearchCtrl.clear();
     _filter = _ResultFilter.all;
+  }
+
+  // ====== ملفات بصيغة: الاسم - المبلغ - العملة ======
+  // فاصل بمسافات (أحمد - 500) أو شرطة طويلة أو | أو Tab
+  static final RegExp _dashSplitRe = RegExp(r'\s+-\s+|\s*[–—|\t]\s*');
+  // احتياطي: أي شرطة (أحمد-500-دولار)
+  static final RegExp _looseDashSplitRe = RegExp(r'\s*-\s*');
+  static final RegExp _hasDigitRe = RegExp(r'[0-9\u0660-\u0669]');
+
+  /// يحلل سطرًا بصيغة «الاسم - المبلغ - العملة» (العملة اختيارية)
+  ({String name, String amount, String currency})? _parseDashLine(String line) {
+    final raw = line.trim();
+    if (raw.isEmpty) return null;
+    List<String> splitBy(RegExp re) => raw
+        .split(re)
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    var parts = splitBy(_dashSplitRe);
+    if (parts.length < 2) parts = splitBy(_looseDashSplitRe);
+    if (parts.length < 2) return null;
+
+    // المبلغ = آخر جزء يحتوي أرقامًا، الاسم قبله، والعملة بعده
+    int amountIdx = -1;
+    for (int i = parts.length - 1; i >= 1; i--) {
+      if (_hasDigitRe.hasMatch(parts[i])) {
+        amountIdx = i;
+        break;
+      }
+    }
+    if (amountIdx < 1) return null;
+    final name = parts.sublist(0, amountIdx).join(' - ').trim();
+    if (name.isEmpty || _hasDigitRe.hasMatch(name)) return null;
+
+    var amount = parts[amountIdx];
+    var currency = parts.sublist(amountIdx + 1).join(' ').trim();
+
+    // مبلغ ملتصق بالعملة داخل نفس الجزء: 500$ أو 500 دولار
+    final m = RegExp(
+      r'^([0-9\u0660-\u0669][0-9\u0660-\u0669.,٬٫\s]*)(.*)$',
+    ).firstMatch(amount);
+    if (m != null) {
+      final tail = (m.group(2) ?? '').trim();
+      if (tail.isNotEmpty) {
+        amount = (m.group(1) ?? '').trim();
+        currency = currency.isEmpty ? tail : '$tail $currency';
+      }
+    }
+    return (name: name, amount: amount, currency: currency);
+  }
+
+  /// إذا كانت معظم الأسطر بصيغة «الاسم - المبلغ - العملة» يحوّلها إلى صفوف
+  bool _tryLoadDashLines(List<String> lines) {
+    final nonEmpty = lines.where((l) => l.trim().isNotEmpty).toList();
+    if (nonEmpty.isEmpty) return false;
+    final parsed = <({String name, String amount, String currency})>[];
+    for (final l in nonEmpty) {
+      final r = _parseDashLine(l);
+      if (r != null) parsed.add(r);
+    }
+    // نقبل الصيغة إذا طابقت 60% من الأسطر على الأقل (قد يوجد سطر عنوان)
+    if (parsed.isEmpty || parsed.length < (nonEmpty.length * 0.6)) {
+      return false;
+    }
+
+    _headers
+      ..clear()
+      ..addAll([_dashNameHeader, _dashAmountHeader, _dashCurrencyHeader]);
+    _rows.clear();
+    for (final r in parsed) {
+      _rows.add({
+        _dashNameHeader: r.name,
+        _dashAmountHeader: r.amount,
+        _dashCurrencyHeader: r.currency,
+      });
+    }
+    _selectedNameCols
+      ..clear()
+      ..add(_dashNameHeader);
+    _selectedAmountCols
+      ..clear()
+      ..add(_dashAmountHeader);
+    _currencyColumn = _dashCurrencyHeader;
+    return true;
+  }
+
+  bool get _isDashFormat =>
+      _headers.length == 3 &&
+      _headers[0] == _dashNameHeader &&
+      _headers[1] == _dashAmountHeader &&
+      _headers[2] == _dashCurrencyHeader;
+
+  Future<void> _pasteDashText() async {
+    final ctrl = TextEditingController();
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: const Text('لصق قائمة: الاسم - المبلغ - العملة'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'كل سطر حركة واحدة، مثال:\nأحمد علي - 500 - دولار\nمحمد خالد - 1,200,000 - ليرة سورية',
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: ctrl,
+                  minLines: 6,
+                  maxLines: 12,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    hintText: 'ألصق الأسطر هنا...',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final data = await Clipboard.getData('text/plain');
+                final clip = data?.text ?? '';
+                if (clip.isNotEmpty) ctrl.text = clip;
+              },
+              child: const Text('لصق من الحافظة'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              child: const Text('اعتماد'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (text == null || text.trim().isEmpty || !mounted) return;
+    setState(_resetParsedData);
+    final ok = _tryLoadDashLines(const LineSplitter().convert(text));
+    if (!ok) {
+      _showSnack(
+        'لم أتعرف على الصيغة. اكتب كل سطر هكذا: الاسم - المبلغ - العملة',
+        isError: true,
+      );
+      return;
+    }
+    setState(() => _currentStep = 2);
+    _showSnack('تم التعرف على ${_rows.length} سطر بصيغة الاسم - المبلغ - العملة');
+  }
+
+  Future<void> _parseFile(Uint8List bytes, String ext) async {
+    _resetParsedData();
+
+    if (ext == 'txt') {
+      final text = utf8.decode(bytes, allowMalformed: true);
+      if (!_tryLoadDashLines(const LineSplitter().convert(text))) {
+        throw const FormatException(
+          'الملف النصي يجب أن يكون بصيغة: الاسم - المبلغ - العملة',
+        );
+      }
+      return;
+    }
 
     if (ext == 'csv') {
       final text = utf8.decode(bytes, allowMalformed: true);
@@ -121,6 +326,12 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           .toList();
 
       if (lines.isEmpty) return;
+
+      // ملف CSV بدون فواصل لكنه بصيغة «الاسم - المبلغ - العملة»
+      final commaLines = lines.where((l) => l.contains(',')).length;
+      if (commaLines < lines.length * 0.5 && _tryLoadDashLines(lines)) {
+        return;
+      }
 
       _headers.addAll(lines.first.split(',').map((s) => s.trim()));
       for (int i = 1; i < lines.length; i++) {
@@ -151,10 +362,40 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       }
       _rows.add(row);
     }
+
+    // ملف Excel فيه عمود واحد مكتوب بصيغة «الاسم - المبلغ - العملة»
+    final nonEmptyHeaders = _headers.where((h) => h.trim().isNotEmpty).toList();
+    if (nonEmptyHeaders.length <= 1) {
+      final firstCol = table.rows
+          .map(
+            (cells) => cells.isEmpty
+                ? ''
+                : (cells.first?.value?.toString() ?? '').trim(),
+          )
+          .where((v) => v.isNotEmpty)
+          .toList();
+      final snapshotHeaders = List<String>.from(_headers);
+      final snapshotRows = List<Map<String, dynamic>>.from(_rows);
+      if (!_tryLoadDashLines(firstCol)) {
+        _headers
+          ..clear()
+          ..addAll(snapshotHeaders);
+        _rows
+          ..clear()
+          ..addAll(snapshotRows);
+      }
+    }
   }
 
-  void _runReconcile() {
+  Future<void> _runReconcile() async {
+    if (_loading) return;
     setState(() => _loading = true);
+    _setProgress(const OperationProgress(
+      label: 'جارٍ تجهيز البيانات...',
+      done: 0,
+      total: 0,
+    ));
+    await yieldToUi();
 
     try {
       _results.clear();
@@ -173,82 +414,93 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       final usedPending = <String>{};
       final usedHistory = <String>{};
 
-      for (final ex in excelItems) {
-        final pendingExact = _findBestMatch(
-          ex,
-          pendingSystemItems,
-          usedKeys: usedPending,
-          requireMoneyExact: true,
-          allowFuzzyName: widget.enableFuzzy,
-        );
+      await runTimeSliced(
+        total: excelItems.length,
+        isCancelled: () => !mounted,
+        onProgress: (done, total) => _setProgress(OperationProgress(
+          label: 'جارٍ المطابقة...',
+          done: done,
+          total: total,
+        )),
+        work: (i) {
+          final ex = excelItems[i];
+          final pendingExact = _findBestMatch(
+            ex,
+            pendingSystemItems,
+            usedKeys: usedPending,
+            requireMoneyExact: true,
+            allowFuzzyName: widget.enableFuzzy,
+          );
 
-        if (pendingExact != null) {
-          usedPending.add(pendingExact.identityKey);
+          if (pendingExact != null) {
+            usedPending.add(pendingExact.identityKey);
+            _results.add(
+              _PairedRow(
+                sys: pendingExact,
+                excel: ex,
+                kind: PairKind.matched,
+                note: _mergeNotes(ex, pendingExact),
+              ),
+            );
+            return;
+          }
+
+          final pendingNameOnly = _findBestMatch(
+            ex,
+            pendingSystemItems,
+            usedKeys: usedPending,
+            requireMoneyExact: false,
+            allowFuzzyName: widget.enableFuzzy,
+          );
+
+          if (pendingNameOnly != null) {
+            usedPending.add(pendingNameOnly.identityKey);
+            _results.add(
+              _PairedRow(
+                sys: pendingNameOnly,
+                excel: ex,
+                kind: PairKind.amountMismatch,
+                note: _mergeNotes(ex, pendingNameOnly),
+              ),
+            );
+            return;
+          }
+
+          final histExact = _findBestMatch(
+            ex,
+            historyItems,
+            usedKeys: usedHistory,
+            requireMoneyExact: true,
+            allowFuzzyName: widget.enableFuzzy,
+          );
+
+          if (histExact != null) {
+            usedHistory.add(histExact.identityKey);
+            final kind = histExact.ref?.status == TransactionStatus.cancelled
+                ? PairKind.historyCancelled
+                : PairKind.historyReceived;
+            _results.add(
+              _PairedRow(
+                sys: histExact,
+                excel: ex,
+                kind: kind,
+                note: _mergeNotes(ex, histExact),
+              ),
+            );
+            return;
+          }
+
           _results.add(
             _PairedRow(
-              sys: pendingExact,
+              sys: null,
               excel: ex,
-              kind: PairKind.matched,
-              note: _mergeNotes(ex, pendingExact),
+              kind: PairKind.excelOnly,
+              note: _excelDupNotes[ex.identityKey],
             ),
           );
-          continue;
-        }
-
-        final pendingNameOnly = _findBestMatch(
-          ex,
-          pendingSystemItems,
-          usedKeys: usedPending,
-          requireMoneyExact: false,
-          allowFuzzyName: widget.enableFuzzy,
-        );
-
-        if (pendingNameOnly != null) {
-          usedPending.add(pendingNameOnly.identityKey);
-          _results.add(
-            _PairedRow(
-              sys: pendingNameOnly,
-              excel: ex,
-              kind: PairKind.amountMismatch,
-              note: _mergeNotes(ex, pendingNameOnly),
-            ),
-          );
-          continue;
-        }
-
-        final histExact = _findBestMatch(
-          ex,
-          historyItems,
-          usedKeys: usedHistory,
-          requireMoneyExact: true,
-          allowFuzzyName: widget.enableFuzzy,
-        );
-
-        if (histExact != null) {
-          usedHistory.add(histExact.identityKey);
-          final kind = histExact.ref?.status == TransactionStatus.cancelled
-              ? PairKind.historyCancelled
-              : PairKind.historyReceived;
-          _results.add(
-            _PairedRow(
-              sys: histExact,
-              excel: ex,
-              kind: kind,
-              note: _mergeNotes(ex, histExact),
-            ),
-          );
-          continue;
-        }
-
-        _results.add(
-          _PairedRow(
-            sys: null,
-            excel: ex,
-            kind: PairKind.excelOnly,
-            note: _excelDupNotes[ex.identityKey],
-          ),
-        );
-      }
+        },
+      );
+      if (!mounted) return;
 
       for (final s in pendingSystemItems) {
         if (!usedPending.contains(s.identityKey)) {
@@ -301,6 +553,8 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         setState(() => _loading = false);
       }
       _showSnack('حدث خطأ أثناء المطابقة: $e', isError: true);
+    } finally {
+      _setProgress(null);
     }
   }
 
@@ -319,11 +573,15 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         rawName = 'بدون اسم';
       }
 
+      final rowCurrency = _currencyColumn == null
+          ? ''
+          : _canonicalCurrency(row[_currencyColumn]?.toString() ?? '');
+
       final parts = <_MoneyPart>[];
       for (final amtCol in _selectedAmountCols) {
         final amount = _parseAmount(row[amtCol]);
         if (amount != null && amount > 0) {
-          final rawCurrency = _extractCurrencyFromHeader(amtCol);
+          final rawCurrency = _effectiveCurrency(amtCol, rowCurrency);
           parts.add(
             _MoneyPart(
               amount: amount,
@@ -591,9 +849,57 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     return t;
   }
 
+  /// مفتاح مقارنة للعملات (بدون حذف الرموز مثل $)
+  String _curKey(String s) {
+    var t = s.trim().toLowerCase();
+    const from = ['أ', 'إ', 'آ', 'ة', 'ى', 'ؤ', 'ئ'];
+    const to = ['ا', 'ا', 'ا', 'ه', 'ي', 'و', 'ي'];
+    for (int i = 0; i < from.length; i++) {
+      t = t.replaceAll(from[i], to[i]);
+    }
+    return t.replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  /// يحوّل أي اختصار/اسم عملة معرّف في التطبيق إلى الاسم المعروض للعملة
+  String _canonicalCurrency(String raw) {
+    final key = _curKey(raw);
+    if (key.isEmpty) return '';
+    for (final e in _appCurrencyMap.entries) {
+      if (_curKey(e.key) == key || _curKey(e.value) == key) {
+        return e.value.trim();
+      }
+    }
+    return raw.trim();
+  }
+
+  /// العملة المعتمدة لعمود مبالغ:
+  /// عملة الصف (إن وُجد عمود عملة) ← العملة المختارة للعمود ← عنوان العمود
+  String _effectiveCurrency(String amountCol, String rowCurrency) {
+    if (rowCurrency.isNotEmpty) return rowCurrency;
+    final assigned = _amountColCurrency[amountCol];
+    if (assigned != null && assigned.trim().isNotEmpty) return assigned;
+    if (_currencyColumn != null) return '';
+    return _extractCurrencyFromHeader(amountCol);
+  }
+
   String _extractCurrencyFromHeader(String header) {
     var h = header.trim();
     final lower = h.toLowerCase();
+
+    // عملات التطبيق أولًا (الأسماء ثم الاختصارات الأطول)
+    final hk = _curKey(h);
+    final names = _appCurrencies.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    for (final name in names) {
+      final k = _curKey(name);
+      if (k.isNotEmpty && hk.contains(k)) return name;
+    }
+    final aliases = _appCurrencyMap.keys.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    for (final alias in aliases) {
+      final k = _curKey(alias);
+      if (k.length >= 2 && hk.contains(k)) return _appCurrencyMap[alias]!;
+    }
 
     if (lower.contains('qar') || h.contains('قطري') || h.contains('ريال')) {
       return 'ريال قطري';
@@ -621,7 +927,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   }
 
   String _normCurrency(String s) {
-    final t = _normName(s);
+    final t = _normName(_canonicalCurrency(s));
 
     if (t.contains('ريال قطري') || t == 'qar' || t == 'qr' || t == 'قطري') {
       return 'qar';
@@ -732,7 +1038,24 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         .join('\n');
   }
 
-  void _handleCopyCategory(List<_PairedRow> items) {
+  /// نسخ الأسماء فقط (بدون أي ملاحظات أو مبالغ)، اسم في كل سطر
+  void _copyNamesOnly(List<_PairedRow> items) {
+    final names = items
+        .map((r) => r.viewData.title.trim())
+        .where((n) => n.isNotEmpty)
+        .toList();
+    if (names.isEmpty) {
+      _showSnack('لا توجد أسماء لنسخها');
+      return;
+    }
+    Clipboard.setData(ClipboardData(text: names.join('\n')));
+    _showSnack('تم نسخ ${names.length} اسم');
+  }
+
+  void _handleCopyCategory(
+    List<_PairedRow> items, {
+    bool includeNotes = true,
+  }) {
     final sb = StringBuffer();
 
     for (final item in items) {
@@ -775,7 +1098,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           );
           break;
       }
-      if ((item.note ?? '').trim().isNotEmpty) {
+      if (includeNotes && (item.note ?? '').trim().isNotEmpty) {
         sb.writeln('ملاحظة: ${item.note}');
       }
       sb.writeln('---');
@@ -859,6 +1182,8 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                   _resultsSearchCtrl.clear();
                   _selectedAmountCols.clear();
                   _selectedNameCols.clear();
+                  _amountColCurrency.clear();
+                  _currencyColumn = null;
                   _filter = _ResultFilter.all;
                 });
               },
@@ -876,6 +1201,12 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           },
         )
             : null,
+      ),
+      bottomNavigationBar: SafeArea(
+        child: OperationProgressBar(
+          progress: _progress,
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+        ),
       ),
       body: SafeArea(
         child: Column(
@@ -997,10 +1328,22 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'XLSX / XLS / CSV',
+                      'XLSX / XLS / CSV / TXT',
                       style: TextStyle(color: cs.onSurfaceVariant),
                     ),
                   ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _pasteDashText,
+              icon: const Icon(Icons.content_paste_rounded),
+              label: const Text('لصق قائمة بصيغة: الاسم - المبلغ - العملة'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(50),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
                 ),
               ),
             ),
@@ -1010,6 +1353,13 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
               color: Colors.blue,
               text:
               'الصفحة ستعرض كل العناصر: المطابقة، المختلفة، الموجودة فقط في الملف، والمعلقة في النظام، مع كشف التكرار.',
+            ),
+            const SizedBox(height: 10),
+            _buildInfoCard(
+              icon: Icons.format_list_bulleted_rounded,
+              color: Colors.teal,
+              text:
+              'يمكن أيضًا قراءة ملفات نصية (TXT/CSV) أو عمود Excel واحد مكتوب بصيغة «الاسم - المبلغ - العملة» في كل سطر، ويتم التعرف على الأعمدة والعملة تلقائيًا.',
             ),
           ],
         ),
@@ -1115,6 +1465,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           ),
         ),
         const SizedBox(height: 12),
+        _buildCurrencyColumnCard(cs),
         Expanded(
           child: ListView.separated(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
@@ -1122,7 +1473,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
             separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (ctx, i) {
               final h = _headers[i];
-              if (_selectedNameCols.contains(h)) {
+              if (_selectedNameCols.contains(h) || h == _currencyColumn) {
                 return const SizedBox.shrink();
               }
               final isSelected = _selectedAmountCols.contains(h);
@@ -1133,6 +1484,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                   setState(() {
                     if (isSelected) {
                       _selectedAmountCols.remove(h);
+                      _amountColCurrency.remove(h);
                     } else {
                       _selectedAmountCols.add(h);
                     }
@@ -1177,12 +1529,16 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              'مثال: ${_getSampleData(h, isNum: true)} | العملة المستنتجة: ${_extractCurrencyFromHeader(h)}',
+                              'مثال: ${_getSampleData(h, isNum: true)} | العملة: ${_currencyLabelForColumn(h)}',
                               style: TextStyle(
                                 fontSize: 11.5,
                                 color: cs.onSurfaceVariant,
                               ),
                             ),
+                            if (isSelected) ...[
+                              const SizedBox(height: 8),
+                              _buildColumnCurrencyPicker(h, cs),
+                            ],
                           ],
                         ),
                       ),
@@ -1213,6 +1569,139 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  /// وصف العملة المعتمدة لعمود المبالغ
+  String _currencyLabelForColumn(String h) {
+    final assigned = _amountColCurrency[h];
+    final hasAssigned = assigned != null && assigned.isNotEmpty;
+    if (_currencyColumn != null) {
+      return 'من عمود «$_currencyColumn» لكل صف'
+          '${hasAssigned ? ' (وللصفوف بدون عملة: $assigned)' : ''}';
+    }
+    if (hasAssigned) return '$assigned (مختارة)';
+    return '${_extractCurrencyFromHeader(h)} (مستنتجة من العنوان)';
+  }
+
+  /// اختيار عملة عمود المبالغ من عملات التطبيق
+  Widget _buildColumnCurrencyPicker(String h, ColorScheme cs) {
+    final current = _amountColCurrency[h];
+    final items = <DropdownMenuItem<String?>>[
+      DropdownMenuItem<String?>(
+        value: null,
+        child: Text(
+          _currencyColumn != null
+              ? 'بدون عملة افتراضية'
+              : 'تلقائي (${_extractCurrencyFromHeader(h)})',
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+      ..._appCurrencies.map(
+        (c) => DropdownMenuItem<String?>(value: c, child: Text(c)),
+      ),
+    ];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.green.withValues(alpha: .35)),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String?>(
+          isExpanded: true,
+          value: _appCurrencies.contains(current) ? current : null,
+          icon: const Icon(Icons.currency_exchange_rounded, size: 18),
+          hint: const Text('اختر العملة'),
+          items: items,
+          onChanged: (v) => setState(() => _amountColCurrency[h] = v),
+        ),
+      ),
+    );
+  }
+
+  /// بطاقة اختيار عمود عملة كل صف (اختياري)
+  Widget _buildCurrencyColumnCard(ColorScheme cs) {
+    final candidates = _headers
+        .where(
+          (h) =>
+              h.trim().isNotEmpty &&
+              !_selectedNameCols.contains(h) &&
+              !_selectedAmountCols.contains(h),
+        )
+        .toList();
+    if (candidates.isEmpty && _currencyColumn == null) {
+      return const SizedBox.shrink();
+    }
+    final missingRowCurrency = _currencyColumn != null &&
+        _rows.any(
+          (r) => (r[_currencyColumn]?.toString().trim() ?? '').isEmpty,
+        );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: cs.tertiaryContainer.withValues(alpha: .35),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: cs.tertiary.withValues(alpha: .25)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.view_column_rounded, color: cs.tertiary),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'عمود عملة كل صف (اختياري)',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+                DropdownButton<String?>(
+                  value: _currencyColumn,
+                  underline: const SizedBox.shrink(),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('بدون'),
+                    ),
+                    ...{
+                      ...candidates,
+                      if (_currencyColumn != null) _currencyColumn!,
+                    }.map(
+                      (h) => DropdownMenuItem<String?>(
+                        value: h,
+                        child: Text(h),
+                      ),
+                    ),
+                  ],
+                  onChanged: (v) => setState(() => _currencyColumn = v),
+                ),
+              ],
+            ),
+            if (_isDashFormat)
+              Text(
+                'تم التعرف على الملف بصيغة: الاسم - المبلغ - العملة',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            if (missingRowCurrency)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'بعض الصفوف بدون عملة — اختر عملة لعمود المبلغ من القائمة بالأسفل لتُستخدم لها.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.orange.shade800,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1329,11 +1818,81 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                       icon: const Icon(Icons.pan_tool_alt_rounded, size: 18),
                       label: const Text('مطابقة يدوية'),
                     ),
-                  TextButton.icon(
-                    onPressed:
-                    filtered.isEmpty ? null : () => _handleCopyCategory(filtered),
-                    icon: const Icon(Icons.copy_all_rounded, size: 18),
-                    label: const Text('نسخ'),
+                  PopupMenuButton<String>(
+                    enabled: filtered.isNotEmpty,
+                    tooltip: 'خيارات النسخ',
+                    onSelected: (v) {
+                      switch (v) {
+                        case 'names':
+                          _copyNamesOnly(filtered);
+                          break;
+                        case 'noNotes':
+                          _handleCopyCategory(filtered, includeNotes: false);
+                          break;
+                        default:
+                          _handleCopyCategory(filtered);
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: 'names',
+                        child: Row(
+                          children: [
+                            Icon(Icons.badge_outlined, size: 20),
+                            SizedBox(width: 10),
+                            Text('نسخ الأسماء فقط'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'noNotes',
+                        child: Row(
+                          children: [
+                            Icon(Icons.notes_rounded, size: 20),
+                            SizedBox(width: 10),
+                            Text('نسخ بدون الملاحظات'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'full',
+                        child: Row(
+                          children: [
+                            Icon(Icons.copy_all_rounded, size: 20),
+                            SizedBox(width: 10),
+                            Text('نسخ كامل مع الملاحظات'),
+                          ],
+                        ),
+                      ),
+                    ],
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.copy_all_rounded,
+                            size: 18,
+                            color: filtered.isEmpty ? cs.outline : cs.primary,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'نسخ',
+                            style: TextStyle(
+                              color: filtered.isEmpty ? cs.outline : cs.primary,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Icon(
+                            Icons.arrow_drop_down_rounded,
+                            color: filtered.isEmpty ? cs.outline : cs.primary,
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1856,10 +2415,26 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
               ),
             ],
           ),
-          trailing: IconButton(
+          trailing: PopupMenuButton<String>(
             tooltip: 'نسخ',
-            onPressed: () => _copyToClipboard(data.copyText),
             icon: const Icon(Icons.copy_rounded, size: 20),
+            onSelected: (v) {
+              switch (v) {
+                case 'name':
+                  _copyToClipboard(data.title);
+                  break;
+                case 'noNote':
+                  _copyToClipboard('${data.title}\n${data.shortLine}');
+                  break;
+                default:
+                  _copyToClipboard(data.copyText);
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'name', child: Text('نسخ الاسم فقط')),
+              PopupMenuItem(value: 'noNote', child: Text('نسخ بدون الملاحظة')),
+              PopupMenuItem(value: 'full', child: Text('نسخ مع الملاحظة')),
+            ],
           ),
           children: [
             if (row.sys != null)

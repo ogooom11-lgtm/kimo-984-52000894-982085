@@ -10,6 +10,9 @@ class DatabaseService {
   static const String settingsBoxName = "settings";
   static const String parsesBoxName = "parses";
 
+  /// سجل العمليات (خرائط بسيطة بدون Adapter) — راجع OperationLogService
+  static const String operationLogBoxName = "operation_logs";
+
   // ===========================
   // 🚀 التهيئة
   // ===========================
@@ -19,6 +22,15 @@ class DatabaseService {
     await Hive.openBox<TransactionModel>(transactionsBoxName);
     await Hive.openBox<Settings>(settingsBoxName);
     await Hive.openBox<ParsedText>(parsesBoxName);
+    try {
+      await Hive.openBox<dynamic>(operationLogBoxName);
+    } catch (_) {
+      // إذا تلف ملف السجل لا نمنع تشغيل التطبيق: نحذفه ونفتح سجلًا جديدًا
+      try {
+        await Hive.deleteBoxFromDisk(operationLogBoxName);
+        await Hive.openBox<dynamic>(operationLogBoxName);
+      } catch (_) {}
+    }
 
     // ✅ اختيارية: ترحيل مفاتيح int قديمة (لو كنت سابقًا تستخدم put(id))
     // await migrateTransactionsIntKeysToString(); // فعّله مرة لو احتجت
@@ -77,6 +89,22 @@ class DatabaseService {
   // - تحديث: tx.save() إن كان داخل الصندوق، أو تحديث الموجود ثم save()
   // - حذف: إمّا بمفتاح Hive أو بالبحث عن id التجاري داخل الموديل
   // ====================================================================
+
+  static int _lastIssuedTxId = 0;
+
+  /// معرّف تجاري فريد لحركة جديدة (لا يتكرر مع أي حركة موجودة).
+  /// مرّر [existingIds] عند إنشاء دفعة كبيرة لتفادي فحص الصندوق كل مرة.
+  static int newTransactionId({Set<int>? existingIds}) {
+    final ids = existingIds ?? transactionsBox.values.map((t) => t.id).toSet();
+    var id = DateTime.now().millisecondsSinceEpoch;
+    if (id <= _lastIssuedTxId) id = _lastIssuedTxId + 1;
+    while (ids.contains(id)) {
+      id++;
+    }
+    _lastIssuedTxId = id;
+    existingIds?.add(id);
+    return id;
+  }
 
   /// إضافة حركة بمفتاح تلقائي
   static Future<void> addTransaction(TransactionModel tx) async {

@@ -9,6 +9,7 @@ import '../models.dart';
 import 'add_account_screen.dart';
 import 'account_screen.dart';
 import 'add_edit_transaction_screen.dart';
+import 'operations_log_screen.dart';
 
 enum _QuickStatusFilter { all, added, received, cancelled }
 
@@ -965,6 +966,19 @@ class _HomeScreenState extends State<HomeScreen> {
                       backgroundColor: cs.surface,
                       foregroundColor: cs.onSurface,
                       surfaceTintColor: Colors.transparent,
+                      actions: [
+                        IconButton(
+                          tooltip: 'سجل العمليات',
+                          icon: const Icon(Icons.history_rounded),
+                          onPressed: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const OperationsLogScreen(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       flexibleSpace: FlexibleSpaceBar(
                         titlePadding: const EdgeInsetsDirectional.only(
                           start: 20,

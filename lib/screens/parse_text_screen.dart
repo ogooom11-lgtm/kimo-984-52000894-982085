@@ -6,6 +6,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../utils/chunked_task.dart';
+import '../widgets/operation_progress_bar.dart';
 import 'bubble_screen.dart';
 import 'verify_receive_screen.dart';
 
@@ -29,7 +31,10 @@ class _ParseTextScreenState extends State<ParseTextScreen>
 
   Account? _selectedAccount;
   bool _isBusy = false;
-  String _loadingMessage = 'جارٍ التحميل...';
+
+  /// تقدم العملية الجارية (شريط سفلي بالنسبة المئوية)
+  final ValueNotifier<OperationProgress?> _progress =
+      ValueNotifier<OperationProgress?>(null);
 
   late final AnimationController _pulseController;
   late final AnimationController _fadeController;
@@ -76,31 +81,18 @@ class _ParseTextScreenState extends State<ParseTextScreen>
     _text.dispose();
     _pulseController.dispose();
     _fadeController.dispose();
+    _progress.dispose();
     super.dispose();
   }
 
-  Future<T> _runWithLoading<T>(
-    String message,
-    Future<T> Function() action,
-  ) async {
-    if (mounted) {
-      setState(() {
-        _isBusy = true;
-        _loadingMessage = message;
-      });
-    }
+  void _setProgress(OperationProgress? p) {
+    if (mounted) _progress.value = p;
+  }
 
-    await Future.delayed(const Duration(milliseconds: 50));
-
-    try {
-      return await action();
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isBusy = false;
-        });
-      }
-    }
+  void _setBusy(bool value) {
+    if (!mounted) return;
+    setState(() => _isBusy = value);
+    if (!value) _setProgress(null);
   }
 
   Color _accountBaseColor(Account? account) {
@@ -139,60 +131,89 @@ class _ParseTextScreenState extends State<ParseTextScreen>
   }
 
   Future<void> _paste() async {
-    await _runWithLoading('جارٍ لصق النص وتحليل الحسابات...', () async {
+    if (_isBusy) return;
+    _setBusy(true);
+    _setProgress(
+      const OperationProgress(
+        label: 'جارٍ قراءة الحافظة...',
+        done: 0,
+        total: 0,
+      ),
+    );
+
+    String clip = '';
+    try {
       final data = await Clipboard.getData('text/plain');
-      final clip = data?.text ?? '';
-
-      if (clip.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text("📋 الحافظة فارغة")));
-        }
-        return;
-      }
-
-      if (mounted) {
-        setState(() => _text.text = clip);
-      }
-
-      await Future.delayed(const Duration(milliseconds: 80));
-      await _detectAccountsWithCountAsync(clip);
-    });
-  }
-
-  Future<void> _detectAccountsWithCountAsync(String text) async {
-    final accounts = DatabaseService.accountsBox.values.toList();
-    final normalizedText = _normalizeForAccountMatch(text);
-
-    final Map<Account, int> matches = {};
-
-    for (final account in accounts) {
-      var count = 0;
-
-      for (final keyword in _accountMatchKeywords(account)) {
-        final normalizedKeyword = _normalizeForAccountMatch(keyword);
-        if (normalizedKeyword.isEmpty) continue;
-
-        final regex = RegExp(RegExp.escape(normalizedKeyword));
-        count += regex.allMatches(normalizedText).length;
-      }
-
-      if (count > 0) {
-        matches[account] = count;
-      }
+      clip = data?.text ?? '';
+    } catch (_) {
+      clip = '';
     }
 
-    if (matches.isEmpty) return;
-
-    if (matches.length == 1) {
+    if (clip.isEmpty) {
+      _setBusy(false);
       if (mounted) {
-        setState(() => _selectedAccount = matches.keys.first);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("📋 الحافظة فارغة")));
       }
       return;
     }
 
+    _setProgress(
+      const OperationProgress(label: 'جارٍ لصق النص...', done: 0, total: 0),
+    );
+    await yieldToUi();
     if (!mounted) return;
+    setState(() => _text.text = clip);
+    await yieldToUi();
+    _setBusy(false);
+    await _detectAccountsWithCountAsync(clip);
+  }
+
+  /// تحديد الحساب من النص على دفعات (حتى لا يتجمد التطبيق مع النصوص الطويلة)
+  Future<void> _detectAccountsWithCountAsync(String text) async {
+    final accounts = DatabaseService.accountsBox.values.toList();
+    if (accounts.isEmpty || text.trim().isEmpty) return;
+
+    _setBusy(true);
+    const label = 'جارٍ تحديد الحساب من النص...';
+    _setProgress(
+      OperationProgress(label: label, done: 0, total: accounts.length),
+    );
+    await yieldToUi();
+
+    final Map<Account, int> matches = {};
+    try {
+      final normalizedText = _normalizeForAccountMatch(text);
+      await runTimeSliced(
+        total: accounts.length,
+        isCancelled: () => !mounted,
+        onProgress: (done, total) => _setProgress(
+          OperationProgress(label: label, done: done, total: total),
+        ),
+        work: (i) {
+          final account = accounts[i];
+          var count = 0;
+          for (final keyword in _accountMatchKeywords(account)) {
+            final normalizedKeyword = _normalizeForAccountMatch(keyword);
+            if (normalizedKeyword.isEmpty) continue;
+            final regex = RegExp(RegExp.escape(normalizedKeyword));
+            count += regex.allMatches(normalizedText).length;
+          }
+          if (count > 0) matches[account] = count;
+        },
+      );
+    } finally {
+      _setBusy(false);
+    }
+
+    if (matches.isEmpty || !mounted) return;
+
+    if (matches.length == 1) {
+      setState(() => _selectedAccount = matches.keys.first);
+      return;
+    }
+
     final selected = await _showAccountPicker(matches);
     if (selected != null && mounted) {
       setState(() => _selectedAccount = selected);
@@ -497,13 +518,8 @@ class _ParseTextScreenState extends State<ParseTextScreen>
 
   Future<void> _goBubble() async {
     if (!_validate()) return;
-
-    await _runWithLoading('جارٍ تجهيز البيانات...', () async {
-      await Future.delayed(const Duration(milliseconds: 220));
-    });
-
-    if (!mounted) return;
-
+    // شاشة الفقاعات تحلل الرسائل على دفعات وتعرض نسبة التقدم بنفسها،
+    // لذلك ننتقل فورًا بدون أي انتظار.
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -518,11 +534,19 @@ class _ParseTextScreenState extends State<ParseTextScreen>
   Future<void> _goVerifyReceive() async {
     if (!_validate()) return;
 
-    await _runWithLoading('جارٍ تجهيز صفحة التسليم...', () async {
-      await Future.delayed(const Duration(milliseconds: 220));
-    });
-
+    _setBusy(true);
+    _setProgress(
+      const OperationProgress(
+        label: 'جارٍ تجهيز صفحة التسليم...',
+        done: 0,
+        total: 0,
+      ),
+    );
+    // نعطي الواجهة فرصة لرسم شريط التقدم قبل بناء الصفحة التالية
+    await yieldToUi();
+    await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
+    _setBusy(false);
 
     Navigator.push(
       context,
@@ -627,74 +651,17 @@ class _ParseTextScreenState extends State<ParseTextScreen>
     );
   }
 
-  Widget _buildLoadingOverlay() {
-    final color = _accountBaseColor(_selectedAccount);
-
-    return AnimatedOpacity(
-      duration: const Duration(milliseconds: 220),
-      opacity: _isBusy ? 1 : 0,
-      child: IgnorePointer(
-        ignoring: !_isBusy,
-        child: Container(
-          color: Colors.black.withOpacity(0.22),
-          child: Center(
-            child: TweenAnimationBuilder<double>(
-              tween: Tween(begin: 0.96, end: 1),
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOut,
-              builder: (_, scale, child) {
-                return Transform.scale(scale: scale, child: child);
-              },
-              child: Container(
-                width: 220,
-                padding: const EdgeInsets.all(22),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? const Color(0xFF0F172A)
-                      : Colors.white,
-                  borderRadius: BorderRadius.circular(28),
-                  boxShadow: const [
-                    BoxShadow(
-                      blurRadius: 30,
-                      color: Colors.black26,
-                      offset: Offset(0, 16),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      width: 56,
-                      height: 56,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 4.2,
-                        valueColor: AlwaysStoppedAnimation<Color>(color),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      _loadingMessage,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 15,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      "يرجى الانتظار قليلاً",
-                      style: TextStyle(
-                        color: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.color?.withOpacity(0.8),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+  Widget _buildBottomProgress() {
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: SafeArea(
+        top: false,
+        child: OperationProgressBar(
+          progress: _progress,
+          color: _accountBaseColor(_selectedAccount),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         ),
       ),
     );
@@ -996,7 +963,7 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                     ),
                   ),
                 ),
-                _buildLoadingOverlay(),
+                _buildBottomProgress(),
               ],
             ),
           ),

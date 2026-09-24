@@ -1,15 +1,25 @@
 // lib/screens/bubble_screen.dart — نسخة مُحسّنة تدعم عدّة ملفات وتراعي الإعدادات بالكامل
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:characters/characters.dart';
 import 'package:flutter/services.dart';
+import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
+import '../services/operation_log_service.dart';
+import '../services/settings_words.dart';
+import '../utils/chunked_task.dart';
+import '../widgets/operation_progress_bar.dart';
 import 'add_edit_transaction_screen.dart';
+import 'operations_log_screen.dart';
+import 'settings_screen.dart';
 
 // خدمات الكشف
 import '../services/detection/name_detector.dart' as nd;
 import '../services/detection/amount_detector.dart' as ad;
 import '../services/detection/currency_detector.dart' as cd;
+import '../services/detection/text_tokens.dart' as tt;
 
 /// مراحل التحديد
 enum SelectionStage { name, amount, currency, done }
@@ -29,6 +39,12 @@ class ParsedSegment {
     required this.timestamp,
     required this.lines,
   });
+
+  /// توكنات كل سطر (تُحسب مرة واحدة)
+  late final List<List<String>> tokenLines = [
+    for (final line in lines)
+      List<String>.unmodifiable(tt.tokensFromLine(line)),
+  ];
 }
 
 class _ForwardLine {
@@ -70,6 +86,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
   static const _chipYellow = Color(0xFFF0C100); // amber 700
   static const _chipRed = Color(0xFFE53935); // red 600
   static const _chipGreen = Color(0xFF43A047); // green 600
+  static const _forbiddenColor = Color(0xFFD84315); // deep orange 800
+
+  // ألوان الأدوار (قابلة للتخصيص من الإعدادات)
+  Color get _nameColor => _prefs.nameColorValue;
+  Color get _amountColor => _prefs.amountColorValue;
+  Color get _currencyColor => _prefs.currencyColorValue;
 
   // المقاطع
   late List<ParsedSegment> _segments;
@@ -86,9 +108,19 @@ class _BubbleScreenState extends State<BubbleScreen> {
   late List<String> _bubbleReadyNames;
   late List<String> _companyUserNames;
   late List<BubbleQuickActionConfig> _bubbleQuickActions;
+  late List<String> _forbiddenWords;
+  late List<String> _forbiddenPhrases;
+  late BubbleUiPrefs _prefs;
+  late nd.NameDetectorConfig _nameConfig;
+  late tt.PhraseSet _forbiddenPhraseSet;
+  late tt.PhraseSet _forbiddenWordSet;
   late List<TransactionModel> _allTransactions;
   late Map<int, String> _accountNamesById;
   late List<String> _knownBeneficiaryNames;
+
+  // كاش للتوكنات والأسماء المطبّعة
+  final Map<String, List<String>> _tokenCache = {};
+  final Expando<String> _txNormNames = Expando<String>('txNormName');
 
   // اقتراحات تعلّم (من كاشف العملة)
   final Set<String> _suggestCurrencySymbols = {};
@@ -118,35 +150,24 @@ class _BubbleScreenState extends State<BubbleScreen> {
   final Map<int, _SavedAddSummary> _savedAddSummaries = {};
   final Map<int, _CancelledSummary> _cancelledSummaries = {};
 
+  // تقدم العمليات (شريط سفلي بالنسبة المئوية)
+  final ValueNotifier<OperationProgress?> _progress =
+      ValueNotifier<OperationProgress?>(null);
+  bool _analyzing = false;
+  int _analysisGeneration = 0;
+  bool _legendExpanded = false;
+
+  bool get _busy => _isSending || _analyzing;
+
+  void _setProgress(OperationProgress? p) {
+    if (mounted) _progress.value = p;
+  }
+
   @override
   void initState() {
     super.initState();
 
-    _settings =
-        DatabaseService.getSettings() ??
-        Settings(
-          nameKeywords: const ['المستفيد', 'إلى', 'ل', 'لـ'],
-          amountKeywords: const ['المبلغ', 'قيمة', 'amount', '\$'],
-          currencyMap: const {'\$': 'دولار'},
-          ignoredWords: const [],
-          lineIgnoredWords: const [],
-          cancelKeywords: const ['الغاء'],
-          amountWordValues: const {},
-          bubbleReadyNames: const [],
-          bubbleQuickActions: const [],
-          companyUserNames: const [],
-        );
-
-    _nameKeywords = List.of(_settings.nameKeywords);
-    _amountKeywords = List.of(_settings.amountKeywords);
-    _currencyMap = Map.of(_settings.currencyMap);
-    _ignored = List.of(_settings.ignoredWords);
-    _lineIgnored = List.of(_settings.lineIgnoredWords);
-    _cancelKeywords = List.of(_settings.cancelKeywords);
-    _amountWordValues = Map.of(_settings.amountWordValues);
-    _bubbleReadyNames = List.of(_settings.bubbleReadyNames);
-    _companyUserNames = List.of(_settings.companyUserNames);
-    _bubbleQuickActions = List.of(_settings.bubbleQuickActions);
+    _loadSettingsAndPrefs();
     _allTransactions = DatabaseService.transactionsBox.values.toList();
     _accountNamesById = {
       for (final account in DatabaseService.accountsBox.values)
@@ -157,6 +178,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
         .where((s) => s.trim().isNotEmpty)
         .toSet()
         .toList();
+    _rebuildNameConfig();
 
     // === دعم عدّة ملفات ===
     final texts = <String>[];
@@ -192,37 +214,197 @@ class _BubbleScreenState extends State<BubbleScreen> {
       });
     }
 
-    // ابنِ التحديدات + فضّل نص المبلغ عند وجوده
-    for (var i = 0; i < _segments.length; i++) {
-      final sel = _autoDetect(_segments[i], i);
-      _selections.add(sel);
-      final mode = _segmentLooksLikeCancel(_segments[i])
-          ? BubbleActionMode.cancel
-          : BubbleActionMode.add;
-      _segmentModes[i] = mode;
-      if (mode == BubbleActionMode.cancel) {
-        sel.stage = SelectionStage.name;
-      }
-    }
-
-    final hasAdd = _segmentModes.values.any((m) => m == BubbleActionMode.add);
-    _viewMode = hasAdd ? BubbleActionMode.add : BubbleActionMode.cancel;
-
+    // التحليل يتم على دفعات بعد ظهور الشاشة حتى لا يتجمد التطبيق
+    _analyzing = true;
+    _setProgress(
+      OperationProgress(
+        label: 'جارٍ تحليل الرسائل...',
+        done: 0,
+        total: _segments.length,
+      ),
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      for (var i = 0; i < _segments.length; i++) {
-        if (_modeOf(i) == BubbleActionMode.cancel) {
-          _requestCancelCandidates(i);
-        }
-      }
+      if (mounted) _runInitialAnalysis();
     });
   }
 
+  @override
+  void dispose() {
+    _analysisGeneration++;
+    _progress.dispose();
+    super.dispose();
+  }
+
+  Settings _defaultSettings() => Settings(
+    nameKeywords: const ['المستفيد', 'إلى', 'ل', 'لـ'],
+    amountKeywords: const ['المبلغ', 'قيمة', 'amount', '\$'],
+    currencyMap: const {'\$': 'دولار'},
+    ignoredWords: const [],
+    lineIgnoredWords: const [],
+    cancelKeywords: const ['الغاء'],
+    amountWordValues: const {},
+    bubbleReadyNames: const [],
+    bubbleQuickActions: const [],
+    companyUserNames: const [],
+  );
+
+  void _loadSettingsAndPrefs() {
+    _settings = DatabaseService.getSettings() ?? _defaultSettings();
+    _nameKeywords = List.of(_settings.nameKeywords);
+    _amountKeywords = List.of(_settings.amountKeywords);
+    _currencyMap = Map.of(_settings.currencyMap);
+    _ignored = List.of(_settings.ignoredWords);
+    _lineIgnored = List.of(_settings.lineIgnoredWords);
+    _cancelKeywords = List.of(_settings.cancelKeywords);
+    _amountWordValues = Map.of(_settings.amountWordValues);
+    _bubbleReadyNames = List.of(_settings.bubbleReadyNames);
+    _companyUserNames = List.of(_settings.companyUserNames);
+    _bubbleQuickActions = List.of(_settings.bubbleQuickActions);
+    _forbiddenWords = List.of(_settings.forbiddenWords);
+    _forbiddenPhrases = List.of(_settings.forbiddenPhrases);
+    _prefs = BubbleUiPrefs.fromSettings(_settings);
+  }
+
+  void _rebuildNameConfig() {
+    _nameConfig = nd.NameDetectorConfig(
+      nameKeywords: _nameKeywords,
+      knownNames: _knownBeneficiaryNames,
+      ignoredWords: _ignored,
+      lineIgnoredWords: _lineIgnored,
+      currencyWords: [..._currencyMap.keys, ..._currencyMap.values],
+      forbiddenWords: _forbiddenWords,
+      forbiddenPhrases: _forbiddenPhrases,
+      amountKeywords: _amountKeywords,
+      cancelKeywords: _cancelKeywords,
+    );
+    _forbiddenPhraseSet = tt.PhraseSet(_forbiddenPhrases);
+    _forbiddenWordSet = tt.PhraseSet(_forbiddenWords);
+  }
+
+  /// يعيد تحميل الإعدادات بعد تعديلها (من قائمة الكلمة أو من صفحة الإعدادات)
+  void _reloadSettings() {
+    _loadSettingsAndPrefs();
+    _rebuildNameConfig();
+    _tokenCache.clear();
+    for (var i = 0; i < _selections.length; i++) {
+      _computeForbiddenFor(_segments[i], _selections[i]);
+    }
+    _amountCandidatesCache.clear();
+  }
+
+  // ====== التحليل التدريجي ======
+  void _analyzeNext() {
+    final i = _selections.length;
+    final seg = _segments[i];
+    final sel = _autoDetect(seg, i);
+    _selections.add(sel);
+    final mode = _segmentLooksLikeCancel(seg)
+        ? BubbleActionMode.cancel
+        : BubbleActionMode.add;
+    _segmentModes[i] = mode;
+    if (mode == BubbleActionMode.cancel) {
+      sel.stage = SelectionStage.name;
+    }
+  }
+
+  Future<void> _runInitialAnalysis() async {
+    final gen = ++_analysisGeneration;
+    final slice = Stopwatch()..start();
+    final uiTick = Stopwatch()..start();
+
+    while (mounted &&
+        gen == _analysisGeneration &&
+        _selections.length < _segments.length) {
+      _analyzeNext();
+      if (slice.elapsedMilliseconds >= 12) {
+        _setProgress(
+          OperationProgress(
+            label: 'جارٍ تحليل الرسائل...',
+            done: _selections.length,
+            total: _segments.length,
+          ),
+        );
+        if (uiTick.elapsedMilliseconds >= 250) {
+          setState(() {});
+          uiTick
+            ..reset()
+            ..start();
+        }
+        await yieldToUi();
+        slice
+          ..reset()
+          ..start();
+      }
+    }
+    if (!mounted || gen != _analysisGeneration) return;
+
+    final hasAdd = _segmentModes.values.any((m) => m == BubbleActionMode.add);
+    setState(() {
+      _analyzing = false;
+      _viewMode = hasAdd ? BubbleActionMode.add : BubbleActionMode.cancel;
+    });
+    _setProgress(null);
+
+    for (var i = 0; i < _selections.length; i++) {
+      if (_modeOf(i) == BubbleActionMode.cancel) {
+        _requestCancelCandidates(i);
+      }
+    }
+  }
+
+  /// إعادة تحليل الفقاعات غير المحفوظة بعد تغيير الإعدادات
+  Future<void> _reanalyzeUnsaved() async {
+    if (_busy) return;
+    final targets = <int>[
+      for (var i = 0; i < _selections.length; i++)
+        if (!_savedSegments.contains(i) && !_cancelledSummaries.containsKey(i))
+          i,
+    ];
+    if (targets.isEmpty) return;
+
+    final gen = ++_analysisGeneration;
+    setState(() => _analyzing = true);
+    try {
+      await runTimeSliced(
+        total: targets.length,
+        isCancelled: () => !mounted || gen != _analysisGeneration,
+        onProgress: (done, total) => _setProgress(
+          OperationProgress(
+            label: 'جارٍ إعادة تحليل الفقاعات...',
+            done: done,
+            total: total,
+          ),
+        ),
+        work: (k) {
+          final i = targets[k];
+          if (i >= _selections.length) return;
+          _amountOverride.remove(i);
+          _amountConflict.remove(i);
+          _amountTextCandidate.remove(i);
+          _amountCandidatesCache.remove(i);
+          // الاسم اليدوي (_nameOverride) يبقى كما هو
+          _selections[i] = _autoDetect(_segments[i], i);
+          _refreshStageForSegment(i);
+          _invalidateCancelCandidates(i);
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _analyzing = false);
+      }
+      _setProgress(null);
+    }
+    if (!mounted) return;
+    for (final i in targets) {
+      if (i < _selections.length && _modeOf(i) == BubbleActionMode.cancel) {
+        _requestCancelCandidates(i);
+      }
+    }
+  }
+
   // ====== أدوات تصميم ======
-  Color _onSurface(BuildContext ctx) =>
-      Theme.of(ctx).colorScheme.onSurface.withOpacity(0.9);
   Color _muted(BuildContext ctx) =>
-      Theme.of(ctx).colorScheme.onSurface.withOpacity(0.6);
+      Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.6);
 
   // ====== تطبيع عربي/مقارنات ======
   String _stripDiacritics(String s) =>
@@ -324,9 +506,13 @@ class _BubbleScreenState extends State<BubbleScreen> {
     return _levenshtein(a, b) <= maxDistance;
   }
 
+  /// اسم الحركة المطبّع (مع كاش لكل كائن حتى لا يُعاد التطبيع في كل مقارنة)
+  String _txNormName(TransactionModel tx) =>
+      _txNormNames[tx] ??= _normalizeForSearch(tx.beneficiary);
+
   double _cancelNameScore(TransactionModel tx, String name) {
     final wanted = _normalizeForSearch(name);
-    final candidate = _normalizeForSearch(tx.beneficiary);
+    final candidate = _txNormName(tx);
     if (wanted.isEmpty || candidate.isEmpty) return -1;
     if (wanted == candidate) return 1;
 
@@ -359,34 +545,39 @@ class _BubbleScreenState extends State<BubbleScreen> {
   bool _isExactCancelMatch(TransactionModel tx, String name) =>
       _normalizeForSearch(tx.beneficiary) == _normalizeForSearch(name);
 
-  List<TransactionModel> _computeCancelCandidates(String name) {
+  Future<List<TransactionModel>> _computeCancelCandidates(String name) async {
+    final pool = <TransactionModel>[
+      for (final tx in _allTransactions)
+        if (tx.accountId == widget.account.id &&
+            (!_isCompanyAccount ||
+                (tx.companyMovementType != null &&
+                    !tx.companyMovementType!.isCancelled)))
+          tx,
+    ];
     final scored = <({TransactionModel tx, double score})>[];
-    for (final tx in _allTransactions) {
-      if (tx.accountId != widget.account.id) continue;
-      if (_isCompanyAccount &&
-          (tx.companyMovementType == null ||
-              tx.companyMovementType!.isCancelled)) {
-        continue;
+    await runTimeSliced(
+      total: pool.length,
+      isCancelled: () => !mounted,
+      work: (i) {
+        final score = _cancelNameScore(pool[i], name);
+        if (score >= 0) scored.add((tx: pool[i], score: score));
+      },
+    );
+
+    int statusRank(TransactionStatus status) {
+      switch (status) {
+        case TransactionStatus.added:
+          return 0;
+        case TransactionStatus.received:
+          return 1;
+        case TransactionStatus.cancelled:
+          return 2;
       }
-      final score = _cancelNameScore(tx, name);
-      if (score >= 0) scored.add((tx: tx, score: score));
     }
 
     scored.sort((a, b) {
       final scoreCompare = b.score.compareTo(a.score);
       if (scoreCompare != 0) return scoreCompare;
-
-      int statusRank(TransactionStatus status) {
-        switch (status) {
-          case TransactionStatus.added:
-            return 0;
-          case TransactionStatus.received:
-            return 1;
-          case TransactionStatus.cancelled:
-            return 2;
-        }
-      }
-
       final statusCompare = statusRank(
         a.tx.status,
       ).compareTo(statusRank(b.tx.status));
@@ -417,7 +608,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   void _requestCancelCandidates(int segIndex) {
-    if (!mounted || _modeOf(segIndex) != BubbleActionMode.cancel) return;
+    if (!mounted || segIndex >= _selections.length) return;
+    if (_modeOf(segIndex) != BubbleActionMode.cancel) return;
     final name = _buildSelectedName(
       _segments[segIndex],
       _selections[segIndex],
@@ -439,10 +631,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _cancelCandidateQueries[segIndex] = query;
     });
 
-    Future<List<TransactionModel>>.delayed(
-      Duration.zero,
-      () => _computeCancelCandidates(name),
-    ).then((candidates) {
+    _computeCancelCandidates(name).then((candidates) {
       if (!mounted) return;
       final currentQuery = _cancelQueryForSegment(segIndex);
       if (currentQuery != query) return;
@@ -582,42 +771,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
   // ====== تنظيف التوكنات (مع حذف الرموز بين الأرقام المتتالية) ======
   bool _isAsciiDigit(int code) => code >= 0x30 && code <= 0x39;
   bool _isArabicDigit(int code) => code >= 0x0660 && code <= 0x0669;
-  bool _isDigitCode(int code) => _isAsciiDigit(code) || _isArabicDigit(code);
 
-  String _squashDigitSeparators(String w) {
-    if (w.isEmpty) return w;
-    final sep = RegExp(r'[.,،\-\_\u0640\u066B\u066C]'); // . , ، - _ ـ ٫ ٬
-    final out = StringBuffer();
-    for (int i = 0; i < w.length; i++) {
-      final ch = w[i];
-      if (sep.hasMatch(ch)) {
-        final prev = (i > 0) ? w.codeUnitAt(i - 1) : null;
-        final next = (i + 1 < w.length) ? w.codeUnitAt(i + 1) : null;
-        if (prev != null &&
-            next != null &&
-            _isDigitCode(prev) &&
-            _isDigitCode(next)) {
-          // احذف الفاصل بين الأرقام
-          continue;
-        }
-      }
-      out.write(ch);
-    }
-    return out.toString();
-  }
+  String _cleanToken(String w) => tt.cleanToken(w);
 
-  String _cleanToken(String w) {
-    final trimmed = w
-        .replaceAll(RegExp(r'[^\u0600-\u06FFa-zA-Z0-9\$€£﷼٫\.,\-_\/\+]'), '')
-        .trim();
-    return _squashDigitSeparators(trimmed);
-  }
-
-  List<String> _tokensFromLine(String line) => line
-      .split(RegExp(r'\s+'))
-      .map(_cleanToken)
-      .where((w) => w.isNotEmpty)
-      .toList();
+  /// توكنات سطر (نفس المقسّم المستخدم في كاشف الاسم، مع كاش)
+  List<String> _tokensFromLine(String line) => _tokenCache.putIfAbsent(
+    line,
+    () => List<String>.unmodifiable(tt.tokensFromLine(line)),
+  );
 
   // ====== Helpers خاصة بكلمات "المبلغ" ======
   bool _isAmountKeywordToken(String token) {
@@ -1067,15 +1228,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
     // 2) قفل كلمات المبلغ النصّي
     sel.amountTextLockedTokens.addAll(_lockTextualAmountTokens(seg.lines));
 
-    // 3) الاسم
-    final nameRes = nd.NameDetector.detect(
-      lines: seg.lines,
+    // 2.5) الكلمات/الجمل الممنوعة
+    _computeForbiddenFor(seg, sel);
+
+    // 3) الاسم: فحص كل الأسطر ومقارنتها واعتماد الأفضل
+    final nameRes = nd.NameDetector.detectTokens(
+      tokenLines: seg.tokenLines,
       senderName: seg.senderName,
-      nameKeywords: _nameKeywords,
-      knownNames: _knownBeneficiaryNames,
-      ignoredWords: _ignored,
-      lineIgnoredWords: _lineIgnored,
-      currencyWords: [..._currencyMap.keys, ..._currencyMap.values],
+      config: _nameConfig,
     );
 
     nameRes.tokensByLine.forEach((li, idxs) {
@@ -1086,6 +1246,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
         }
       }
     });
+    sel.nameCandidates = nameRes.candidates;
+    sel.nameAmbiguous = nameRes.ambiguous;
+    sel.nameReason = nameRes.reason;
 
     // 5) المبلغ على النص المنظف
     final amountForward = _buildForwardLinesForAmount(seg, sel);
@@ -1160,10 +1323,47 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _suggestCurrencySymbols.addAll(curRes.suggestSymbols);
     _suggestCurrencyNames.addAll(curRes.suggestNames);
 
-    _suggestCurrencySymbols.addAll(curRes.suggestSymbols);
-    _suggestCurrencyNames.addAll(curRes.suggestNames);
-
     return sel;
+  }
+
+  /// يحدد الكلمات والجمل الممنوعة داخل المقطع (للتمييز والتنبيه)
+  void _computeForbiddenFor(ParsedSegment seg, _SegmentSelection sel) {
+    sel.forbiddenTokens.clear();
+    sel.forbiddenPhraseTokens.clear();
+    sel.forbiddenPhrases.clear();
+    if (_forbiddenPhraseSet.isEmpty && _forbiddenWordSet.isEmpty) return;
+
+    final allKeys = <String>[];
+    for (int li = 0; li < seg.lines.length; li++) {
+      final keys = _nameConfig.keysOf(_tokensFromLine(seg.lines[li]));
+      allKeys.addAll(keys);
+      for (final hit in _forbiddenWordSet.findAll(keys, lineIndex: li)) {
+        for (int ti = hit.start; ti < hit.end; ti++) {
+          sel.forbiddenTokens.add(_TokPos(li, ti));
+        }
+      }
+      for (final hit in _forbiddenPhraseSet.findAll(keys, lineIndex: li)) {
+        for (int ti = hit.start; ti < hit.end; ti++) {
+          sel.forbiddenTokens.add(_TokPos(li, ti));
+          sel.forbiddenPhraseTokens.add(_TokPos(li, ti));
+        }
+        if (!sel.forbiddenPhrases.contains(hit.phrase)) {
+          sel.forbiddenPhrases.add(hit.phrase);
+        }
+      }
+    }
+
+    // جمل ممتدة على أكثر من سطر
+    if (_forbiddenPhrases.isNotEmpty) {
+      final joined = ' ${allKeys.join(' ')} ';
+      for (final phrase in _forbiddenPhrases) {
+        if (sel.forbiddenPhrases.contains(phrase.trim())) continue;
+        final key = tt.normalizeText(phrase);
+        if (key.isNotEmpty && joined.contains(' $key ')) {
+          sel.forbiddenPhrases.add(phrase.trim());
+        }
+      }
+    }
   }
 
   bool _hasNameFor(int segIndex, _SegmentSelection sel) =>
@@ -1369,28 +1569,56 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     switch (sel.stage) {
       case SelectionStage.name:
-        setState(() {
-          if (sel.nameTokens.isEmpty) {
-            for (int t2 = tokenIndex; t2 < tokensThisLine.length; t2++) {
-              final p = _TokPos(lineIndex, t2);
-              final tk = tokensThisLine[t2];
-              if (_occupiedRoleName(sel, p, SelectionStage.name) == null &&
-                  !_isLockedToken(segIndex, p.line, p.index) &&
-                  !_isIgnoredWord(tk)) {
-                sel.nameTokens.add(p);
-              }
-            }
-          } else {
+        final keys = _nameConfig.keysOf(tokensThisLine);
+        final forbiddenIdx = _nameConfig.forbiddenMask(keys);
+
+        // الكلمة/الجملة الممنوعة لا تدخل في الاسم أبدًا
+        if (forbiddenIdx.contains(tokenIndex) &&
+            !sel.nameTokens.contains(pos)) {
+          _snack(
+            sel.forbiddenPhraseTokens.contains(pos)
+                ? '«$tok» جزء من جملة ممنوعة ولا يمكن أن يكون ضمن الاسم'
+                : '«$tok» كلمة ممنوعة ولا يمكن أن تكون جزءًا من الاسم',
+          );
+          return;
+        }
+
+        // الضغط على كلمة في سطر آخر = تحديد اسم جديد (يمتد تلقائيًا)،
+        // أما الضغط داخل نفس سطر الاسم فيضيف/يزيل الكلمة فقط.
+        final sameLine = sel.nameTokens.any((p) => p.line == lineIndex);
+        if (sel.nameTokens.isEmpty || !sameLine) {
+          final res = _nameSpanFromTap(
+            segIndex,
+            lineIndex,
+            tokenIndex,
+            tokensThisLine,
+            keys,
+            forbiddenIdx,
+          );
+          if (res.span.isEmpty) {
+            _snack(res.reason ?? 'تعذر تحديد الاسم من هذه الكلمة');
+            return;
+          }
+          setState(() {
+            sel.nameTokens
+              ..clear()
+              ..addAll(res.span.map((ti) => _TokPos(lineIndex, ti)));
+            _nameOverride.remove(segIndex);
+            _invalidateCancelCandidates(segIndex);
+            _refreshStageForSegment(segIndex);
+          });
+        } else {
+          setState(() {
             if (sel.nameTokens.contains(pos)) {
               sel.nameTokens.remove(pos);
             } else if (!_isIgnoredWord(tok)) {
               sel.nameTokens.add(pos);
             }
-          }
-          _nameOverride.remove(segIndex);
-          _invalidateCancelCandidates(segIndex);
-          _refreshStageForSegment(segIndex);
-        });
+            _nameOverride.remove(segIndex);
+            _invalidateCancelCandidates(segIndex);
+            _refreshStageForSegment(segIndex);
+          });
+        }
         if (_modeOf(segIndex) == BubbleActionMode.cancel) {
           _requestCancelCandidates(segIndex);
         }
@@ -1424,6 +1652,624 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
   }
 
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// عند الضغط على كلمة لتحديد الاسم: يمتد الاسم حتى نهاية السطر أو حتى أول
+  /// كلمة ممنوعة / رقم / عملة / كلمة مبلغ / كلمة اسم / ... (كلمات الإيقاف).
+  /// الضغط على كلمة اسم (مثل: المستفيد) يبدأ الاسم من الكلمة التي بعدها.
+  ({List<int> span, String? reason}) _nameSpanFromTap(
+    int segIndex,
+    int lineIndex,
+    int tokenIndex,
+    List<String> tokens,
+    List<String> keys,
+    Set<int> forbiddenIdx,
+  ) {
+    final sel = _selections[segIndex];
+    bool extraStop(int i) {
+      final p = _TokPos(lineIndex, i);
+      return _occupiedRoleName(sel, p, SelectionStage.name) != null ||
+          _isLockedToken(segIndex, lineIndex, i) ||
+          sel.phoneLikeTokens.contains(p) ||
+          tt.isPhoneLike(tokens[i]);
+    }
+
+    var start = tokenIndex;
+    final kwLen = _nameConfig.nameKeywords.matchAt(keys, start);
+    if (kwLen > 0) start += kwLen;
+    while (start < keys.length && _nameConfig.isIgnoredKey(keys[start])) {
+      start++;
+    }
+    if (start >= keys.length) {
+      return (
+        span: const <int>[],
+        reason: 'لا توجد كلمات صالحة للاسم بعد هذه الكلمة في السطر',
+      );
+    }
+    if (extraStop(start)) {
+      return (
+        span: const <int>[],
+        reason: 'هذه الكلمة محددة لدور آخر (مبلغ/عملة/هاتف)',
+      );
+    }
+    final startReason = _nameConfig.stopReasonAt(
+      keys,
+      start,
+      forbiddenIdx: forbiddenIdx,
+    );
+    if (startReason != null) {
+      return (span: const <int>[], reason: 'لا يمكن بدء الاسم من $startReason');
+    }
+    if (!_prefs.autoExtendName) return (span: <int>[start], reason: null);
+
+    final span = _nameConfig.collectSpan(
+      keys,
+      start,
+      forbiddenIdx: forbiddenIdx,
+      extraStop: extraStop,
+      maxTokens: 100,
+    );
+    return (span: span, reason: null);
+  }
+
+  /// اعتماد سطر مقترح كاسم
+  void _applyNameCandidate(int segIndex, nd.NameLineCandidate c) {
+    final sel = _selections[segIndex];
+    setState(() {
+      sel.nameTokens
+        ..clear()
+        ..addAll(
+          c.tokenIndexes
+              .map((ti) => _TokPos(c.lineIndex, ti))
+              .where(
+                (p) =>
+                    _occupiedRoleName(sel, p, SelectionStage.name) == null &&
+                    !sel.forbiddenTokens.contains(p),
+              ),
+        );
+      _nameOverride.remove(segIndex);
+      _invalidateCancelCandidates(segIndex);
+      _refreshStageForSegment(segIndex);
+    });
+    if (_modeOf(segIndex) == BubbleActionMode.cancel) {
+      _requestCancelCandidates(segIndex);
+    }
+  }
+
+  /// الكلمات/الجمل الممنوعة الموجودة داخل نص يكتبه المستخدم
+  List<String> _forbiddenInText(String text) {
+    final keys = _nameConfig.keysOf(tt.tokensFromLine(text));
+    if (keys.isEmpty) return const [];
+    final out = <String>[];
+    for (final hit in _forbiddenPhraseSet.findAll(keys)) {
+      if (!out.contains(hit.phrase)) out.add(hit.phrase);
+    }
+    for (final hit in _forbiddenWordSet.findAll(keys)) {
+      if (!out.contains(hit.phrase)) out.add(hit.phrase);
+    }
+    return out;
+  }
+
+  // ====== قائمة الضغط المطوّل على الكلمة ======
+  Future<void> _showWordActions(
+    int segIndex,
+    int lineIndex,
+    int tokenIndex,
+    String token,
+    List<String> tokensThisLine,
+  ) async {
+    if (_busy) {
+      _snack('انتظر حتى تنتهي العملية الجارية');
+      return;
+    }
+    final settings = SettingsWords.load();
+    final word = token.trim();
+    if (word.isEmpty) return;
+    final phraseSuggestion = tokensThisLine.skip(tokenIndex).take(6).join(' ');
+    final currencyOf = SettingsWords.currencyOfAlias(settings, word);
+    final sel = _selections[segIndex];
+    final selectedName = _buildSelectedName(
+      _segments[segIndex],
+      sel,
+      segIndex,
+    ).trim();
+    double? wordValue;
+    for (final e in settings.amountWordValues.entries) {
+      if (tt.normalizeText(e.key) == tt.normalizeText(word)) {
+        wordValue = e.value;
+        break;
+      }
+    }
+
+    bool inList(WordListKind k) => SettingsWords.contains(settings, k, word);
+
+    final roles = <String>[
+      if (inList(WordListKind.forbidden)) 'ممنوعة',
+      if (sel.forbiddenPhraseTokens.contains(_TokPos(lineIndex, tokenIndex)))
+        'ضمن جملة ممنوعة',
+      if (currencyOf != null) 'عملة: $currencyOf',
+      if (inList(WordListKind.nameKeyword)) 'كلمة اسم',
+      if (inList(WordListKind.amountKeyword)) 'كلمة مبلغ',
+      if (inList(WordListKind.ignored)) 'مهملة',
+      if (inList(WordListKind.lineIgnored)) 'تجاهل سطر',
+      if (inList(WordListKind.cancelKeyword)) 'كلمة إلغاء',
+      if (wordValue != null) 'قيمة: ${_fmtAmount(wordValue)}',
+    ];
+
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+
+        Widget tile(
+          String key,
+          IconData icon,
+          String title,
+          Color color, {
+          String? subtitle,
+          bool remove = false,
+        }) {
+          return ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            leading: Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: .13),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                remove ? Icons.remove_circle_outline_rounded : icon,
+                color: color,
+                size: 20,
+              ),
+            ),
+            title: Text(
+              title,
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            subtitle: subtitle == null
+                ? null
+                : Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+            onTap: () => Navigator.pop(ctx, key),
+          );
+        }
+
+        String addOrRemove(WordListKind k) =>
+            inList(k) ? 'إزالة من ${k.label}' : 'إضافة إلى ${k.label}';
+
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * .85,
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: cs.primaryContainer,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Text(
+                            word,
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w900,
+                              color: cs.onPrimaryContainer,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: roles.isEmpty
+                              ? Text(
+                                  'كلمة عادية — اختر ما تريد فعله بها',
+                                  style: TextStyle(
+                                    color: cs.onSurfaceVariant,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                )
+                              : Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: roles
+                                      .map(
+                                        (r) => Chip(
+                                          label: Text(r),
+                                          visualDensity: VisualDensity.compact,
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    tile(
+                      'forbidden',
+                      Icons.block_rounded,
+                      addOrRemove(WordListKind.forbidden),
+                      _forbiddenColor,
+                      subtitle: 'لا تدخل في الاسم ويتوقف عندها تحديد الاسم',
+                      remove: inList(WordListKind.forbidden),
+                    ),
+                    tile(
+                      'currency',
+                      Icons.currency_exchange_rounded,
+                      currencyOf != null
+                          ? 'إزالة من اختصارات العملة ($currencyOf)'
+                          : 'إضافة كاختصار عملة',
+                      _currencyColor,
+                      subtitle: currencyOf != null
+                          ? null
+                          : 'اختر العملة التي تدل عليها هذه الكلمة',
+                      remove: currencyOf != null,
+                    ),
+                    tile(
+                      'nameKeyword',
+                      Icons.person_search_rounded,
+                      addOrRemove(WordListKind.nameKeyword),
+                      _nameColor,
+                      subtitle: 'الكلمة التي يأتي بعدها اسم المستفيد',
+                      remove: inList(WordListKind.nameKeyword),
+                    ),
+                    tile(
+                      'phrase',
+                      Icons.gpp_bad_rounded,
+                      'إضافة جملة ممنوعة تبدأ من هذه الكلمة',
+                      _forbiddenColor,
+                      subtitle: '«$phraseSuggestion»',
+                    ),
+                    tile(
+                      'amountKeyword',
+                      Icons.payments_rounded,
+                      addOrRemove(WordListKind.amountKeyword),
+                      _amountColor,
+                      remove: inList(WordListKind.amountKeyword),
+                    ),
+                    tile(
+                      'ignored',
+                      Icons.visibility_off_rounded,
+                      addOrRemove(WordListKind.ignored),
+                      Colors.orange,
+                      subtitle: 'تُتجاهل أثناء التحليل ولا تُختار كاسم',
+                      remove: inList(WordListKind.ignored),
+                    ),
+                    tile(
+                      'lineIgnored',
+                      Icons.playlist_remove_rounded,
+                      addOrRemove(WordListKind.lineIgnored),
+                      Colors.red,
+                      subtitle: 'أي سطر يحتوي هذه الكلمة يُتجاهل بالكامل',
+                      remove: inList(WordListKind.lineIgnored),
+                    ),
+                    tile(
+                      'cancelKeyword',
+                      Icons.cancel_schedule_send_rounded,
+                      addOrRemove(WordListKind.cancelKeyword),
+                      Colors.pink,
+                      subtitle: 'الرسالة التي تحتويها تُعامل كعملية إلغاء',
+                      remove: inList(WordListKind.cancelKeyword),
+                    ),
+                    tile(
+                      'wordValue',
+                      Icons.calculate_rounded,
+                      'تعيين قيمة رقمية لهذه الكلمة',
+                      Colors.indigo,
+                      subtitle: wordValue == null
+                          ? 'مثال: ستمئة = 600'
+                          : 'القيمة الحالية: ${_fmtAmount(wordValue)}',
+                    ),
+                    if (selectedName.isNotEmpty)
+                      tile(
+                        'readyName',
+                        Icons.person_pin_circle_rounded,
+                        'حفظ الاسم المحدد كاسم جاهز',
+                        Colors.blueGrey,
+                        subtitle: selectedName,
+                      ),
+                    tile('copy', Icons.copy_rounded, 'نسخ الكلمة', cs.primary),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (action == null || !mounted) return;
+
+    bool changed = false;
+    String message = '';
+
+    Future<void> toggle(WordListKind kind) async {
+      if (inList(kind)) {
+        changed = await SettingsWords.remove(kind, word);
+        message = 'تمت إزالة «$word» من ${kind.label}';
+      } else {
+        changed = await SettingsWords.add(kind, word);
+        message = changed
+            ? 'تمت إضافة «$word» إلى ${kind.label}'
+            : '«$word» موجودة مسبقًا في ${kind.label}';
+      }
+    }
+
+    switch (action) {
+      case 'forbidden':
+        await toggle(WordListKind.forbidden);
+        break;
+      case 'nameKeyword':
+        await toggle(WordListKind.nameKeyword);
+        break;
+      case 'amountKeyword':
+        await toggle(WordListKind.amountKeyword);
+        break;
+      case 'ignored':
+        await toggle(WordListKind.ignored);
+        break;
+      case 'lineIgnored':
+        await toggle(WordListKind.lineIgnored);
+        break;
+      case 'cancelKeyword':
+        await toggle(WordListKind.cancelKeyword);
+        break;
+      case 'currency':
+        if (currencyOf != null) {
+          changed = await SettingsWords.removeCurrencyAlias(word);
+          message = 'تمت إزالة «$word» من اختصارات $currencyOf';
+        } else {
+          final target = await _pickCurrencyForAlias(word);
+          if (target == null) return;
+          changed = await SettingsWords.addCurrencyAlias(word, target);
+          message = changed
+              ? 'تمت إضافة «$word» كاختصار لعملة $target'
+              : '«$word» معرّفة مسبقًا كعملة';
+        }
+        break;
+      case 'phrase':
+        final phrase = await _editTextDialog(
+          title: 'إضافة جملة ممنوعة',
+          initial: phraseSuggestion,
+          hint: 'اكتب الجملة الممنوعة كما تظهر في الرسائل',
+        );
+        if (phrase == null) return;
+        changed = await SettingsWords.add(WordListKind.forbiddenPhrase, phrase);
+        message = changed
+            ? 'تمت إضافة الجملة الممنوعة «$phrase»'
+            : 'الجملة موجودة مسبقًا';
+        break;
+      case 'wordValue':
+        final value = await _numberDialog(
+          title: 'قيمة الكلمة «$word»',
+          initial: wordValue,
+        );
+        if (value == null) return;
+        changed = await SettingsWords.setAmountWordValue(word, value);
+        message = 'تم تعيين «$word» = ${_fmtAmount(value)}';
+        break;
+      case 'readyName':
+        changed = await SettingsWords.add(WordListKind.readyName, selectedName);
+        message = changed
+            ? 'تم حفظ «$selectedName» في الأسماء الجاهزة'
+            : 'الاسم موجود مسبقًا في الأسماء الجاهزة';
+        break;
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: word));
+        _snack('تم نسخ «$word»');
+        return;
+    }
+
+    if (!mounted) return;
+    if (!changed) {
+      _snack(message.isEmpty ? 'لم يتغير شيء' : message);
+      return;
+    }
+
+    setState(_reloadSettings);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text(message),
+          action: SnackBarAction(
+            label: 'إعادة التحليل',
+            onPressed: () {
+              if (mounted) _reanalyzeUnsaved();
+            },
+          ),
+        ),
+      );
+  }
+
+  Future<String?> _pickCurrencyForAlias(String alias) async {
+    final names = SettingsWords.currencyNames(SettingsWords.load());
+    final newCtrl = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Text('«$alias» اختصار لأي عملة؟'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (names.isNotEmpty)
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: names
+                          .map(
+                            (n) => ActionChip(
+                              avatar: const Icon(
+                                Icons.currency_exchange_rounded,
+                                size: 16,
+                              ),
+                              label: Text(n),
+                              onPressed: () => Navigator.pop(ctx, n),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    'أو أنشئ عملة جديدة:',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: newCtrl,
+                    decoration: const InputDecoration(
+                      hintText: 'اسم العملة المعروض مثل: دينار',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (v) {
+                      if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final v = newCtrl.text.trim();
+                if (v.isNotEmpty) Navigator.pop(ctx, v);
+              },
+              child: const Text('إنشاء واعتماد'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<String?> _editTextDialog({
+    required String title,
+    required String initial,
+    String? hint,
+  }) {
+    final ctrl = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Text(title),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLines: 2,
+            decoration: InputDecoration(
+              hintText: hint,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final v = ctrl.text.trim();
+                Navigator.pop(ctx, v.isEmpty ? null : v);
+              },
+              child: const Text('اعتماد'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// تحويل رقم مكتوب بالأرقام العربية/الفواصل إلى صيغة قابلة للتحليل
+  String _asciiNumber(String input) {
+    final b = StringBuffer();
+    for (final ch in input.trim().characters) {
+      final code = ch.codeUnitAt(0);
+      if (code >= 0x0660 && code <= 0x0669) {
+        b.writeCharCode(0x30 + code - 0x0660);
+      } else if (code >= 0x06F0 && code <= 0x06F9) {
+        b.writeCharCode(0x30 + code - 0x06F0);
+      } else if (ch == '٫' || ch == ',') {
+        b.write('.');
+      } else if (ch != '٬' && ch != ' ') {
+        b.write(ch);
+      }
+    }
+    return b.toString();
+  }
+
+  Future<double?> _numberDialog({required String title, double? initial}) {
+    final ctrl = TextEditingController(
+      text: initial == null ? '' : _fmtAmount(initial),
+    );
+    return showDialog<double>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Text(title),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              hintText: 'مثال: 600',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final v = double.tryParse(_asciiNumber(ctrl.text));
+                Navigator.pop(ctx, v != null && v > 0 ? v : null);
+              },
+              child: const Text('اعتماد'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ====== إدخال يدوي: الاسم ======
   Future<void> _openNameManualDialog(int segIndex, String currentName) async {
     final ctrl = TextEditingController(text: currentName);
@@ -1435,13 +2281,58 @@ class _BubbleScreenState extends State<BubbleScreen> {
         textDirection: TextDirection.rtl,
         child: AlertDialog(
           title: const Text('تحرير الاسم يدويًا'),
-          content: TextField(
-            controller: ctrl,
-            maxLines: 3,
-            decoration: const InputDecoration(
-              hintText: 'اكتب الاسم هنا...',
-              border: OutlineInputBorder(),
-            ),
+          content: StatefulBuilder(
+            builder: (ctx, setD) {
+              final found = _forbiddenInText(ctrl.text);
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: ctrl,
+                    maxLines: 3,
+                    onChanged: (_) => setD(() {}),
+                    decoration: const InputDecoration(
+                      hintText: 'اكتب الاسم هنا...',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  if (found.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: _forbiddenColor.withValues(alpha: .10),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: _forbiddenColor.withValues(alpha: .35),
+                        ),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(
+                            Icons.block_rounded,
+                            color: _forbiddenColor,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'الاسم يحتوي على ممنوع: ${found.map((e) => '«$e»').join('، ')}',
+                              style: const TextStyle(
+                                color: _forbiddenColor,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
           ),
           actions: [
             TextButton(
@@ -1586,55 +2477,71 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   // ====== لون/خلفية التوكن ======
+  /// لون نص مقروء فوق خلفية فاتحة/داكنة
+  Color _readable(BuildContext ctx, Color c) {
+    final dark = Theme.of(ctx).brightness == Brightness.dark;
+    return Color.lerp(c, dark ? Colors.white : Colors.black, dark ? .28 : .22)!;
+  }
+
+  bool _isForbiddenToken(int segIndex, int li, int ti) =>
+      _selections[segIndex].forbiddenTokens.contains(_TokPos(li, ti));
+
   Color _tokenColor(BuildContext ctx, int segIndex, int li, int ti) {
     final sel = _selections[segIndex];
     final cs = Theme.of(ctx).colorScheme;
 
-    if (_isLockedToken(segIndex, li, ti)) return _chipRed;
-    if (sel.nameTokens.contains(_TokPos(li, ti))) return _chipIndigo;
-    if (_isDualAmountCurrencyPos(segIndex, li, ti)) return Colors.white;
-    if (_isAmountPos(segIndex, li, ti)) return _chipTeal;
-    if (_isCurrencyPos(segIndex, li, ti)) return _chipBlue;
-    if (_isPhoneToken(segIndex, li, ti)) return _chipYellow;
+    if (_isLockedToken(segIndex, li, ti)) return _readable(ctx, _chipRed);
+    if (sel.nameTokens.contains(_TokPos(li, ti))) {
+      return _readable(ctx, _nameColor);
+    }
+    if (_isDualAmountCurrencyPos(segIndex, li, ti)) return cs.onSurface;
+    if (_isAmountPos(segIndex, li, ti)) return _readable(ctx, _amountColor);
+    if (_isCurrencyPos(segIndex, li, ti)) {
+      return _readable(ctx, _currencyColor);
+    }
+    if (_isForbiddenToken(segIndex, li, ti)) {
+      return _readable(ctx, _forbiddenColor);
+    }
+    if (_isPhoneToken(segIndex, li, ti)) return _readable(ctx, _chipYellow);
 
-    return cs.onSurface.withOpacity(0.6);
+    return cs.onSurface.withValues(alpha: 0.78);
   }
+
+  BoxDecoration _roleDecoration(Color color, double radius) => BoxDecoration(
+    color: color.withValues(alpha: 0.14),
+    borderRadius: BorderRadius.circular(radius),
+    border: Border.all(color: color.withValues(alpha: .75), width: 1.2),
+  );
 
   Decoration _tokenDecoration(BuildContext ctx, int segIndex, int li, int ti) {
     final pos = _TokPos(li, ti);
+    final radius = _prefs.compact ? 10.0 : 14.0;
 
     if (_isLockedToken(segIndex, li, ti)) {
-      return BoxDecoration(
-        color: _chipRed.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _chipRed.withOpacity(.75), width: 1.2),
-      );
+      return _roleDecoration(_chipRed, radius);
     }
 
     if (_selections[segIndex].nameTokens.contains(pos)) {
-      return BoxDecoration(
-        color: _chipIndigo.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _chipIndigo.withOpacity(.75), width: 1.2),
-      );
+      return _roleDecoration(_nameColor, radius);
     }
 
     if (_isDualAmountCurrencyPos(segIndex, li, ti)) {
+      final mixed = _mixedAmountCurrencyBorder();
       return BoxDecoration(
         gradient: LinearGradient(
           colors: [
-            _chipTeal.withOpacity(.22),
-            _chipTeal.withOpacity(.22),
-            _chipBlue.withOpacity(.22),
-            _chipBlue.withOpacity(.22),
+            _amountColor.withValues(alpha: .22),
+            _amountColor.withValues(alpha: .22),
+            _currencyColor.withValues(alpha: .22),
+            _currencyColor.withValues(alpha: .22),
           ],
           stops: const [0.0, 0.5, 0.5, 1.0],
         ),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _mixedAmountCurrencyBorder(), width: 1.4),
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(color: mixed, width: 1.4),
         boxShadow: [
           BoxShadow(
-            color: _mixedAmountCurrencyBorder().withOpacity(.18),
+            color: mixed.withValues(alpha: .18),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -1643,36 +2550,33 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     if (_isAmountPos(segIndex, li, ti)) {
-      return BoxDecoration(
-        color: _chipTeal.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _chipTeal.withOpacity(.75), width: 1.2),
-      );
+      return _roleDecoration(_amountColor, radius);
     }
 
     if (_isCurrencyPos(segIndex, li, ti)) {
+      return _roleDecoration(_currencyColor, radius);
+    }
+
+    if (_isForbiddenToken(segIndex, li, ti)) {
       return BoxDecoration(
-        color: _chipBlue.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _chipBlue.withOpacity(.75), width: 1.2),
+        color: _forbiddenColor.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(
+          color: _forbiddenColor.withValues(alpha: .55),
+          width: 1.2,
+        ),
       );
     }
 
     if (_isPhoneToken(segIndex, li, ti)) {
-      return BoxDecoration(
-        color: _chipYellow.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _chipYellow.withOpacity(.75), width: 1.2),
-      );
+      return _roleDecoration(_chipYellow, radius);
     }
 
+    final cs = Theme.of(ctx).colorScheme;
     return BoxDecoration(
-      color: Theme.of(ctx).colorScheme.onSurface.withOpacity(0.08),
-      borderRadius: BorderRadius.circular(14),
-      border: Border.all(
-        color: Theme.of(ctx).colorScheme.onSurface.withOpacity(0.14),
-        width: 1,
-      ),
+      color: cs.onSurface.withValues(alpha: 0.06),
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: cs.onSurface.withValues(alpha: 0.14), width: 1),
     );
   }
 
@@ -1786,7 +2690,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   bool _hasCancelSegments() {
-    for (int i = 0; i < _segments.length; i++) {
+    for (int i = 0; i < _selections.length; i++) {
       if (_modeOf(i) == BubbleActionMode.cancel &&
           !_cancelledSummaries.containsKey(i)) {
         return true;
@@ -1796,7 +2700,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   bool _hasPendingAddSegments() {
-    for (int i = 0; i < _segments.length; i++) {
+    for (int i = 0; i < _selections.length; i++) {
       if (_modeOf(i) == BubbleActionMode.add &&
           !_savedSegments.contains(i) &&
           _segmentReady(_selections[i], i)) {
@@ -2027,7 +2931,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   Color _mixedAmountCurrencyBorder() {
-    return Color.lerp(_chipTeal, _chipBlue, 0.5) ?? _chipBlue;
+    return Color.lerp(_amountColor, _currencyColor, 0.5) ?? _currencyColor;
   }
 
   Widget _buildTokenChip({
@@ -2045,6 +2949,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
         sel.amount == pos ||
         sel.currencyToken == pos;
     final isLocked = _isLockedToken(segIndex, lineIndex, tokenIndex);
+    final isForbidden = sel.forbiddenTokens.contains(pos);
 
     final color = _tokenColor(context, segIndex, lineIndex, tokenIndex);
     final decoration = _tokenDecoration(
@@ -2055,6 +2960,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
     );
 
     final canTap = !isLocked || sel.stage == SelectionStage.amount;
+    final compact = _prefs.compact;
+    final fontSize = _prefs.tokenFontSize;
+    final iconSize = (fontSize + 1).clamp(12.0, 20.0);
+
+    void openActions() => _showWordActions(
+      segIndex,
+      lineIndex,
+      tokenIndex,
+      token,
+      tokensThisLine,
+    );
 
     return AnimatedScale(
       scale: selected ? 1.03 : 1.0,
@@ -2068,39 +2984,51 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 tokensThisLine,
               )
             : null,
-        borderRadius: BorderRadius.circular(16),
+        onLongPress: openActions,
+        onSecondaryTap: openActions,
+        borderRadius: BorderRadius.circular(compact ? 10 : 16),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          padding: compact
+              ? const EdgeInsets.symmetric(horizontal: 7, vertical: 4)
+              : const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: decoration,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (isForbidden && !selected) ...[
+                Icon(Icons.block_rounded, size: iconSize - 2, color: color),
+                const SizedBox(width: 4),
+              ],
               Text(
                 token,
                 style: TextStyle(
                   color: color,
-                  fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+                  fontSize: fontSize,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
                   decoration: isLocked
                       ? TextDecoration.underline
-                      : TextDecoration.none,
+                      : (isForbidden && !selected
+                            ? TextDecoration.lineThrough
+                            : TextDecoration.none),
+                  decorationColor: color,
                 ),
               ),
               if (selected) ...[
                 const SizedBox(width: 6),
                 GestureDetector(
                   onTap: () => _unselectToken(segIndex, pos),
-                  child: Icon(Icons.close, size: 16, color: color),
+                  child: Icon(Icons.close, size: iconSize, color: color),
                 ),
               ],
               if (!selected &&
                   _isPhoneToken(segIndex, lineIndex, tokenIndex)) ...[
                 const SizedBox(width: 6),
-                const Icon(Icons.phone_android, size: 14, color: Colors.amber),
+                Icon(Icons.phone_android, size: iconSize - 2, color: color),
               ],
               if (!selected && isLocked) ...[
                 const SizedBox(width: 6),
-                Icon(Icons.touch_app, size: 14, color: color),
+                Icon(Icons.touch_app, size: iconSize - 2, color: color),
               ],
             ],
           ),
@@ -2108,12 +3036,6 @@ class _BubbleScreenState extends State<BubbleScreen> {
       ),
     );
   }
-
-  String _normalizeNameForCompare(String s) =>
-      _normalizeArabic(s).replaceAll(RegExp(r'\s+'), ' ').trim();
-
-  bool _eqName(String a, String b) =>
-      _normalizeNameForCompare(a) == _normalizeNameForCompare(b);
 
   bool _sameAmount(double a, double b) => (a - b).abs() < 0.0001;
 
@@ -2448,6 +3370,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _cancelShowMore
       ..clear()
       ..addAll(newCancelShowMore);
+
+    final newMovementOverrides = <int, CompanyMovementType>{};
+    for (final e in _companyMovementOverrides.entries) {
+      if (e.key == deletedIndex) continue;
+      newMovementOverrides[e.key > deletedIndex ? e.key - 1 : e.key] = e.value;
+    }
+    _companyMovementOverrides
+      ..clear()
+      ..addAll(newMovementOverrides);
   }
 
   Future<void> _confirmDeleteSegment(int segIndex) async {
@@ -2500,7 +3431,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   List<_PendingTxDraft> _collectReadyDrafts() {
     final drafts = <_PendingTxDraft>[];
 
-    for (int i = 0; i < _segments.length; i++) {
+    for (int i = 0; i < _selections.length; i++) {
       if (_modeOf(i) != BubbleActionMode.add) continue;
       if (_savedSegments.contains(i)) continue;
       final seg = _segments[i];
@@ -2534,7 +3465,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   List<_PendingCancelDraft> _collectReadyCancelDrafts() {
     final drafts = <_PendingCancelDraft>[];
 
-    for (int i = 0; i < _segments.length; i++) {
+    for (int i = 0; i < _selections.length; i++) {
       if (_modeOf(i) != BubbleActionMode.cancel) continue;
       if (_cancelledSummaries.containsKey(i)) continue;
       final selectedId = _cancelSelectedTxIds[i];
@@ -2558,119 +3489,242 @@ class _BubbleScreenState extends State<BubbleScreen> {
     return drafts;
   }
 
-  Future<bool> _confirmDuplicateWarnings(List<_PendingTxDraft> drafts) async {
-    final all = await DatabaseService.getAllTransactions();
+  /// تسمية حالة أي حركة (مكتب أو شركة) بغض النظر عن نوع الحساب الحالي
+  String _anyTxLabel(TransactionModel tx) =>
+      tx.companyMovementType?.label ?? _txStatusLabel(tx.status);
+
+  /// فحص التكرار على دفعات مع شريط تقدم:
+  /// - مطابقة تامة (الاسم + المبلغ + العملة + نفس الدقيقة): في كل الحسابات
+  ///   وكل الأوقات وكل الحالات (حتى الملغية والمستلمة).
+  /// - الاسم + المبلغ + العملة: خلال المدة المحددة في الإعدادات، بكل الحالات.
+  /// - الاسم فقط: آخر يومين.
+  /// - التكرار داخل النص نفسه.
+  Future<List<_DuplicateWarningItem>> _scanDuplicates(
+    List<_PendingTxDraft> drafts,
+  ) async {
+    final all = DatabaseService.transactionsBox.values.toList();
     final accountsById = <int, Account>{
       for (final account in DatabaseService.accountsBox.values)
         account.id: account,
     };
-    final warnings = <_DuplicateWarningItem>[];
     final now = DateTime.now();
-    final since = now.subtract(const Duration(days: 2));
+    final strongDays = _prefs.duplicateDays;
+    const weakDays = 2;
 
-    for (final d in drafts) {
-      final exactCritical = <TransactionModel>[];
-      final sameNameAmountCurrency = <TransactionModel>[];
-      final sameNameOnly = <TransactionModel>[];
+    final items = [
+      for (final d in drafts)
+        _DuplicateWarningItem(
+          draft: d,
+          exactCritical: [],
+          sameNameAmountCurrency: [],
+          sameNameOnly: [],
+          batchDuplicates: [],
+        ),
+    ];
 
-      for (final t in all) {
-        final candidateAccount = accountsById[t.accountId];
-        if (candidateAccount == null ||
-            candidateAccount.type != widget.account.type ||
-            t.date.isBefore(since)) {
-          continue;
+    final byName = <String, List<int>>{};
+    for (int i = 0; i < drafts.length; i++) {
+      final key = _normalizeForSearch(drafts[i].beneficiary);
+      if (key.isEmpty) continue;
+      (byName[key] ??= []).add(i);
+    }
+
+    bool withinDays(DateTime a, DateTime b, int days) =>
+        a.difference(b).inMinutes.abs() <= days * 24 * 60;
+
+    await runTimeSliced(
+      total: all.length,
+      isCancelled: () => !mounted,
+      onProgress: (done, total) => _setProgress(
+        OperationProgress(
+          label: 'جارٍ فحص التكرار...',
+          done: done,
+          total: total,
+        ),
+      ),
+      work: (ti) {
+        final t = all[ti];
+        final idxs = byName[_txNormName(t)];
+        if (idxs == null) return;
+        final account = accountsById[t.accountId];
+
+        for (final di in idxs) {
+          final d = drafts[di];
+          final sameAmount = _sameAmount(t.amount, d.amount);
+          final sameCurrency = _eqCur(t.currency, d.currency);
+
+          // مطابقة تامة: أي حساب، أي وقت، أي حالة
+          if (sameAmount && sameCurrency && _sameExactMinute(t.date, d.date)) {
+            items[di].exactCritical.add(t);
+            continue;
+          }
+
+          if (account == null || account.type != widget.account.type) {
+            continue;
+          }
+          // في حسابات الشركة نقارن نفس الاتجاه (مرسلة/مستقبلة) حتى لو كانت ملغية
+          if (_isCompanyAccount &&
+              (t.companyMovementType?.isSent ?? false) !=
+                  (d.companyMovementType?.isSent ?? false)) {
+            continue;
+          }
+
+          if (sameAmount && sameCurrency) {
+            if (withinDays(t.date, d.date, strongDays) ||
+                withinDays(t.date, now, strongDays)) {
+              items[di].sameNameAmountCurrency.add(t);
+            }
+            continue;
+          }
+
+          if (withinDays(t.date, d.date, weakDays) ||
+              withinDays(t.date, now, weakDays)) {
+            items[di].sameNameOnly.add(t);
+          }
         }
+      },
+    );
 
-        if (_isCompanyAccount &&
-            t.companyMovementType != d.companyMovementType) {
-          continue;
+    // التكرار داخل النص نفسه
+    for (final group in byName.values) {
+      if (group.length < 2) continue;
+      for (final a in group) {
+        for (final b in group) {
+          if (a == b) continue;
+          final da = drafts[a];
+          final db = drafts[b];
+          if (_sameAmount(da.amount, db.amount) &&
+              _eqCur(da.currency, db.currency) &&
+              (da.companyMovementType?.isSent ?? false) ==
+                  (db.companyMovementType?.isSent ?? false)) {
+            items[a].batchDuplicates.add(db);
+          }
         }
-
-        final sameName = _eqName(t.beneficiary, d.beneficiary);
-        if (!sameName) continue;
-
-        final sameAmount = _sameAmount(t.amount, d.amount);
-        final sameCurrency = _eqCur(t.currency, d.currency);
-        final sameMoment = _sameExactMinute(t.date, d.date);
-
-        if (sameAmount && sameCurrency && sameMoment) {
-          exactCritical.add(t);
-          continue;
-        }
-
-        if (sameAmount && sameCurrency) {
-          sameNameAmountCurrency.add(t);
-          continue;
-        }
-
-        sameNameOnly.add(t);
-      }
-
-      if (exactCritical.isNotEmpty ||
-          sameNameAmountCurrency.isNotEmpty ||
-          sameNameOnly.isNotEmpty) {
-        warnings.add(
-          _DuplicateWarningItem(
-            draft: d,
-            exactCritical: exactCritical,
-            sameNameAmountCurrency: sameNameAmountCurrency,
-            sameNameOnly: sameNameOnly,
-          ),
-        );
       }
     }
 
+    return items.where((w) => w.hasAny).toList();
+  }
+
+  /// نافذة تأكيد إضافية عند الضغط على «متابعة رغم التحذير»
+  Future<bool> _confirmContinueDespiteWarning(
+    BuildContext ctx,
+    List<_DuplicateWarningItem> warnings,
+  ) async {
+    final exact = warnings.fold<int>(
+      0,
+      (sum, w) =>
+          sum +
+          w.exactCritical.length +
+          w.batchDuplicates
+              .where((d) => _sameExactMinute(d.date, w.draft.date))
+              .length,
+    );
+    final strong = warnings.fold<int>(
+      0,
+      (sum, w) => sum + w.sameNameAmountCurrency.length,
+    );
+    return await showDialog<bool>(
+          context: ctx,
+          builder: (c) => Directionality(
+            textDirection: TextDirection.rtl,
+            child: AlertDialog(
+              icon: const Icon(
+                Icons.warning_amber_rounded,
+                color: Colors.red,
+                size: 36,
+              ),
+              title: const Text('تأكيد الحفظ رغم التحذير'),
+              content: Text(
+                [
+                  'أنت على وشك حفظ ${warnings.length} حركة عليها تحذير تكرار.',
+                  if (exact > 0) '• مطابقات تامة: $exact',
+                  if (strong > 0) '• نفس الاسم والمبلغ والعملة: $strong',
+                  '',
+                  'هل أنت متأكد أنك تريد المتابعة؟',
+                ].join('\n'),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c, false),
+                  child: const Text('رجوع للمراجعة'),
+                ),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                  onPressed: () => Navigator.pop(c, true),
+                  icon: const Icon(Icons.check_rounded),
+                  label: const Text('نعم، احفظ'),
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+  }
+
+  Future<bool> _confirmDuplicateWarnings(List<_PendingTxDraft> drafts) async {
+    final warnings = await _scanDuplicates(drafts);
+    _setProgress(null);
+    if (!mounted) return false;
     if (warnings.isEmpty) return true;
 
-    final hasCritical = warnings.any((w) => w.exactCritical.isNotEmpty);
+    final accountsById = <int, Account>{
+      for (final account in DatabaseService.accountsBox.values)
+        account.id: account,
+    };
+
+    final hasCritical = warnings.any(
+      (w) =>
+          w.exactCritical.isNotEmpty ||
+          w.batchDuplicates.any((d) => _sameExactMinute(d.date, w.draft.date)),
+    );
+    final hasStrong = warnings.any(
+      (w) =>
+          w.sameNameAmountCurrency.isNotEmpty || w.batchDuplicates.isNotEmpty,
+    );
+    final needsConfirm = hasCritical || hasStrong;
     final scopeLabel = _isCompanyAccount
-        ? 'حسابات الشركة وبنفس نوع الحركة'
-        : 'حسابات المكتب';
+        ? 'حسابات الشركة وبنفس اتجاه الحركة (يشمل الملغية)'
+        : 'حسابات المكتب (يشمل المستلمة والملغية)';
 
     return await showDialog<bool>(
           context: context,
           barrierDismissible: !hasCritical,
           builder: (ctx) {
             Color movementColor(TransactionModel tx) {
-              if (_isCompanyAccount) {
-                switch (tx.companyMovementType) {
-                  case CompanyMovementType.sent:
-                    return _chipIndigo;
-                  case CompanyMovementType.received:
-                    return _chipGreen;
-                  case CompanyMovementType.sentCancelled:
-                    return _chipRed;
-                  case CompanyMovementType.receivedCancelled:
-                    return _chipYellow;
-                  case null:
-                    return Colors.grey;
-                }
+              switch (tx.companyMovementType) {
+                case CompanyMovementType.sent:
+                  return _chipIndigo;
+                case CompanyMovementType.received:
+                  return _chipGreen;
+                case CompanyMovementType.sentCancelled:
+                  return _chipRed;
+                case CompanyMovementType.receivedCancelled:
+                  return _chipYellow;
+                case null:
+                  return _txStatusColor(tx.status);
               }
-              return _txStatusColor(tx.status);
             }
 
             IconData movementIcon(TransactionModel tx) {
-              if (_isCompanyAccount) {
-                switch (tx.companyMovementType) {
-                  case CompanyMovementType.sent:
-                    return Icons.outbox_rounded;
-                  case CompanyMovementType.received:
-                    return Icons.move_to_inbox_rounded;
-                  case CompanyMovementType.sentCancelled:
-                    return Icons.undo_rounded;
-                  case CompanyMovementType.receivedCancelled:
-                    return Icons.assignment_return_rounded;
-                  case null:
-                    return Icons.help_outline_rounded;
-                }
-              }
-              switch (tx.status) {
-                case TransactionStatus.added:
-                  return Icons.add_circle_outline_rounded;
-                case TransactionStatus.received:
-                  return Icons.check_circle_outline_rounded;
-                case TransactionStatus.cancelled:
-                  return Icons.cancel_outlined;
+              switch (tx.companyMovementType) {
+                case CompanyMovementType.sent:
+                  return Icons.outbox_rounded;
+                case CompanyMovementType.received:
+                  return Icons.move_to_inbox_rounded;
+                case CompanyMovementType.sentCancelled:
+                  return Icons.undo_rounded;
+                case CompanyMovementType.receivedCancelled:
+                  return Icons.assignment_return_rounded;
+                case null:
+                  switch (tx.status) {
+                    case TransactionStatus.added:
+                      return Icons.add_circle_outline_rounded;
+                    case TransactionStatus.received:
+                      return Icons.check_circle_outline_rounded;
+                    case TransactionStatus.cancelled:
+                      return Icons.cancel_outlined;
+                  }
               }
             }
 
@@ -2683,9 +3737,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 margin: const EdgeInsets.only(bottom: 8),
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(.07),
+                  color: color.withValues(alpha: .07),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: color.withOpacity(.24)),
+                  border: Border.all(color: color.withValues(alpha: .24)),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2693,7 +3747,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: color.withOpacity(.14),
+                        color: color.withValues(alpha: .14),
                         borderRadius: BorderRadius.circular(11),
                       ),
                       child: Icon(movementIcon(tx), color: color, size: 20),
@@ -2712,7 +3766,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            tx.amount.toStringAsFixed(2) + ' ' + tx.currency,
+                            '${tx.amount.toStringAsFixed(2)} ${tx.currency}',
                             style: TextStyle(
                               color: color,
                               fontWeight: FontWeight.w800,
@@ -2730,14 +3784,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
                               ),
                               _duplicateInfoChip(
                                 icon: movementIcon(tx),
-                                label: _movementLabel(tx),
+                                label: _anyTxLabel(tx),
                                 color: color,
                               ),
                             ],
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            'تاريخ الحركة: ' + _fmtDateTime(tx.date),
+                            'تاريخ الحركة: ${_fmtDateTime(tx.date)}',
                             style: TextStyle(
                               color: Theme.of(ctx).colorScheme.onSurfaceVariant,
                               fontSize: 12,
@@ -2751,20 +3805,20 @@ class _BubbleScreenState extends State<BubbleScreen> {
               );
             }
 
-            Widget buildSection(
-              String title,
-              Color color,
-              List<TransactionModel> items,
-            ) {
-              if (items.isEmpty) return const SizedBox.shrink();
-
+            Widget sectionShell({
+              required String title,
+              required Color color,
+              required int count,
+              String? note,
+              required List<Widget> children,
+            }) {
               return Container(
                 margin: const EdgeInsets.only(top: 10),
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(.06),
+                  color: color.withValues(alpha: .06),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: color.withOpacity(.28)),
+                  border: Border.all(color: color.withValues(alpha: .28)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2783,7 +3837,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                           ),
                         ),
                         Text(
-                          items.length.toString(),
+                          '$count',
                           style: TextStyle(
                             color: color,
                             fontWeight: FontWeight.w900,
@@ -2791,18 +3845,98 @@ class _BubbleScreenState extends State<BubbleScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 9),
-                    ...items.take(4).map(buildResultCard),
-                    if (items.length > 4)
+                    if (note != null) ...[
+                      const SizedBox(height: 4),
                       Text(
-                        'و ' + (items.length - 4).toString() + ' نتائج أخرى',
+                        note,
                         style: TextStyle(
                           color: color,
+                          fontSize: 12,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
+                    ],
+                    const SizedBox(height: 9),
+                    ...children,
                   ],
                 ),
+              );
+            }
+
+            String? statusNote(List<TransactionModel> items) {
+              final cancelled = items
+                  .where(
+                    (t) =>
+                        t.status == TransactionStatus.cancelled ||
+                        (t.companyMovementType?.isCancelled ?? false),
+                  )
+                  .length;
+              final received = items
+                  .where((t) => t.status == TransactionStatus.received)
+                  .length;
+              if (cancelled == 0 && received == 0) return null;
+              return [
+                if (received > 0) 'منها $received مستلمة',
+                if (cancelled > 0) '$cancelled ملغية',
+              ].join(' و ');
+            }
+
+            Widget buildSection(
+              String title,
+              Color color,
+              List<TransactionModel> items,
+            ) {
+              if (items.isEmpty) return const SizedBox.shrink();
+              return sectionShell(
+                title: title,
+                color: color,
+                count: items.length,
+                note: statusNote(items),
+                children: [
+                  ...items.take(4).map(buildResultCard),
+                  if (items.length > 4)
+                    Text(
+                      'و ${items.length - 4} نتائج أخرى',
+                      style: TextStyle(
+                        color: color,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                ],
+              );
+            }
+
+            Widget buildBatchSection(_DuplicateWarningItem w) {
+              if (w.batchDuplicates.isEmpty) return const SizedBox.shrink();
+              const color = Colors.deepPurple;
+              return sectionShell(
+                title: 'مكرر داخل النص نفسه',
+                color: color,
+                count: w.batchDuplicates.length,
+                children: w.batchDuplicates.take(4).map((d) {
+                  final exact = _sameExactMinute(d.date, w.draft.date);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      children: [
+                        Icon(
+                          exact
+                              ? Icons.content_copy_rounded
+                              : Icons.compare_arrows_rounded,
+                          size: 18,
+                          color: color,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            '${d.beneficiary} | ${_fmtAmount(d.amount)} ${d.currency} — ${_fmtDateTime(d.date)}${exact ? ' (نفس الدقيقة)' : ''}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
               );
             }
 
@@ -2822,7 +3956,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                       children: [
                         Text(
                           hasCritical
-                              ? 'وجدت حركات قد تكون مكررة بشكل خطير. راجعها جيدًا قبل المتابعة.'
+                              ? 'وجدت حركات مكررة بشكل مطابق تمامًا (حتى لو كانت ملغية أو مستلمة). راجعها جيدًا قبل المتابعة.'
                               : 'وجدت تشابهات محتملة. راجعها قبل المتابعة.',
                         ),
                         const SizedBox(height: 10),
@@ -2841,9 +3975,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  'نطاق البحث: آخر يومين ضمن ' + scopeLabel,
-                                  style: const TextStyle(
+                                  'المطابقة التامة: كل الحسابات وكل الأوقات • '
+                                  'الاسم+المبلغ+العملة: آخر ${_prefs.duplicateDays} يومًا • '
+                                  'الاسم فقط: آخر يومين — ضمن $scopeLabel',
+                                  style: TextStyle(
                                     fontWeight: FontWeight.w800,
+                                    color: Theme.of(
+                                      ctx,
+                                    ).colorScheme.onPrimaryContainer,
                                   ),
                                 ),
                               ),
@@ -2853,9 +3992,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                         const SizedBox(height: 10),
                         ...warnings.map((w) {
                           final movementText = _isCompanyAccount
-                              ? ' — ' +
-                                    (w.draft.companyMovementType?.label ??
-                                        'حركة شركة')
+                              ? ' — ${w.draft.companyMovementType?.label ?? 'حركة شركة'}'
                               : '';
                           return Container(
                             margin: const EdgeInsets.only(bottom: 12),
@@ -2866,35 +4003,29 @@ class _BubbleScreenState extends State<BubbleScreen> {
                               ).colorScheme.surfaceContainerHigh,
                               borderRadius: BorderRadius.circular(18),
                               border: Border.all(
-                                color: Theme.of(
-                                  ctx,
-                                ).colorScheme.outlineVariant.withOpacity(.38),
+                                color: Theme.of(ctx).colorScheme.outlineVariant
+                                    .withValues(alpha: .38),
                               ),
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  w.draft.beneficiary +
-                                      ' | ' +
-                                      w.draft.amount.toStringAsFixed(2) +
-                                      ' ' +
-                                      w.draft.currency +
-                                      movementText,
+                                  '${w.draft.beneficiary} | ${w.draft.amount.toStringAsFixed(2)} ${w.draft.currency}$movementText',
                                   style: const TextStyle(
                                     fontWeight: FontWeight.w900,
                                   ),
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  'التاريخ/الوقت: ' +
-                                      _fmtDateTime(w.draft.date),
+                                  'التاريخ/الوقت: ${_fmtDateTime(w.draft.date)}',
                                 ),
                                 buildSection(
                                   'مطابقة تامة',
                                   Colors.red,
                                   w.exactCritical,
                                 ),
+                                buildBatchSection(w),
                                 buildSection(
                                   'الاسم + المبلغ + العملة',
                                   Colors.orange,
@@ -2919,8 +4050,24 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     child: const Text('إلغاء'),
                   ),
                   ElevatedButton(
-                    onPressed: () => Navigator.pop(ctx, true),
-                    child: Text(hasCritical ? 'متابعة رغم التحذير' : 'متابعة'),
+                    style: needsConfirm
+                        ? ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                          )
+                        : null,
+                    onPressed: () async {
+                      if (!needsConfirm) {
+                        Navigator.pop(ctx, true);
+                        return;
+                      }
+                      final ok = await _confirmContinueDespiteWarning(
+                        ctx,
+                        warnings,
+                      );
+                      if (ok && ctx.mounted) Navigator.pop(ctx, true);
+                    },
+                    child: Text(needsConfirm ? 'متابعة رغم التحذير' : 'متابعة'),
                   ),
                 ],
               ),
@@ -3074,8 +4221,95 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   // ====== حفظ وإنشاء الحركات ======
+  /// تأكيد قبل حفظ رسائل تحتوي على جمل ممنوعة
+  Future<bool> _confirmForbiddenPhrases(List<_PendingTxDraft> drafts) async {
+    if (!_prefs.confirmForbiddenPhrase) return true;
+    final flagged = <({_PendingTxDraft draft, List<String> phrases})>[];
+    for (final d in drafts) {
+      final phrases = _selections[d.segIndex].forbiddenPhrases;
+      if (phrases.isNotEmpty) flagged.add((draft: d, phrases: phrases));
+    }
+    if (flagged.isEmpty) return true;
+
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) => Directionality(
+            textDirection: TextDirection.rtl,
+            child: AlertDialog(
+              icon: const Icon(
+                Icons.gpp_maybe_rounded,
+                color: _forbiddenColor,
+                size: 36,
+              ),
+              title: const Text('رسائل تحتوي على جمل ممنوعة'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${flagged.length} رسالة من الرسائل الجاهزة للحفظ تحتوي على جملة ممنوعة:',
+                      ),
+                      const SizedBox(height: 10),
+                      ...flagged.map(
+                        (f) => Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: _forbiddenColor.withValues(alpha: .08),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: _forbiddenColor.withValues(alpha: .30),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${f.draft.beneficiary} — ${_fmtAmount(f.draft.amount)} ${f.draft.currency}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                f.phrases.map((e) => '«$e»').join('، '),
+                                style: const TextStyle(
+                                  color: _forbiddenColor,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('رجوع'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _forbiddenColor,
+                  ),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('حفظ رغم ذلك'),
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+  }
+
   Future<void> _sendForMode(BubbleActionMode mode) async {
-    if (_isSending) return;
+    if (_busy) return;
 
     final drafts = mode == BubbleActionMode.add
         ? _collectReadyDrafts()
@@ -3085,14 +4319,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
         : const <_PendingCancelDraft>[];
 
     if (drafts.isEmpty && cancelDrafts.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            mode == BubbleActionMode.add
-                ? 'لا توجد إضافات مكتملة للتنفيذ'
-                : 'لا توجد إلغاءات مختارة للتنفيذ',
-          ),
-        ),
+      _snack(
+        mode == BubbleActionMode.add
+            ? 'لا توجد إضافات مكتملة للتنفيذ'
+            : 'لا توجد إلغاءات مختارة للتنفيذ',
       );
       return;
     }
@@ -3106,8 +4336,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     if (drafts.isNotEmpty) {
-      final proceed = await _confirmDuplicateWarnings(drafts);
-      if (!proceed) return;
+      if (!await _confirmForbiddenPhrases(drafts)) return;
+      if (!mounted) return;
+      setState(() => _isSending = true);
+      bool proceed = false;
+      try {
+        proceed = await _confirmDuplicateWarnings(drafts);
+      } finally {
+        _setProgress(null);
+        if (mounted) setState(() => _isSending = false);
+      }
+      if (!proceed || !mounted) return;
     }
 
     setState(() => _isSending = true);
@@ -3115,11 +4354,35 @@ class _BubbleScreenState extends State<BubbleScreen> {
     int saved = 0;
     int cancelled = 0;
     final multiAmountSaved = <int>[];
+    final addRecords = <OperationTxRecord>[];
+    final cancelRecords = <OperationTxRecord>[];
+    final addedSegments = <int>[];
+    final cancelledSegments = <int>[];
+    final total = drafts.length + cancelDrafts.length;
+    var done = 0;
+
+    void tick(String label) {
+      done++;
+      _setProgress(OperationProgress(label: label, done: done, total: total));
+    }
+
+    _setProgress(
+      OperationProgress(
+        label: mode == BubbleActionMode.add
+            ? 'جارٍ حفظ الحركات...'
+            : 'جارٍ تنفيذ الإلغاء...',
+        done: 0,
+        total: total,
+      ),
+    );
 
     try {
+      final existingIds = DatabaseService.transactionsBox.values
+          .map((t) => t.id)
+          .toSet();
       for (final d in drafts) {
         final tx = TransactionModel(
-          id: DateTime.now().millisecondsSinceEpoch + d.segIndex,
+          id: DatabaseService.newTransactionId(existingIds: existingIds),
           accountId: widget.account.id,
           beneficiary: d.beneficiary,
           amount: d.amount,
@@ -3134,8 +4397,16 @@ class _BubbleScreenState extends State<BubbleScreen> {
         _allTransactions.add(tx);
         if (!_knownBeneficiaryNames.contains(tx.beneficiary)) {
           _knownBeneficiaryNames.add(tx.beneficiary);
+          _nameConfig.addKnownName(tx.beneficiary);
         }
         saved++;
+        addedSegments.add(d.segIndex);
+        addRecords.add(
+          OperationTxRecord(
+            txId: tx.id,
+            after: OperationLogService.snapshot(tx),
+          ),
+        );
 
         _savedSegments.add(d.segIndex);
         _savedAddSummaries[d.segIndex] = _SavedAddSummary(
@@ -3149,10 +4420,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (_hasMultipleAmountCandidates(d.segIndex)) {
           multiAmountSaved.add(d.segIndex);
         }
+        tick('جارٍ حفظ الحركات...');
+        if (done % 20 == 0) await yieldToUi();
       }
 
       if (saved > 0) {
-        for (var i = 0; i < _segments.length; i++) {
+        for (var i = 0; i < _selections.length; i++) {
           if (_modeOf(i) == BubbleActionMode.cancel) {
             _invalidateCancelCandidates(i);
           }
@@ -3160,6 +4433,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
 
       for (final d in cancelDrafts) {
+        final before = OperationLogService.snapshot(d.transaction);
         if (_isCompanyAccount) {
           d.transaction.companyMovementType =
               d.transaction.companyMovementType!.cancelled;
@@ -3168,6 +4442,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
           d.transaction.applyStatus(TransactionStatus.cancelled, at: d.date);
         }
         await d.transaction.save();
+        cancelRecords.add(
+          OperationTxRecord(
+            txId: d.transaction.id,
+            before: before,
+            after: OperationLogService.snapshot(d.transaction),
+          ),
+        );
+        cancelledSegments.add(d.segIndex);
         _cancelSelectedTxIds.remove(d.segIndex);
         _cancelledSummaries[d.segIndex] = _CancelledSummary(
           name: d.transaction.beneficiary,
@@ -3176,33 +4458,73 @@ class _BubbleScreenState extends State<BubbleScreen> {
           date: d.date,
         );
         cancelled++;
+        tick('جارٍ تنفيذ الإلغاء...');
+        if (done % 20 == 0) await yieldToUi();
       }
     } finally {
+      _setProgress(null);
       if (mounted) {
         setState(() => _isSending = false);
       }
     }
 
+    // تسجيل العمليات في السجل (للتراجع لاحقًا)
+    OperationLogEntry? entry;
+    if (addRecords.isNotEmpty) {
+      entry = await OperationLogService.log(
+        kind: OperationKind.bubbleAdd,
+        title: 'إضافة ${addRecords.length} حركة إلى «${widget.account.name}»',
+        subtitle: widget.account.type.label,
+        records: addRecords,
+      );
+    }
+    if (cancelRecords.isNotEmpty) {
+      entry = await OperationLogService.log(
+        kind: OperationKind.bubbleCancel,
+        title: 'إلغاء ${cancelRecords.length} حركة من «${widget.account.name}»',
+        subtitle: widget.account.type.label,
+        records: cancelRecords,
+      );
+    }
+
     if (!mounted) return;
 
     if (saved > 0) {
-      for (var i = 0; i < _segments.length; i++) {
+      for (var i = 0; i < _selections.length; i++) {
         if (_modeOf(i) == BubbleActionMode.cancel) {
           _requestCancelCandidates(i);
         }
       }
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          [
-            if (saved > 0) "تمت إضافة $saved حركة",
-            if (cancelled > 0) "تم إلغاء $cancelled حركة",
-          ].join('، '),
+    final messenger = ScaffoldMessenger.of(context);
+    final loggedEntry = entry;
+    final segmentsForUndo = mode == BubbleActionMode.add
+        ? addedSegments
+        : cancelledSegments;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text(
+            [
+              if (saved > 0) "تمت إضافة $saved حركة",
+              if (cancelled > 0) "تم إلغاء $cancelled حركة",
+            ].join('، '),
+          ),
+          action: loggedEntry == null
+              ? null
+              : SnackBarAction(
+                  label: 'تراجع',
+                  onPressed: () => _undoFromSnackBar(
+                    loggedEntry,
+                    segmentsForUndo,
+                    messenger,
+                  ),
+                ),
         ),
-      ),
-    );
+      );
 
     if (multiAmountSaved.isNotEmpty) {
       await _showPostSaveMultiAmountDialog(multiAmountSaved);
@@ -3222,6 +4544,65 @@ class _BubbleScreenState extends State<BubbleScreen> {
     if (!_hasCancelSegments() && !_hasPendingAddSegments()) {
       Navigator.pop(context, true);
     }
+  }
+
+  /// تراجع سريع من رسالة النجاح (يعمل حتى لو أُغلقت الشاشة)
+  Future<void> _undoFromSnackBar(
+    OperationLogEntry entry,
+    List<int> segIndexes,
+    ScaffoldMessengerState messenger,
+  ) async {
+    final affected = await OperationLogService.undo(entry);
+    if (mounted) {
+      final deletedIds = entry.kind.createsTransactions ? entry.txIds : <int>{};
+      setState(() {
+        for (final i in segIndexes) {
+          _savedSegments.remove(i);
+          _savedAddSummaries.remove(i);
+          _cancelledSummaries.remove(i);
+          if (i < _selections.length) _refreshStageForSegment(i);
+        }
+        _allTransactions.removeWhere((t) => deletedIds.contains(t.id));
+        for (var i = 0; i < _selections.length; i++) {
+          if (_modeOf(i) == BubbleActionMode.cancel) {
+            _invalidateCancelCandidates(i);
+          }
+        }
+      });
+      for (var i = 0; i < _selections.length; i++) {
+        if (_modeOf(i) == BubbleActionMode.cancel) _requestCancelCandidates(i);
+      }
+    }
+    messenger.showSnackBar(
+      SnackBar(content: Text('تم التراجع عن العملية ($affected حركة)')),
+    );
+  }
+
+  Future<void> _openOperationsLog() async {
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const OperationsLogScreen()));
+    if (!mounted) return;
+    // قد يكون المستخدم تراجع عن عمليات: نحدّث نسخة الحركات
+    setState(() {
+      _allTransactions = DatabaseService.transactionsBox.values.toList();
+      for (var i = 0; i < _selections.length; i++) {
+        if (_modeOf(i) == BubbleActionMode.cancel) {
+          _invalidateCancelCandidates(i);
+        }
+      }
+    });
+    for (var i = 0; i < _selections.length; i++) {
+      if (_modeOf(i) == BubbleActionMode.cancel) _requestCancelCandidates(i);
+    }
+  }
+
+  Future<void> _openBubbleSettings() async {
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
+    if (!mounted) return;
+    setState(_reloadSettings);
   }
 
   Color _stageBorderColor(SelectionStage s, bool ready) {
@@ -3841,12 +5222,16 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   int _readyCancelCount() => _collectReadyCancelDrafts().length;
 
+  int _forbiddenSegmentsCount() =>
+      _selections.where((s) => s.forbiddenPhrases.isNotEmpty).length;
+
   Widget _buildBubbleScreenHeader(
     BuildContext context, {
     required int addReadyCount,
     required int cancelReadyCount,
   }) {
     final cs = Theme.of(context).colorScheme;
+    final forbiddenCount = _forbiddenSegmentsCount();
 
     Widget stat({
       required IconData icon,
@@ -3856,31 +5241,31 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }) {
       return Expanded(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
           decoration: BoxDecoration(
-            color: color.withOpacity(.10),
+            color: color.withValues(alpha: .10),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: color.withOpacity(.20)),
+            border: Border.all(color: color.withValues(alpha: .20)),
           ),
           child: Column(
             children: [
               Icon(icon, color: color, size: 20),
-              const SizedBox(height: 6),
+              const SizedBox(height: 5),
               Text(
                 value,
                 style: TextStyle(
-                  color: color,
+                  color: _readable(context, color),
                   fontWeight: FontWeight.w900,
                   fontSize: 18,
                 ),
               ),
-              const SizedBox(height: 3),
+              const SizedBox(height: 2),
               Text(
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: cs.onSurface.withOpacity(.68),
+                  color: cs.onSurface.withValues(alpha: .68),
                   fontWeight: FontWeight.w700,
                   fontSize: 11,
                 ),
@@ -3905,7 +5290,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
               color: selected ? color : cs.surfaceContainerHighest,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color: selected ? color : cs.outlineVariant.withOpacity(.35),
+                color: selected
+                    ? color
+                    : cs.outlineVariant.withValues(alpha: .35),
               ),
             ),
             child: Row(
@@ -3918,7 +5305,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     label,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: selected ? Colors.white : color,
+                      color: selected
+                          ? Colors.white
+                          : _readable(context, color),
                       fontWeight: FontWeight.w900,
                     ),
                   ),
@@ -3935,17 +5324,18 @@ class _BubbleScreenState extends State<BubbleScreen> {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: cs.surface,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: cs.outlineVariant.withOpacity(.22)),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: .22)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(.06),
+            color: Colors.black.withValues(alpha: .06),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
         ],
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
@@ -3969,6 +5359,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 value: '$cancelReadyCount',
                 color: _chipRed,
               ),
+              if (forbiddenCount > 0) ...[
+                const SizedBox(width: 8),
+                stat(
+                  icon: Icons.gpp_bad_rounded,
+                  label: 'جمل ممنوعة',
+                  value: '$forbiddenCount',
+                  color: _forbiddenColor,
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 12),
@@ -3987,7 +5386,105 @@ class _BubbleScreenState extends State<BubbleScreen> {
               ),
             ],
           ),
+          if (_prefs.showLegend) ...[
+            const SizedBox(height: 10),
+            _buildLegend(context),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildLegend(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    Widget item(Color c, String label) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            color: c.withValues(alpha: .25),
+            border: Border.all(color: c, width: 1.4),
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+            color: cs.onSurfaceVariant,
+          ),
+        ),
+      ],
+    );
+
+    return InkWell(
+      onTap: () => setState(() => _legendExpanded = !_legendExpanded),
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest.withValues(alpha: .5),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.palette_outlined, size: 16, color: cs.primary),
+                const SizedBox(width: 6),
+                const Expanded(
+                  child: Text(
+                    'دليل الألوان وطريقة الاستخدام',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _legendExpanded
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  size: 20,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 6,
+              children: [
+                item(_nameColor, 'الاسم'),
+                item(_amountColor, 'المبلغ'),
+                item(_currencyColor, 'العملة'),
+                item(_chipYellow, 'هاتف'),
+                item(_chipRed, 'مبلغ بالحروف'),
+                item(_forbiddenColor, 'ممنوع'),
+              ],
+            ),
+            if (_legendExpanded) ...[
+              const SizedBox(height: 8),
+              Text(
+                '• اضغط على الكلمة لتحديدها حسب المرحلة الحالية (الاسم ← المبلغ ← العملة).\n'
+                '• عند تحديد الاسم يمتد تلقائيًا حتى نهاية السطر أو حتى أول كلمة ممنوعة أو رقم أو عملة أو كلمة إيقاف.\n'
+                '• اضغط مطولًا على أي كلمة (أو بزر الفأرة الأيمن) لإضافتها ككلمة ممنوعة أو اختصار عملة أو كلمة اسم وغيرها.\n'
+                '• يمكنك تغيير الألوان وحجم الخط وطريقة العرض من الإعدادات ← تخصيص شاشة الفقاعات.',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.55,
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -4001,12 +5498,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }) {
     final cs = Theme.of(context).colorScheme;
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: EdgeInsets.only(bottom: _prefs.compact ? 8 : 12),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: color.withOpacity(.08),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withOpacity(.34), width: 1.6),
+        color: color.withValues(alpha: .08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: .34), width: 1.6),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4015,7 +5512,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
             width: 42,
             height: 42,
             decoration: BoxDecoration(
-              color: color.withOpacity(.14),
+              color: color.withValues(alpha: .14),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Icon(icon, color: color),
@@ -4031,7 +5528,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                       child: Text(
                         title,
                         style: TextStyle(
-                          color: color,
+                          color: _readable(context, color),
                           fontWeight: FontWeight.w900,
                           fontSize: 16,
                         ),
@@ -4092,22 +5589,793 @@ class _BubbleScreenState extends State<BubbleScreen> {
     );
   }
 
+  // ====== بطاقة الفقاعة (التصميم الجديد) ======
+  Color _avatarColor(String name) {
+    if (name.trim().isEmpty) return _gradStart;
+    final hue = (name.trim().hashCode.abs() % 360).toDouble();
+    return HSVColor.fromAHSV(1, hue, .55, .75).toColor();
+  }
+
+  String _fmtShortStamp(DateTime dt) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(dt.day)}/${two(dt.month)} • ${two(dt.hour)}:${two(dt.minute)}';
+  }
+
+  Widget _statusChip(BuildContext context, String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .13),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: .35)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: _readable(context, color),
+          fontWeight: FontWeight.w900,
+          fontSize: 11.5,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCardHeader(
+    BuildContext context,
+    int si, {
+    required String statusText,
+    required Color statusColor,
+  }) {
+    final seg = _segments[si];
+    final sender = seg.senderName.trim();
+    final avatar = _avatarColor(sender);
+    final initial = sender.isEmpty ? '${si + 1}' : sender.characters.first;
+
+    return Row(
+      children: [
+        if (_prefs.showSenderHeader) ...[
+          CircleAvatar(
+            radius: _prefs.compact ? 14 : 17,
+            backgroundColor: avatar.withValues(alpha: .18),
+            child: Text(
+              initial,
+              style: TextStyle(
+                color: _readable(context, avatar),
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  sender.isEmpty ? 'رسالة ${si + 1}' : sender,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 14.5,
+                  ),
+                ),
+                if (seg.timestamp != null)
+                  Text(
+                    _fmtShortStamp(seg.timestamp!),
+                    style: TextStyle(fontSize: 11.5, color: _muted(context)),
+                  ),
+              ],
+            ),
+          ),
+        ] else
+          Expanded(
+            child: Text(
+              'رسالة ${si + 1}',
+              style: const TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ),
+        const SizedBox(width: 6),
+        _statusChip(context, statusText, statusColor),
+        PopupMenuButton<String>(
+          tooltip: 'خيارات الفقاعة',
+          icon: const Icon(Icons.more_vert_rounded),
+          onSelected: (value) async {
+            switch (value) {
+              case 'copy':
+                final text = seg.lines.join('\n').trim();
+                await Clipboard.setData(ClipboardData(text: text));
+                _snack('تم نسخ نص الرسالة');
+                break;
+              case 'copyName':
+                await _copyNameToClipboard(si);
+                break;
+              case 'reset':
+                _clearSelection(si);
+                break;
+              case 'delete':
+                await _confirmDeleteSegment(si);
+                break;
+            }
+          },
+          itemBuilder: (_) {
+            PopupMenuItem<String> item(
+              String value,
+              IconData icon,
+              String label, {
+              Color? color,
+            }) {
+              return PopupMenuItem<String>(
+                value: value,
+                child: Row(
+                  children: [
+                    Icon(icon, size: 20, color: color),
+                    const SizedBox(width: 10),
+                    Text(label, style: TextStyle(color: color)),
+                  ],
+                ),
+              );
+            }
+
+            return [
+              item('copy', Icons.copy_all_rounded, 'نسخ نص الرسالة'),
+              item('copyName', Icons.badge_outlined, 'نسخ الاسم'),
+              item('reset', Icons.restart_alt_rounded, 'إلغاء التحديد الكلّي'),
+              item(
+                'delete',
+                Icons.delete_outline_rounded,
+                'حذف الفقاعة',
+                color: Colors.red,
+              ),
+            ];
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _pillAction({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+    required Color color,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkResponse(
+        onTap: onTap,
+        radius: 18,
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: Icon(icon, size: 16, color: color),
+        ),
+      ),
+    );
+  }
+
+  Widget _rolePill(
+    BuildContext context, {
+    required IconData icon,
+    required String title,
+    required String? value,
+    required Color color,
+    required bool active,
+    VoidCallback? onTap,
+    List<({IconData icon, String tooltip, VoidCallback onTap})> actions =
+        const [],
+  }) {
+    final done = value != null && value.trim().isNotEmpty;
+    final fg = active ? Colors.white : _readable(context, color);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: _prefs.compact ? 5 : 8,
+        ),
+        decoration: BoxDecoration(
+          color: active ? color : color.withValues(alpha: done ? .15 : .07),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: color.withValues(alpha: active ? 1 : (done ? .6 : .35)),
+            width: active ? 1.6 : 1.1,
+          ),
+          boxShadow: active
+              ? [
+                  BoxShadow(
+                    color: color.withValues(alpha: .30),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ]
+              : null,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(done ? Icons.check_circle_rounded : icon, size: 17, color: fg),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                done ? '$title: $value' : '$title: غير محدد',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: fg, fontWeight: FontWeight.w800),
+              ),
+            ),
+            for (final a in actions) ...[
+              const SizedBox(width: 4),
+              _pillAction(
+                icon: a.icon,
+                tooltip: a.tooltip,
+                onTap: a.onTap,
+                color: fg,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRolePills(
+    BuildContext context,
+    int si, {
+    required BubbleActionMode mode,
+    required String nameText,
+    required double? amountVal,
+    required String? currencyText,
+  }) {
+    final sel = _selections[si];
+    final stage = sel.stage;
+    final nameColor = mode == BubbleActionMode.cancel ? _chipRed : _nameColor;
+
+    void clearAmountOrCurrency(String category) {
+      final s = _selections[si];
+      if (s.amount != null &&
+          s.currencyToken != null &&
+          s.amount == s.currencyToken) {
+        _showClearAmountOrCurrencyDialog(si);
+      } else {
+        _clearCategory(si, category);
+      }
+    }
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        _rolePill(
+          context,
+          icon: Icons.person_rounded,
+          title: mode == BubbleActionMode.cancel ? 'اسم الإلغاء' : 'الاسم',
+          value: nameText.trim().isEmpty ? null : nameText,
+          color: nameColor,
+          active: stage == SelectionStage.name,
+          onTap: () => _goStage(si, SelectionStage.name),
+          actions: [
+            (
+              icon: Icons.edit_rounded,
+              tooltip: 'تحرير الاسم يدويًا',
+              onTap: () => _openNameManualDialog(si, nameText),
+            ),
+            if (nameText.trim().isNotEmpty)
+              (
+                icon: Icons.backspace_rounded,
+                tooltip: 'مسح تحديد الاسم',
+                onTap: () => _clearCategory(si, 'name'),
+              ),
+          ],
+        ),
+        if (mode == BubbleActionMode.add)
+          _rolePill(
+            context,
+            icon: Icons.numbers_rounded,
+            title: 'المبلغ',
+            value: amountVal == null ? null : _fmtAmount(amountVal),
+            color: _amountColor,
+            active: stage == SelectionStage.amount,
+            onTap: () => _goStage(si, SelectionStage.amount),
+            actions: [
+              (
+                icon: Icons.edit_rounded,
+                tooltip: 'تحرير المبلغ يدويًا',
+                onTap: () => _openAmountManualDialog(si, amountVal),
+              ),
+              if (amountVal != null)
+                (
+                  icon: Icons.backspace_rounded,
+                  tooltip: 'مسح تحديد المبلغ',
+                  onTap: () => clearAmountOrCurrency('amount'),
+                ),
+            ],
+          ),
+        if (mode == BubbleActionMode.add)
+          _rolePill(
+            context,
+            icon: Icons.currency_exchange_rounded,
+            title: 'العملة',
+            value: currencyText,
+            color: _currencyColor,
+            active: stage == SelectionStage.currency,
+            onTap: () => _goStage(si, SelectionStage.currency),
+            actions: [
+              if (currencyText != null)
+                (
+                  icon: Icons.backspace_rounded,
+                  tooltip: 'مسح تحديد العملة',
+                  onTap: () => clearAmountOrCurrency('currency'),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+
+  Widget _buildStageHint(
+    BuildContext context,
+    int si,
+    _SegmentSelection sel,
+    Color color,
+  ) {
+    final mode = _modeOf(si);
+    String extra = '';
+    if (mode == BubbleActionMode.add) {
+      switch (sel.stage) {
+        case SelectionStage.name:
+          extra = ' — اضغط على أول كلمة من الاسم';
+          break;
+        case SelectionStage.amount:
+          extra = ' — اضغط على سطر المبلغ';
+          break;
+        case SelectionStage.currency:
+          extra = ' — اضغط على العملة أو اخترها من القائمة';
+          break;
+        case SelectionStage.done:
+          break;
+      }
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [color.withValues(alpha: .10), color.withValues(alpha: .03)],
+        ),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.lightbulb_outline_rounded, size: 17, color: color),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '${_hintForSegment(si, sel)}$extra',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 12.5,
+                color: _readable(context, color),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNameSuggestions(
+    BuildContext context,
+    int si,
+    _SegmentSelection sel,
+  ) {
+    final cands = sel.nameCandidates.take(4).toList();
+    final color = _nameColor;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .07),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: .30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.person_search_rounded, size: 18, color: color),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  sel.nameAmbiguous
+                      ? 'لم يُحسم الاسم تلقائيًا — اختر السطر الصحيح'
+                      : 'اقتراحات للاسم',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: _readable(context, color),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if ((sel.nameReason ?? '').isNotEmpty && sel.nameAmbiguous) ...[
+            const SizedBox(height: 3),
+            Text(
+              sel.nameReason!,
+              style: TextStyle(fontSize: 11.5, color: _muted(context)),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: cands
+                .map(
+                  (c) => ActionChip(
+                    avatar: CircleAvatar(
+                      radius: 10,
+                      backgroundColor: color.withValues(alpha: .2),
+                      child: Text(
+                        '${c.lineIndex + 1}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          color: _readable(context, color),
+                        ),
+                      ),
+                    ),
+                    label: Text(c.text),
+                    tooltip: 'السطر ${c.lineIndex + 1} • ${c.evidence.label}',
+                    onPressed: () => _applyNameCandidate(si, c),
+                  ),
+                )
+                .toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildForbiddenBanner(BuildContext context, _SegmentSelection sel) {
+    final fg = _readable(context, _forbiddenColor);
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: _forbiddenColor.withValues(alpha: .09),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _forbiddenColor.withValues(alpha: .45)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.gpp_bad_rounded, color: _forbiddenColor),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'تحتوي الرسالة على جملة ممنوعة',
+                  style: TextStyle(fontWeight: FontWeight.w900, color: fg),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: sel.forbiddenPhrases
+                      .map(
+                        (p) => Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _forbiddenColor.withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            '«$p»',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 12,
+                              color: fg,
+                            ),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMultiAmountBox(
+    BuildContext context,
+    int si, {
+    required bool wasSaved,
+    required double? amountVal,
+    required String nameText,
+    required List<double> amountCandidates,
+  }) {
+    final base = wasSaved ? Colors.orange : Colors.amber;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: base.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: base.withValues(alpha: .45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            wasSaved
+                ? 'تم حفظ الرسالة، لكن يوجد أكثر من مبلغ محتمل. يمكنك اختيار المبلغ الصحيح ونسخ الاسم أو أي مبلغ بشكل منفصل.'
+                : 'تم العثور على أكثر من مبلغ داخل الرسالة. اختر الآن أي مبلغ تريد حفظه.',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: _readable(context, base),
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (amountVal != null)
+            Text(
+              'المبلغ المعتمد حاليًا: ${_fmtAmount(amountVal)}',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.icon(
+                onPressed: () =>
+                    _openMultiAmountPickerDialog(si, afterSave: wasSaved),
+                icon: const Icon(Icons.rule),
+                label: const Text('اختيار المبلغ'),
+              ),
+              OutlinedButton.icon(
+                onPressed: nameText.trim().isEmpty
+                    ? null
+                    : () => _copyNameToClipboard(si),
+                icon: const Icon(Icons.copy_all),
+                label: const Text('نسخ الاسم'),
+              ),
+              ...amountCandidates.map(
+                (v) => OutlinedButton.icon(
+                  onPressed: () => _copyAmountToClipboard(v),
+                  icon: const Icon(Icons.copy),
+                  label: Text('نسخ ${_fmtAmount(v)}'),
+                ),
+              ),
+              if (wasSaved)
+                const Chip(
+                  label: Text('تم حفظها'),
+                  avatar: Icon(Icons.check_circle, size: 18),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSegmentCard(BuildContext context, int si) {
+    final seg = _segments[si];
+    final sel = _selections[si];
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final mode = _modeOf(si);
+    final savedSummary = _savedAddSummaries[si];
+    if (mode == BubbleActionMode.add && savedSummary != null) {
+      return _buildLockedAddBubble(context, savedSummary);
+    }
+    final cancelledSummary = _cancelledSummaries[si];
+    if (mode == BubbleActionMode.cancel && cancelledSummary != null) {
+      return _buildLockedCancelBubble(context, cancelledSummary);
+    }
+
+    final nameText = _buildSelectedName(seg, sel, si);
+    final amountVal = _buildSelectedAmount(seg, sel, si);
+    final currencyText = _buildSelectedCurrency(seg, sel);
+    final wasSaved = _savedSegments.contains(si);
+    final amountCandidates = mode == BubbleActionMode.add
+        ? _amountCandidatesForSegment(si)
+        : const <double>[];
+    final hasMultiAmount = amountCandidates.length >= 2;
+    final borderColor = _borderColorForSegment(si, sel);
+    final ready = _segmentReadyForMode(si);
+
+    String statusText;
+    if (mode == BubbleActionMode.cancel) {
+      statusText = ready ? 'جاهزة للإلغاء' : 'إلغاء';
+    } else if (ready) {
+      statusText = 'جاهزة';
+    } else {
+      final missing = <String>[
+        if (nameText.trim().isEmpty) 'الاسم',
+        if (amountVal == null) 'المبلغ',
+        if (currencyText == null) 'العملة',
+      ];
+      statusText = missing.isEmpty
+          ? 'غير مكتملة'
+          : 'ينقص: ${missing.join('، ')}';
+    }
+
+    final pad = _prefs.compact ? 10.0 : 14.0;
+    final gap = _prefs.compact ? 6.0 : 8.0;
+
+    return Container(
+      margin: EdgeInsets.only(bottom: _prefs.compact ? 8 : 12),
+      decoration: BoxDecoration(
+        color: isDark ? cs.surfaceContainer : cs.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: borderColor.withValues(alpha: ready ? .9 : .5),
+          width: ready ? 2 : 1.3,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? .25 : .06),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(19),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(height: 4, color: borderColor),
+            Padding(
+              padding: EdgeInsets.all(pad),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildCardHeader(
+                    context,
+                    si,
+                    statusText: statusText,
+                    statusColor: ready ? _chipGreen : borderColor,
+                  ),
+                  SizedBox(height: gap),
+                  Row(
+                    children: [
+                      Expanded(child: _buildModeSwitch(si)),
+                      if (mode == BubbleActionMode.cancel &&
+                          _cancelCandidatesLoading.contains(si))
+                        const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2.4),
+                        ),
+                    ],
+                  ),
+                  _buildCompanyMovementSwitch(si),
+                  if (_prefs.showQuickActions)
+                    _buildBubbleQuickActions(context, si),
+                  if (sel.forbiddenPhrases.isNotEmpty)
+                    _buildForbiddenBanner(context, sel),
+                  SizedBox(height: gap + 2),
+                  _buildRolePills(
+                    context,
+                    si,
+                    mode: mode,
+                    nameText: nameText,
+                    amountVal: amountVal,
+                    currencyText: currencyText,
+                  ),
+                  SizedBox(height: gap),
+                  _buildStageHint(context, si, sel, borderColor),
+                  if (nameText.trim().isEmpty && sel.nameCandidates.isNotEmpty)
+                    _buildNameSuggestions(context, si, sel),
+                  if (mode == BubbleActionMode.add && hasMultiAmount)
+                    _buildMultiAmountBox(
+                      context,
+                      si,
+                      wasSaved: wasSaved,
+                      amountVal: amountVal,
+                      nameText: nameText,
+                      amountCandidates: amountCandidates,
+                    ),
+                  if (mode == BubbleActionMode.add &&
+                      _amountConflict.contains(si)) ...[
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Chip(
+                          label: const Text("تعارض في المبلغ (رقم/نص)"),
+                          avatar: const Icon(
+                            Icons.warning_amber,
+                            color: Colors.red,
+                          ),
+                          backgroundColor: Colors.red.withValues(alpha: .1),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => _openAmountConflictDialog(si),
+                          icon: const Icon(Icons.rule),
+                          label: const Text("مراجعة"),
+                        ),
+                      ],
+                    ),
+                  ],
+                  SizedBox(height: gap + 2),
+
+                  // النص — فقاعات كلمات
+                  ...List.generate(seg.lines.length, (li) {
+                    final tokens = _tokensFromLine(seg.lines[li]);
+                    if (tokens.isEmpty) return const SizedBox.shrink();
+                    return Padding(
+                      padding: EdgeInsets.only(bottom: gap),
+                      child: Wrap(
+                        spacing: gap,
+                        runSpacing: gap,
+                        children: List.generate(tokens.length, (ti) {
+                          return _buildTokenChip(
+                            context: context,
+                            segIndex: si,
+                            lineIndex: li,
+                            tokenIndex: ti,
+                            token: tokens[ti],
+                            tokensThisLine: tokens,
+                          );
+                        }),
+                      ),
+                    );
+                  }),
+
+                  if (mode == BubbleActionMode.cancel)
+                    _buildCancelCandidatesPanel(context, si),
+
+                  // اختيار العملة من القائمة
+                  if (mode == BubbleActionMode.add &&
+                      (sel.stage == SelectionStage.currency ||
+                          sel.stage == SelectionStage.done))
+                    _buildCurrencyPickerRow(context, si),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final addReadyCount = _readyAddCount();
     final cancelReadyCount = _readyCancelCount();
 
-    // فرز: اعرض نمطًا واحدًا في كل مرة، وغير المكتمل أولًا.
-    final order = List.generate(
-      _segments.length,
-      (i) => i,
-    ).where((i) => _modeOf(i) == _viewMode).toList();
-    order.sort((a, b) {
-      final ra = _segmentReadyForMode(a);
-      final rb = _segmentReadyForMode(b);
-      if (ra == rb) return a.compareTo(b);
-      return ra ? 1 : -1;
-    });
+    // اعرض نمطًا واحدًا في كل مرة (وغير المكتمل أولًا إن كان مفعّلًا)
+    final analyzed = _selections.length;
+    final order = <int>[
+      for (var i = 0; i < analyzed; i++)
+        if (_modeOf(i) == _viewMode) i,
+    ];
+    if (_prefs.incompleteFirst) {
+      final readyCache = <int, bool>{
+        for (final i in order) i: _segmentReadyForMode(i),
+      };
+      order.sort((a, b) {
+        final ra = readyCache[a]!;
+        final rb = readyCache[b]!;
+        if (ra == rb) return a.compareTo(b);
+        return ra ? 1 : -1;
+      });
+    }
 
     final cs = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -4116,112 +6384,153 @@ class _BubbleScreenState extends State<BubbleScreen> {
         : _gradStart;
     final accountEnd = _isCompanyAccount ? const Color(0xFF00897B) : _gradEnd;
 
-    final cardBg = isDark
-        ? cs.surface.withOpacity(0.6)
-        : cs.surface.withOpacity(0.95);
     final canSendAdd =
-        !_isSending && addReadyCount > 0 && !_hasUnresolvedConflicts();
-    final canSendCancel = !_isSending && cancelReadyCount > 0;
+        !_busy && addReadyCount > 0 && !_hasUnresolvedConflicts();
+    final canSendCancel = !_busy && cancelReadyCount > 0;
+    final showTrailing = order.isEmpty || _analyzing;
 
     return Directionality(
       textDirection: TextDirection.rtl,
-      child: Scaffold(
-        backgroundColor: _isCompanyAccount
-            ? (isDark ? const Color(0xFF181522) : const Color(0xFFF8F5FF))
-            : null,
-        appBar: AppBar(
-          title: Text(
-            _isCompanyAccount ? 'تحليل حركات الشركة' : 'تحليل حركات المكتب',
-          ),
-          centerTitle: true,
-          flexibleSpace: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [accountStart, accountEnd],
+      child: PopScope(
+        // لا نسمح بالخروج أثناء الحفظ حتى لا تنقطع العملية في منتصفها
+        canPop: !_isSending,
+        child: Scaffold(
+          backgroundColor: _isCompanyAccount
+              ? (isDark ? const Color(0xFF181522) : const Color(0xFFF8F5FF))
+              : null,
+          appBar: AppBar(
+            title: Text(
+              _isCompanyAccount ? 'تحليل حركات الشركة' : 'تحليل حركات المكتب',
+            ),
+            centerTitle: true,
+            foregroundColor: Colors.white,
+            actions: [
+              IconButton(
+                tooltip: 'سجل العمليات',
+                icon: const Icon(Icons.history_rounded),
+                onPressed: _busy ? null : _openOperationsLog,
+              ),
+              IconButton(
+                tooltip: 'تخصيص الفقاعات والإعدادات',
+                icon: const Icon(Icons.tune_rounded),
+                onPressed: _busy ? null : _openBubbleSettings,
+              ),
+            ],
+            flexibleSpace: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [accountStart, accountEnd],
+                ),
               ),
             ),
           ),
-        ),
 
-        bottomNavigationBar: SafeArea(
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surface,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.08),
-                  blurRadius: 8,
-                  offset: const Offset(0, -2),
-                ),
-              ],
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: canSendAdd
-                        ? () => _sendForMode(BubbleActionMode.add)
-                        : null,
-                    icon: _isSending && _viewMode == BubbleActionMode.add
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.add_task_rounded),
-                    label: Text('تنفيذ الإضافات ($addReadyCount)'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      backgroundColor: _chipGreen,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
+          bottomNavigationBar: SafeArea(
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              decoration: BoxDecoration(
+                color: cs.surface,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 8,
+                    offset: const Offset(0, -2),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: canSendCancel
-                        ? () => _sendForMode(BubbleActionMode.cancel)
-                        : null,
-                    icon: _isSending && _viewMode == BubbleActionMode.cancel
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.cancel_schedule_send_rounded),
-                    label: Text('تنفيذ الإلغاء ($cancelReadyCount)'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      backgroundColor: _chipRed,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  OperationProgressBar(
+                    progress: _progress,
+                    padding: const EdgeInsets.only(bottom: 8),
                   ),
-                ),
-              ],
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: canSendAdd
+                              ? () => _sendForMode(BubbleActionMode.add)
+                              : null,
+                          icon: _isSending && _viewMode == BubbleActionMode.add
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.add_task_rounded),
+                          label: Text('تنفيذ الإضافات ($addReadyCount)'),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            backgroundColor: _chipGreen,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: canSendCancel
+                              ? () => _sendForMode(BubbleActionMode.cancel)
+                              : null,
+                          icon:
+                              _isSending && _viewMode == BubbleActionMode.cancel
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.cancel_schedule_send_rounded),
+                          label: Text('تنفيذ الإلغاء ($cancelReadyCount)'),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            backgroundColor: _chipRed,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
 
-        body: ListView.builder(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 105),
-          itemCount: order.length + (order.isEmpty ? 2 : 1),
-          itemBuilder: (context, orderIdx) {
-            if (orderIdx == 0) {
-              return _buildBubbleScreenHeader(
-                context,
-                addReadyCount: addReadyCount,
-                cancelReadyCount: cancelReadyCount,
-              );
-            }
-            if (order.isEmpty) {
+          body: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+            itemCount: order.length + 1 + (showTrailing ? 1 : 0),
+            itemBuilder: (context, idx) {
+              if (idx == 0) {
+                return _buildBubbleScreenHeader(
+                  context,
+                  addReadyCount: addReadyCount,
+                  cancelReadyCount: cancelReadyCount,
+                );
+              }
+              final k = idx - 1;
+              if (k < order.length) return _buildSegmentCard(context, order[k]);
+
+              if (_analyzing) {
+                return _inlineInfoBox(
+                  context,
+                  icon: Icons.hourglass_top_rounded,
+                  color: cs.primary,
+                  text:
+                      'جارٍ تحليل ${_segments.length - _selections.length} رسالة متبقية... يمكنك البدء بالفقاعات الظاهرة.',
+                );
+              }
               return _inlineInfoBox(
                 context,
                 icon: _viewMode == BubbleActionMode.add
@@ -4234,439 +6543,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     ? 'لا توجد فقاعات إضافة في هذا النص.'
                     : 'لا توجد فقاعات إلغاء في هذا النص.',
               );
-            }
-
-            final si = order[orderIdx - 1];
-            final seg = _segments[si];
-            final sel = _selections[si];
-
-            final nameText = _buildSelectedName(seg, sel, si);
-            final amountVal = _buildSelectedAmount(seg, sel, si);
-            final currencyText = _buildSelectedCurrency(seg, sel);
-            final wasSaved = _savedSegments.contains(si);
-            final mode = _modeOf(si);
-            final amountCandidates = mode == BubbleActionMode.add
-                ? _amountCandidatesForSegment(si)
-                : const <double>[];
-            final hasMultiAmount = amountCandidates.length >= 2;
-
-            final borderColor = _borderColorForSegment(si, sel);
-            final savedSummary = _savedAddSummaries[si];
-            if (mode == BubbleActionMode.add && savedSummary != null) {
-              return _buildLockedAddBubble(context, savedSummary);
-            }
-            final cancelledSummary = _cancelledSummaries[si];
-            if (mode == BubbleActionMode.cancel && cancelledSummary != null) {
-              return _buildLockedCancelBubble(context, cancelledSummary);
-            }
-
-            return Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              decoration: BoxDecoration(
-                color: cardBg,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: borderColor, width: 2),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(isDark ? 0.25 : 0.08),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (seg.header.isNotEmpty)
-                      Text(
-                        seg.header,
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: _muted(context),
-                        ),
-                      ),
-                    if (seg.timestamp != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          "التاريخ: ${seg.timestamp} • المرسل: ${seg.senderName}",
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: _muted(context),
-                          ),
-                        ),
-                      ),
-                    const SizedBox(height: 10),
-                    _buildModeSwitch(si),
-                    _buildCompanyMovementSwitch(si),
-                    _buildBubbleQuickActions(context, si),
-                    const SizedBox(height: 10),
-
-                    // شريط مرحلة الإرشاد + إعادة الضبط
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 10,
-                            ),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                colors: [
-                                  _gradStart.withOpacity(.10),
-                                  _gradEnd.withOpacity(.10),
-                                ],
-                              ),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              _hintForSegment(si, sel),
-                              style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                color: borderColor,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        if (mode == BubbleActionMode.cancel &&
-                            _cancelCandidatesLoading.contains(si)) ...[
-                          const SizedBox(
-                            width: 28,
-                            height: 28,
-                            child: CircularProgressIndicator(strokeWidth: 2.4),
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        IconButton.filledTonal(
-                          onPressed: () => _confirmDeleteSegment(si),
-                          tooltip: "حذف الفقاعة",
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            color: Colors.red,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        IconButton.filledTonal(
-                          onPressed: () => _clearSelection(si),
-                          icon: const Icon(Icons.restart_alt),
-                          tooltip: "إلغاء التحديد الكلّي",
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-
-                    // شارات سريعة (اسم/مبلغ/عملة)
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        _pill(
-                          context,
-                          icon: Icons.person,
-                          label: mode == BubbleActionMode.cancel
-                              ? (nameText.isEmpty
-                                    ? "اسم الإلغاء: غير محدد"
-                                    : "اسم الإلغاء: $nameText")
-                              : (nameText.isEmpty
-                                    ? "الاسم: غير محدد"
-                                    : "الاسم: $nameText"),
-                          color: mode == BubbleActionMode.cancel
-                              ? _chipRed
-                              : _chipIndigo,
-                          onTap: () => _goStage(si, SelectionStage.name),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                icon: const Icon(Icons.edit, size: 16),
-                                tooltip: "تحرير الاسم يدويًا",
-                                onPressed: () =>
-                                    _openNameManualDialog(si, nameText),
-                                color: Colors.white,
-                              ),
-                              const SizedBox(width: 4),
-                              IconButton(
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                icon: const Icon(Icons.backspace, size: 16),
-                                tooltip: "مسح تحديد الاسم",
-                                onPressed: () => _clearCategory(si, 'name'),
-                                color: Colors.white,
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (mode == BubbleActionMode.add)
-                          _pill(
-                            context,
-                            icon: Icons.numbers,
-                            label: amountVal == null
-                                ? "المبلغ: غير محدد"
-                                : "المبلغ: ${amountVal.toStringAsFixed(2)}",
-                            color: _chipTeal,
-                            onTap: () => _goStage(si, SelectionStage.amount),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  padding: EdgeInsets.zero,
-                                  icon: const Icon(Icons.edit, size: 16),
-                                  tooltip: "تحرير المبلغ يدويًا",
-                                  onPressed: () =>
-                                      _openAmountManualDialog(si, amountVal),
-                                  color: Colors.black,
-                                ),
-                                const SizedBox(width: 4),
-                                IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  padding: EdgeInsets.zero,
-                                  icon: const Icon(Icons.backspace, size: 16),
-                                  tooltip: "مسح تحديد المبلغ",
-                                  onPressed: () {
-                                    final sel = _selections[si];
-                                    if (sel.amount != null &&
-                                        sel.currencyToken != null &&
-                                        sel.amount == sel.currencyToken) {
-                                      _showClearAmountOrCurrencyDialog(si);
-                                    } else {
-                                      _clearCategory(si, 'amount');
-                                    }
-                                  },
-                                  color: Colors.black,
-                                ),
-                              ],
-                            ),
-                          ),
-                        if (mode == BubbleActionMode.add)
-                          _pill(
-                            context,
-                            icon: Icons.currency_exchange,
-                            label: currencyText == null
-                                ? "العملة: غير محددة"
-                                : "العملة: $currencyText",
-                            color: _chipBlue,
-                            onTap: () => _goStage(si, SelectionStage.currency),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  padding: EdgeInsets.zero,
-                                  icon: const Icon(Icons.backspace, size: 16),
-                                  tooltip: "مسح تحديد العملة",
-                                  onPressed: () {
-                                    final sel = _selections[si];
-                                    if (sel.amount != null &&
-                                        sel.currencyToken != null &&
-                                        sel.amount == sel.currencyToken) {
-                                      _showClearAmountOrCurrencyDialog(si);
-                                    } else {
-                                      _clearCategory(si, 'currency');
-                                    }
-                                  },
-                                  color: Colors.black,
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 8),
-
-                    if (mode == BubbleActionMode.add && hasMultiAmount) ...[
-                      const SizedBox(height: 8),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: (wasSaved ? Colors.orange : Colors.amber)
-                              .withOpacity(.10),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: (wasSaved ? Colors.orange : Colors.amber)
-                                .withOpacity(.45),
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              wasSaved
-                                  ? 'تم حفظ الرسالة، لكن يوجد أكثر من مبلغ محتمل. يمكنك اختيار المبلغ الصحيح ونسخ الاسم أو أي مبلغ بشكل منفصل.'
-                                  : 'تم العثور على أكثر من مبلغ داخل الرسالة. اختر الآن أي مبلغ تريد حفظه.',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                color: wasSaved
-                                    ? Colors.orange[900]
-                                    : Colors.amber[900],
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            if (amountVal != null)
-                              Text(
-                                'المبلغ المعتمد حاليًا: ${_fmtAmount(amountVal)}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            const SizedBox(height: 10),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                FilledButton.icon(
-                                  onPressed: () => _openMultiAmountPickerDialog(
-                                    si,
-                                    afterSave: wasSaved,
-                                  ),
-                                  icon: const Icon(Icons.rule),
-                                  label: const Text('اختيار المبلغ'),
-                                ),
-                                OutlinedButton.icon(
-                                  onPressed: nameText.trim().isEmpty
-                                      ? null
-                                      : () => _copyNameToClipboard(si),
-                                  icon: const Icon(Icons.copy_all),
-                                  label: const Text('نسخ الاسم'),
-                                ),
-                                ...amountCandidates.map(
-                                  (v) => OutlinedButton.icon(
-                                    onPressed: () => _copyAmountToClipboard(v),
-                                    icon: const Icon(Icons.copy),
-                                    label: Text('نسخ ${_fmtAmount(v)}'),
-                                  ),
-                                ),
-                                if (wasSaved)
-                                  const Chip(
-                                    label: Text('تم حفظها'),
-                                    avatar: Icon(Icons.check_circle, size: 18),
-                                  ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-
-                    // تعارض رقم/نص
-                    if (mode == BubbleActionMode.add &&
-                        _amountConflict.contains(si)) ...[
-                      Row(
-                        children: [
-                          Chip(
-                            label: const Text("تعارض في المبلغ (رقم/نص)"),
-                            avatar: const Icon(
-                              Icons.warning_amber,
-                              color: Colors.red,
-                            ),
-                            backgroundColor: Colors.red.withOpacity(.1),
-                          ),
-                          const SizedBox(width: 8),
-                          OutlinedButton.icon(
-                            onPressed: () => _openAmountConflictDialog(si),
-                            icon: const Icon(Icons.rule),
-                            label: const Text("مراجعة"),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-
-                    // النص — فقاعات كلمات
-                    ...List.generate(seg.lines.length, (li) {
-                      final line = seg.lines[li];
-                      final tokens = _tokensFromLine(line);
-                      if (tokens.isEmpty) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: List.generate(tokens.length, (ti) {
-                            final tok = tokens[ti];
-                            return _buildTokenChip(
-                              context: context,
-                              segIndex: si,
-                              lineIndex: li,
-                              tokenIndex: ti,
-                              token: tok,
-                              tokensThisLine: tokens,
-                            );
-                          }),
-                        ),
-                      );
-                    }),
-
-                    // اختيار العملة من القائمة
-                    if (mode == BubbleActionMode.cancel)
-                      _buildCancelCandidatesPanel(context, si),
-
-                    if (mode == BubbleActionMode.add &&
-                        (_selections[si].stage == SelectionStage.currency ||
-                            _selections[si].stage == SelectionStage.done))
-                      _buildCurrencyPickerRow(context, si),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  // ====== عنصر شارة ======
-  Widget _pill(
-    BuildContext context, {
-    required IconData icon,
-    required String label,
-    required Color color,
-    VoidCallback? onTap,
-    Widget? trailing,
-  }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final textColor = isDark ? Colors.white : Colors.white;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [
-            BoxShadow(
-              color: color.withOpacity(0.25),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 18, color: textColor),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(color: textColor, fontWeight: FontWeight.w700),
-            ),
-            if (trailing != null) ...[
-              const SizedBox(width: 8),
-              DefaultTextStyle(
-                style: TextStyle(color: textColor),
-                child: trailing,
-              ),
-            ],
-          ],
+            },
+          ),
         ),
       ),
     );
@@ -4699,6 +6577,16 @@ class _SegmentSelection {
 
   final Set<_TokPos> phoneLikeTokens = {};
   final Set<_TokPos> amountTextLockedTokens = {};
+
+  // اقتراحات الاسم من الكاشف (تظهر عندما لا يُحسم الاسم)
+  List<nd.NameLineCandidate> nameCandidates = const [];
+  bool nameAmbiguous = false;
+  String? nameReason;
+
+  // الكلمات/الجمل الممنوعة داخل الرسالة
+  final Set<_TokPos> forbiddenTokens = {};
+  final Set<_TokPos> forbiddenPhraseTokens = {};
+  final List<String> forbiddenPhrases = [];
 
   _SegmentSelection({required this.stage});
 }
@@ -4839,10 +6727,20 @@ class _DuplicateWarningItem {
   final List<TransactionModel> sameNameAmountCurrency;
   final List<TransactionModel> sameNameOnly;
 
+  /// حركات أخرى داخل نفس النص بنفس الاسم والمبلغ والعملة
+  final List<_PendingTxDraft> batchDuplicates;
+
   const _DuplicateWarningItem({
     required this.draft,
     required this.exactCritical,
     required this.sameNameAmountCurrency,
     required this.sameNameOnly,
+    required this.batchDuplicates,
   });
+
+  bool get hasAny =>
+      exactCritical.isNotEmpty ||
+      sameNameAmountCurrency.isNotEmpty ||
+      sameNameOnly.isNotEmpty ||
+      batchDuplicates.isNotEmpty;
 }

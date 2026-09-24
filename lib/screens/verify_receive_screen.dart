@@ -13,6 +13,7 @@ import '../models.dart';
 import '../services/detection/name_detector.dart' as nd;
 import '../services/detection/amount_detector.dart' as ad;
 import '../services/detection/currency_detector.dart' as cd;
+import '../services/detection/text_tokens.dart' as tt;
 
 class VerifyReceiveScreen extends StatefulWidget {
   final Account account;
@@ -294,34 +295,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   // ====== تنظيف وتجهيز ======
   bool _isAsciiDigit(int code) => code >= 0x30 && code <= 0x39;
   bool _isArabicDigit(int code) => code >= 0x0660 && code <= 0x0669;
-  bool _isDigitCode(int code) => _isAsciiDigit(code) || _isArabicDigit(code);
-
-  String _squashDigitSeparators(String w) {
-    if (w.isEmpty) return w;
-    final sep = RegExp(r'[.,،\-\_\u0640\u066B\u066C]');
-    final out = StringBuffer();
-    for (int i = 0; i < w.length; i++) {
-      final ch = w[i];
-      final prev = (i > 0) ? w.codeUnitAt(i - 1) : null;
-      final next = (i + 1 < w.length) ? w.codeUnitAt(i + 1) : null;
-      if (sep.hasMatch(ch)) {
-        if (prev != null &&
-            next != null &&
-            _isDigitCode(prev) &&
-            _isDigitCode(next))
-          continue;
-      }
-      out.write(ch);
-    }
-    return out.toString();
-  }
-
-  String _cleanToken(String w) {
-    final trimmed = w
-        .replaceAll(RegExp(r'[^\u0600-\u06FFa-zA-Z0-9\$€£﷼٫\.,\-_\/\+]'), '')
-        .trim();
-    return _squashDigitSeparators(trimmed);
-  }
+  // نفس المقسّم المستخدم في كاشف الاسم حتى تتطابق فهارس التوكنات
+  String _cleanToken(String w) => tt.cleanToken(w);
 
   List<String> _tokensFromLine(String line) {
     return line
@@ -394,6 +369,26 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   }
 
   // ====== الحالة الأولى لكل فقاعة ======
+  // إعدادات كاشف الاسم تُجهّز مرة واحدة لكل الرسائل (بدل إعادة فرز كل
+  // الحركات وبناء فهرس الأسماء لكل رسالة، وهو ما كان يسبب التجمّد)
+  nd.NameDetectorConfig? _nameConfigCache;
+  nd.NameDetectorConfig get _nameConfig =>
+      _nameConfigCache ??= nd.NameDetectorConfig(
+        nameKeywords: _nameKeywords,
+        knownNames: DatabaseService.transactionsBox.values
+            .where((t) => t.accountId == widget.account.id)
+            .map((t) => t.beneficiary)
+            .where((s) => s.trim().isNotEmpty)
+            .toSet()
+            .toList(),
+        ignoredWords: _settings.ignoredWords,
+        currencyWords: _currencyWordsFromSettings(),
+        forbiddenWords: _settings.forbiddenWords,
+        forbiddenPhrases: _settings.forbiddenPhrases,
+        amountKeywords: _amountKeywords,
+        cancelKeywords: _settings.cancelKeywords,
+      );
+
   _BubbleState _buildInitialState(_ParsedSegment seg, int segIndex) {
     final st = _BubbleState(segment: seg, index: segIndex);
 
@@ -406,21 +401,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       }
     }
 
-    final allPrev = DatabaseService.getTransactionsForAccount(widget.account.id)
-        .map((t) => t.beneficiary)
-        .where((s) => s.trim().isNotEmpty)
-        .toSet()
-        .toList();
-
     final currencyWords = _currencyWordsFromSettings();
 
-    final nameRes = nd.NameDetector.detect(
-      lines: seg.lines,
+    final nameRes = nd.NameDetector.detectTokens(
+      tokenLines: [for (final line in seg.lines) _tokensFromLine(line)],
       senderName: seg.senderName,
-      nameKeywords: _nameKeywords,
-      knownNames: allPrev,
-      ignoredWords: _settings.ignoredWords,
-      currencyWords: currencyWords,
+      config: _nameConfig,
     );
 
     st.nameTokens.addAll(_tokMapToSet(nameRes.tokensByLine));

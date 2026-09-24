@@ -15,6 +15,7 @@ import 'unreceived_reconcile_screen.dart'; // 👈 جديد
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/operation_log_service.dart';
 import 'add_edit_transaction_screen.dart';
 import 'account_stats_screen.dart';
 import 'transaction_details_screen.dart';
@@ -69,7 +70,19 @@ class _ExportColumn {
 
 class AccountScreen extends StatefulWidget {
   final Account account;
-  const AccountScreen({super.key, required this.account});
+
+  /// حركات تُحدَّد تلقائيًا عند فتح الحساب (مثلًا من سجل العمليات)
+  final Set<int>? initialSelectedTxIds;
+
+  /// عنوان يوضح مصدر التحديد (مثل عنوان العملية في السجل)
+  final String? selectionTitle;
+
+  const AccountScreen({
+    super.key,
+    required this.account,
+    this.initialSelectedTxIds,
+    this.selectionTitle,
+  });
 
   @override
   State<AccountScreen> createState() => _AccountScreenState();
@@ -132,11 +145,27 @@ class _AccountScreenState extends State<AccountScreen> {
   bool _searchFocused = false;
   final Set<int> _selectedTxIds = {};
 
+  /// عند الفتح من سجل العمليات: نعرض حركات العملية فقط (مع إمكانية عرض الكل)
+  final Set<int> _focusTxIds = {};
+  bool _showOnlyFocused = false;
+
   bool get _selectionMode => _selectedTxIds.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
+    final initial = widget.initialSelectedTxIds;
+    if (initial != null && initial.isNotEmpty) {
+      _selectedTxIds.addAll(initial);
+      _focusTxIds.addAll(initial);
+      _showOnlyFocused = true;
+      for (final k in _expanded.keys.toList()) {
+        _expanded[k] = true;
+      }
+      for (final k in _companyExpanded.keys.toList()) {
+        _companyExpanded[k] = true;
+      }
+    }
     _searchCtrl.addListener(() {
       setState(() => _query = _searchCtrl.text.trim());
     });
@@ -269,10 +298,25 @@ class _AccountScreenState extends State<AccountScreen> {
     );
     if (!ok) return;
 
+    final records = <OperationTxRecord>[];
     for (final tx in items) {
+      final before = OperationLogService.snapshot(tx);
       tx.accountId = target.id;
       await tx.save();
+      records.add(
+        OperationTxRecord(
+          txId: tx.id,
+          before: before,
+          after: OperationLogService.snapshot(tx),
+        ),
+      );
     }
+    await OperationLogService.log(
+      kind: OperationKind.move,
+      title:
+          'نقل ${items.length} حركة من «${widget.account.name}» إلى «${target.name}»',
+      records: records,
+    );
 
     if (!mounted) return;
     _clearSelection();
@@ -294,10 +338,25 @@ class _AccountScreenState extends State<AccountScreen> {
     if (!ok) return;
 
     final now = DateTime.now();
+    final records = <OperationTxRecord>[];
     for (final tx in items) {
+      final before = OperationLogService.snapshot(tx);
       tx.applyStatus(status, at: now);
       await tx.save();
+      records.add(
+        OperationTxRecord(
+          txId: tx.id,
+          before: before,
+          after: OperationLogService.snapshot(tx),
+        ),
+      );
     }
+    await OperationLogService.log(
+      kind: OperationKind.statusChange,
+      title:
+          'تحويل ${items.length} حركة إلى «$label» في «${widget.account.name}»',
+      records: records,
+    );
 
     if (!mounted) return;
     _clearSelection();
@@ -314,9 +373,21 @@ class _AccountScreenState extends State<AccountScreen> {
     );
     if (!ok) return;
 
+    final records = <OperationTxRecord>[
+      for (final tx in items)
+        OperationTxRecord(
+          txId: tx.id,
+          before: OperationLogService.snapshot(tx),
+        ),
+    ];
     for (final tx in items) {
       await tx.delete();
     }
+    await OperationLogService.log(
+      kind: OperationKind.delete,
+      title: 'حذف ${items.length} حركة من «${widget.account.name}»',
+      records: records,
+    );
 
     if (!mounted) return;
     _clearSelection();
@@ -1340,6 +1411,64 @@ class _AccountScreenState extends State<AccountScreen> {
     );
   }
 
+  Widget _buildFocusBanner(BuildContext context, bool focusActive) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withValues(alpha: .55),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.primary.withValues(alpha: .35)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.history_rounded, color: cs.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  focusActive
+                      ? 'حركات من سجل العمليات (${_focusTxIds.length})'
+                      : 'تم تحديد حركات العملية ضمن كل الحركات',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: cs.onPrimaryContainer,
+                  ),
+                ),
+                if ((widget.selectionTitle ?? '').isNotEmpty)
+                  Text(
+                    widget.selectionTitle!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: cs.onPrimaryContainer.withValues(alpha: .8),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () =>
+                setState(() => _showOnlyFocused = !_showOnlyFocused),
+            child: Text(focusActive ? 'عرض كل الحركات' : 'عرضها فقط'),
+          ),
+          IconButton(
+            tooltip: 'إغلاق',
+            onPressed: () => setState(() {
+              _focusTxIds.clear();
+              _showOnlyFocused = false;
+            }),
+            icon: const Icon(Icons.close_rounded, size: 20),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
@@ -1350,7 +1479,11 @@ class _AccountScreenState extends State<AccountScreen> {
             .toList();
 
         // 🔹 أولاً: نفلتر حسب اليوم + نبقي "مضافة" دائماً
-        final filteredByDay = _filterBySelectedDay(allRaw);
+        // (أو نعرض حركات العملية القادمة من سجل العمليات فقط)
+        final focusActive = _showOnlyFocused && _focusTxIds.isNotEmpty;
+        final filteredByDay = focusActive
+            ? allRaw.where((t) => _focusTxIds.contains(t.id)).toList()
+            : _filterBySelectedDay(allRaw);
 
         // 🔹 بعدها نطبق البحث
         final all = filteredByDay.where(_matchesQuery).toList();
@@ -1577,29 +1710,33 @@ class _AccountScreenState extends State<AccountScreen> {
 
                               const SizedBox(height: 10),
 
+                              if (_focusTxIds.isNotEmpty)
+                                _buildFocusBanner(context, focusActive),
+
                               // 🔹 اختيار التاريخ (اليوم / يوم آخر)
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: TextButton.icon(
-                                  onPressed: () async {
-                                    final picked = await showDatePicker(
-                                      context: context,
-                                      initialDate: _selectedDay,
-                                      firstDate: DateTime(2020),
-                                      lastDate: DateTime.now(),
-                                    );
-                                    if (picked != null) {
-                                      setState(() {
-                                        _selectedDay = picked;
-                                      });
-                                    }
-                                  },
-                                  icon: const Icon(Icons.calendar_month),
-                                  label: Text(
-                                    "التاريخ: ${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}",
+                              if (!focusActive)
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: TextButton.icon(
+                                    onPressed: () async {
+                                      final picked = await showDatePicker(
+                                        context: context,
+                                        initialDate: _selectedDay,
+                                        firstDate: DateTime(2020),
+                                        lastDate: DateTime.now(),
+                                      );
+                                      if (picked != null) {
+                                        setState(() {
+                                          _selectedDay = picked;
+                                        });
+                                      }
+                                    },
+                                    icon: const Icon(Icons.calendar_month),
+                                    label: Text(
+                                      "التاريخ: ${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}",
+                                    ),
                                   ),
                                 ),
-                              ),
 
                               if (_query.isNotEmpty)
                                 Padding(

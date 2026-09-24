@@ -1,5 +1,6 @@
 // lib/screens/settings_screen.dart
 import 'package:flutter/material.dart';
+import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
 
@@ -26,6 +27,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _currencyDivisorController = TextEditingController();
   final _bubbleActionLabelController = TextEditingController();
   final _bubbleActionValueController = TextEditingController();
+  final _forbiddenController = TextEditingController();
+  final _forbiddenPhraseController = TextEditingController();
+
+  // تفضيلات تصميم شاشة الفقاعات
+  BubbleUiPrefs _bubblePrefs = const BubbleUiPrefs();
 
   // إضافة مجموعة/عملة جديدة (alias + display name)
   final _currencyKeyController = TextEditingController();
@@ -101,7 +107,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           )
           .toList(),
+      forbiddenWords: List<String>.from(settings!.forbiddenWords),
+      forbiddenPhrases: List<String>.from(settings!.forbiddenPhrases),
+      bubbleUiPrefs: Map<String, dynamic>.from(settings!.bubbleUiPrefs),
     );
+    _bubblePrefs = BubbleUiPrefs.fromSettings(settings);
 
     _sortAll();
   }
@@ -120,6 +130,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _currencyDivisorController.dispose();
     _bubbleActionLabelController.dispose();
     _bubbleActionValueController.dispose();
+    _forbiddenController.dispose();
+    _forbiddenPhraseController.dispose();
     _currencyKeyController.dispose();
     _currencyValueController.dispose();
     for (final c in _aliasCtrls.values) {
@@ -143,7 +155,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     settings!.companyUserNames.sort(_ci);
     settings!.ignoredWords.sort(_ci);
     settings!.lineIgnoredWords.sort(_ci);
+    settings!.forbiddenWords.sort(_ci);
+    settings!.forbiddenPhrases.sort(_ci);
     setState(() {});
+  }
+
+  void _updateBubblePrefs(BubbleUiPrefs prefs) {
+    setState(() {
+      _bubblePrefs = prefs;
+      settings!.bubbleUiPrefs = prefs.toMap();
+    });
   }
 
   void _showSnack(String msg) {
@@ -992,7 +1013,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required String title,
     required String subtitle,
     required Color color,
-    required int count,
+    int? count,
     required List<Widget> children,
     List<Widget> headerActions = const [],
   }) {
@@ -1039,7 +1060,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           ),
                         ),
-                        _countPill(context, count, color),
+                        if (count != null) _countPill(context, count, color),
                       ],
                     ),
                     const SizedBox(height: 5),
@@ -1192,6 +1213,287 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             );
           },
+        ),
+      ],
+    );
+  }
+
+  // ===== تخصيص شاشة الفقاعات =====
+  Widget _colorRow({
+    required String label,
+    required int selected,
+    required ValueChanged<int> onPick,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: BubbleUiPrefs.palette.map((c) {
+              final isSel = c == selected;
+              return InkWell(
+                onTap: () => onPick(c),
+                customBorder: const CircleBorder(),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: Color(c),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: isSel ? scheme.onSurface : Colors.transparent,
+                      width: 2.4,
+                    ),
+                    boxShadow: isSel
+                        ? [
+                            BoxShadow(
+                              color: Color(c).withValues(alpha: .45),
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: isSel
+                      ? const Icon(Icons.check, color: Colors.white, size: 18)
+                      : null,
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _prefSwitch({
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    required IconData icon,
+  }) {
+    return SwitchListTile.adaptive(
+      contentPadding: EdgeInsets.zero,
+      value: value,
+      onChanged: onChanged,
+      secondary: Icon(icon),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
+      subtitle: Text(subtitle, style: TextStyle(color: _mutedText(context))),
+    );
+  }
+
+  Widget _bubblePreview() {
+    final p = _bubblePrefs;
+    final scheme = Theme.of(context).colorScheme;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+
+    Widget chip(String text, Color? color, {bool strike = false}) {
+      final fg = color == null
+          ? scheme.onSurface.withValues(alpha: .78)
+          : Color.lerp(
+              color,
+              dark ? Colors.white : Colors.black,
+              dark ? .28 : .22,
+            )!;
+      return Container(
+        padding: p.compact
+            ? const EdgeInsets.symmetric(horizontal: 7, vertical: 4)
+            : const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: (color ?? scheme.onSurface).withValues(
+            alpha: color == null ? .06 : .14,
+          ),
+          borderRadius: BorderRadius.circular(p.compact ? 10 : 14),
+          border: Border.all(
+            color: (color ?? scheme.onSurface).withValues(
+              alpha: color == null ? .14 : .75,
+            ),
+          ),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: fg,
+            fontSize: p.tokenFontSize,
+            fontWeight: FontWeight.w700,
+            decoration: strike ? TextDecoration.lineThrough : null,
+            decorationColor: fg,
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: .45),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Wrap(
+        spacing: p.compact ? 6 : 8,
+        runSpacing: p.compact ? 6 : 8,
+        children: [
+          chip('المستفيد', null),
+          chip('أحمد', p.nameColorValue),
+          chip('علي', p.nameColorValue),
+          chip('500', p.amountColorValue),
+          chip('دولار', p.currencyColorValue),
+          chip('المرسل', const Color(0xFFD84315), strike: true),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBubbleCustomizationSection() {
+    const color = Colors.indigo;
+    final p = _bubblePrefs;
+    return _sectionCard(
+      icon: Icons.palette_rounded,
+      title: 'تخصيص شاشة الفقاعات',
+      subtitle:
+          'غيّر شكل وطريقة عمل شاشة تحليل الحركات (الفقاعات): حجم الخط، الألوان، طريقة العرض والتنبيهات.',
+      color: color,
+      headerActions: [
+        _modernIconButton(
+          tooltip: 'استعادة الافتراضي',
+          onPressed: () => _updateBubblePrefs(const BubbleUiPrefs()),
+          icon: Icons.restart_alt_rounded,
+          color: color,
+        ),
+      ],
+      children: [
+        _bubblePreview(),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            const Icon(Icons.format_size_rounded),
+            const SizedBox(width: 8),
+            const Text(
+              'حجم خط الكلمات',
+              style: TextStyle(fontWeight: FontWeight.w800),
+            ),
+            Expanded(
+              child: Slider(
+                value: p.tokenFontSize,
+                min: BubbleUiPrefs.minFontSize,
+                max: BubbleUiPrefs.maxFontSize,
+                divisions:
+                    (BubbleUiPrefs.maxFontSize - BubbleUiPrefs.minFontSize)
+                        .round(),
+                label: p.tokenFontSize.toStringAsFixed(0),
+                onChanged: (v) =>
+                    _updateBubblePrefs(p.copyWith(tokenFontSize: v)),
+              ),
+            ),
+            Text(
+              p.tokenFontSize.toStringAsFixed(0),
+              style: const TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ],
+        ),
+        _prefSwitch(
+          title: 'عرض مضغوط',
+          subtitle: 'فقاعات أصغر ومسافات أقل لعرض رسائل أكثر',
+          value: p.compact,
+          icon: Icons.density_small_rounded,
+          onChanged: (v) => _updateBubblePrefs(p.copyWith(compact: v)),
+        ),
+        _prefSwitch(
+          title: 'إظهار المرسل والوقت',
+          subtitle: 'اسم مرسل الرسالة ووقتها أعلى كل فقاعة',
+          value: p.showSenderHeader,
+          icon: Icons.person_outline_rounded,
+          onChanged: (v) => _updateBubblePrefs(p.copyWith(showSenderHeader: v)),
+        ),
+        _prefSwitch(
+          title: 'إظهار دليل الألوان',
+          subtitle: 'شرح مختصر لألوان الفقاعات أعلى الشاشة',
+          value: p.showLegend,
+          icon: Icons.legend_toggle_rounded,
+          onChanged: (v) => _updateBubblePrefs(p.copyWith(showLegend: v)),
+        ),
+        _prefSwitch(
+          title: 'إظهار الأزرار السريعة',
+          subtitle: 'أزرار الفقاعة المعرفة في قسم «أزرار الفقاعة»',
+          value: p.showQuickActions,
+          icon: Icons.touch_app_outlined,
+          onChanged: (v) => _updateBubblePrefs(p.copyWith(showQuickActions: v)),
+        ),
+        _prefSwitch(
+          title: 'غير المكتمل أولًا',
+          subtitle: 'ترتيب الفقاعات الناقصة قبل الجاهزة (وإلا الترتيب الزمني)',
+          value: p.incompleteFirst,
+          icon: Icons.sort_rounded,
+          onChanged: (v) => _updateBubblePrefs(p.copyWith(incompleteFirst: v)),
+        ),
+        _prefSwitch(
+          title: 'تمديد الاسم تلقائيًا',
+          subtitle:
+              'عند الضغط على كلمة يمتد الاسم حتى نهاية السطر أو أول كلمة ممنوعة/رقم/عملة',
+          value: p.autoExtendName,
+          icon: Icons.keyboard_double_arrow_left_rounded,
+          onChanged: (v) => _updateBubblePrefs(p.copyWith(autoExtendName: v)),
+        ),
+        _prefSwitch(
+          title: 'تأكيد قبل حفظ رسالة فيها جملة ممنوعة',
+          subtitle: 'يظهر تنبيه يعرض الجمل الممنوعة قبل الحفظ',
+          value: p.confirmForbiddenPhrase,
+          icon: Icons.gpp_maybe_rounded,
+          onChanged: (v) =>
+              _updateBubblePrefs(p.copyWith(confirmForbiddenPhrase: v)),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            const Icon(Icons.manage_search_rounded),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'فحص التكرار (نفس الاسم والمبلغ والعملة): آخر ${p.duplicateDays} يومًا',
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              ),
+            ),
+          ],
+        ),
+        Slider(
+          value: p.duplicateDays.clamp(1, 90).toDouble(),
+          min: 1,
+          max: 90,
+          divisions: 89,
+          label: '${p.duplicateDays}',
+          onChanged: (v) =>
+              _updateBubblePrefs(p.copyWith(duplicateDays: v.round())),
+        ),
+        const SizedBox(height: 6),
+        _colorRow(
+          label: 'لون الاسم',
+          selected: p.nameColor,
+          onPick: (c) => _updateBubblePrefs(p.copyWith(nameColor: c)),
+        ),
+        _colorRow(
+          label: 'لون المبلغ',
+          selected: p.amountColor,
+          onPick: (c) => _updateBubblePrefs(p.copyWith(amountColor: c)),
+        ),
+        _colorRow(
+          label: 'لون العملة',
+          selected: p.currencyColor,
+          onPick: (c) => _updateBubblePrefs(p.copyWith(currencyColor: c)),
+        ),
+        Text(
+          'اضغط «حفظ الإعدادات» لتطبيق التغييرات.',
+          style: TextStyle(
+            color: _mutedText(context),
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
+          ),
         ),
       ],
     );
@@ -1851,6 +2153,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
               addHint: 'أدخل اسم المستخدم كما يظهر في الرسائل',
             ),
             _buildBubbleActionsSection(),
+            _buildBubbleCustomizationSection(),
+            _buildKeywordSection(
+              'الكلمات الممنوعة',
+              settings!.forbiddenWords,
+              _forbiddenController,
+              icon: Icons.block_rounded,
+              color: Colors.deepOrange,
+              subtitle:
+                  'كلمات لا يمكن أن تكون جزءًا من الاسم: يتوقف عندها تحديد الاسم، وإذا انتهى بها سطر فإن السطر الذي يليه لا يُعتبر اسم المستفيد (مثل: المرسل).',
+              addHint: 'أدخل كلمة ممنوعة مثل: المرسل',
+            ),
+            _buildKeywordSection(
+              'الجمل الممنوعة',
+              settings!.forbiddenPhrases,
+              _forbiddenPhraseController,
+              icon: Icons.gpp_bad_rounded,
+              color: Colors.red.shade700,
+              subtitle:
+                  'إذا ظهرت جملة من هذه القائمة داخل رسالة يتم تمييزها بوضوح في الفقاعات والتنبيه عليها قبل الحفظ.',
+              addHint: 'أدخل جملة ممنوعة مثل: لا تسلم',
+            ),
             _buildKeywordSection(
               'الكلمات المهملة',
               settings!.ignoredWords,
