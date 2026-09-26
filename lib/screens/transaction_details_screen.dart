@@ -15,6 +15,7 @@ import '../database_service.dart';
 import '../models.dart';
 import 'transaction_history_screen.dart';
 import '../utils/web_saver.dart' as web_saver;
+import '../utils/amount_format.dart';
 
 class TransactionDetailsScreen extends StatefulWidget {
   final Account account;
@@ -39,20 +40,8 @@ class _TransactionDetailsScreenState extends State<TransactionDetailsScreen> {
 
   bool _busy = false;
 
-  String _formatAmount(double v) {
-    final s = v.toStringAsFixed(2);
-    final parts = s.split('.');
-    final intPart = parts[0];
-    final dec = parts[1];
-    final buf = StringBuffer();
-    for (int i = 0; i < intPart.length; i++) {
-      final idx = intPart.length - 1 - i;
-      buf.write(intPart[intPart.length - 1 - i]);
-      if (i % 3 == 2 && idx != 0) buf.write('.');
-    }
-    final withSep = buf.toString().split('').reversed.join();
-    return '$withSep,$dec';
-  }
+  /// نقطة بين كل 3 خانات، والكسور بفاصلة فقط إن وُجدت (250.000 / 1.234,5)
+  String _formatAmount(double v) => AmountFormat.display(v);
 
   String _formatDateTime(DateTime? dt) {
     if (dt == null) return '—';

@@ -22,6 +22,7 @@ import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
+import '../widgets/scroll_edge_buttons.dart';
 
 class VerifyReceiveScreen extends StatefulWidget {
   final Account account;
@@ -77,6 +78,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   _BubbleSort _bubbleSort = _BubbleSort.original;
   bool _compactMode = false;
   bool _showMessagePanel = true;
+
+  /// قائمة الفقاعات (لزرّي الصعود إلى الأعلى والنزول إلى الأسفل)
+  final ScrollController _listScroll = ScrollController();
   bool _showSimilarCandidates = true;
   bool _showCompactTopDock = false;
 
@@ -209,6 +213,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       b.dispose();
     }
     _progress.dispose();
+    _listScroll.dispose();
     super.dispose();
   }
 
@@ -408,7 +413,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
   /// مدى مطابقة مبلغ الحركة وعملتها لمبلغ الرسالة وعملتها: نقارن المبلغ الأول،
   /// والثاني (بعملته)، ومجموعهما إن كانا بنفس العملة، ونعتمد الأقرب.
-  /// العملة متوافقة إلا إذا عُرفت العملتان وكانتا مختلفتين، والرموز المترادفة
+  /// العملة لا تُشترط للمطابقة (الاسم + المبلغ يكفيان)، لكنها تُفضَّل وتُنبَّه:
+  /// متوافقة إلا إذا عُرفت العملتان وكانتا مختلفتين، والرموز المترادفة
   /// في الإعدادات ($ / USD / دولار) عملة واحدة.
   _AmountFit _amountFit(
     TransactionModel tx,
@@ -429,8 +435,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       final cmp = _currency.compare(p.currency, messageKey);
       final fit = _AmountFit(
         delta: amount == null ? 0.0 : (p.value - amount).abs(),
-        currencyOk: cmp != false,
-        currencyExact: cmp == true,
+        currency: cmp == null
+            ? rm.CurrencyFit.unknown
+            : (cmp ? rm.CurrencyFit.exact : rm.CurrencyFit.conflict),
         part: p.part,
       );
       if (best == null || fit.betterThan(best)) best = fit;
@@ -450,20 +457,17 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     return '$first + ${_formatAmount(tx.secondAmount!)} ${_secondCurrencyOf(tx)}';
   }
 
-  /// مفتاح «التوأم»: حركات بنفس الاسم والمبلغ والعملة تمامًا
+  /// مفتاح «التوأم»: حركات بنفس الاسم والمبلغ تمامًا (العملة لا تدخل؛ بين
+  /// التوائم يُفضَّل ما عملته مطابقة للرسالة ثم الأقدم)
   String _twinKeyOf(TransactionModel tx) {
     final b = StringBuffer()
       ..write(_pending.fullKeyOf(tx.id))
       ..write('|')
-      ..write(tx.amount.toStringAsFixed(4))
-      ..write('|')
-      ..write(_currency.canonicalOf(tx.currency));
+      ..write(tx.amount.toStringAsFixed(4));
     if (tx.hasSecondAmount) {
       b
         ..write('|')
-        ..write(tx.secondAmount!.toStringAsFixed(4))
-        ..write('|')
-        ..write(_currency.canonicalOf(_secondCurrencyOf(tx)));
+        ..write(tx.secondAmount!.toStringAsFixed(4));
     }
     return b.toString();
   }
@@ -476,7 +480,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   /// يعيد حساب مرشحي الفقاعة. درجات تطابق الاسم: 3 = مطابق تمامًا ،
   /// 2 = اسم الحركة ظاهر في الرسالة أو جزء متصل من الاسم (أو العكس) ،
   /// 1 = كلمتان مشتركتان على الأقل. المطابقة «المؤكدة» = درجة 2 أو 3 مع نفس
-  /// المبلغ وعملة متوافقة. الاختيار نفسه يتم في [_autoAssign].
+  /// المبلغ، والعملة لا تُشترط (تُفضَّل المطابقة ويظهر تنبيه عند اختلافها).
+  /// الاختيار نفسه يتم في [_autoAssign].
   void _refreshCandidates(_BubbleState st) {
     if (st.isReadOnly) return;
 
@@ -541,7 +546,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             pick: rm.AutoPick(
               txId: tx.id,
               name: m ?? name,
-              currencyExact: fit.currencyExact,
+              currency: fit.currency,
               twinKey: _twinKeyOf(tx),
               beforeMessage: latest == null || !tx.date.isAfter(latest),
               dateMillis: tx.date.millisecondsSinceEpoch,
@@ -559,17 +564,22 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         st.amountCandidateValues.length > 1) {
       double? bestValue;
       _Candidate? bestHit;
+      var bestCurrency = rm.CurrencyFit.conflict;
       for (final v in st.amountCandidateValues) {
         if (st.amount != null && (v - st.amount!).abs() <= _AmountFit.tol) {
           continue;
         }
         for (final c in st.candidates) {
           if (c.rank < 2) continue;
-          if (!_amountFit(c.tx, v, st.currencyKey).matches) continue;
-          if (bestHit == null ||
-              rm.AutoPick.compareQuality(c.pick, bestHit.pick) > 0) {
+          final fitV = _amountFit(c.tx, v, st.currencyKey);
+          if (!fitV.matches) continue;
+          final q = bestHit == null
+              ? 1
+              : rm.AutoPick.compareQuality(c.pick, bestHit.pick);
+          if (q > 0 || (q == 0 && fitV.currency.index > bestCurrency.index)) {
             bestHit = c;
             bestValue = v;
+            bestCurrency = fitV.currency;
           }
         }
       }
@@ -610,13 +620,17 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     final amountNow = amount != null && fit.matches;
     TxPastState? oldAmount;
     if (amount != null && !amountNow) {
+      // العملة لا تُشترط: نفضّل مبلغًا قديمًا بعملة متوافقة، وإلا أي عملة
+      TxPastState? anyCurrency;
       for (final s in states) {
-        if ((s.amount - amount).abs() <= _AmountFit.tol &&
-            _currency.compare(s.currency, st.currencyKey) != false) {
+        if ((s.amount - amount).abs() > _AmountFit.tol) continue;
+        if (_currency.compare(s.currency, st.currencyKey) != false) {
           oldAmount = s;
           break;
         }
+        anyCurrency ??= s;
       }
+      oldAmount ??= anyCurrency;
     }
     if (!usePastName && oldAmount == null) return null;
     return _HistoryHit(
@@ -656,9 +670,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   }
 
   /// الاختيار التلقائي لكل الفقاعات دفعة واحدة:
-  /// - المطابقة المؤكدة (نفس الاسم ونفس المبلغ) تُختار تلقائيًا دائمًا.
-  /// - عند وجود أكثر من حركة متطابقة تمامًا (نفس الاسم والمبلغ والعملة)
-  ///   تُختار الأقدم، وتأخذ الرسالة التالية الحركة التالية.
+  /// - المطابقة المؤكدة (نفس الاسم ونفس المبلغ، والعملة لا تُشترط) تُختار
+  ///   تلقائيًا دائمًا.
+  /// - عند وجود أكثر من حركة متطابقة تمامًا (نفس الاسم والمبلغ) تُفضَّل التي
+  ///   عملتها مطابقة للرسالة ثم الأقدم، وتأخذ الرسالة التالية الحركة التالية.
   /// - الأقوى مطابقة يسبق على نفس الحركة، ولا تنزل فقاعة إلى مرشح أضعف إذا
   ///   كانت أفضل مطابقة لها محجوزة (رسالة مكررة مثلًا).
   /// - الاختيار اليدوي لا يُلمس، والفقاعة التي أزال المستخدم اختيارها لا يُعاد
@@ -724,7 +739,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             : (d.twins <= 10
                   ? '${d.twins} حركات مضافة'
                   : '${d.twins} حركة مضافة');
-        return 'توجد $what بنفس الاسم والمبلغ تمامًا، فاختيرت الأقدم المتاحة تلقائيًا — يمكنك تغييرها.';
+        return 'توجد $what بنفس الاسم والمبلغ تمامًا، فاختيرت الأقدم المتاحة تلقائيًا (مع تفضيل العملة المطابقة للرسالة) — يمكنك تغييرها.';
       case rm.AutoSelectOutcome.bestTaken:
         return 'المطابقة الأنسب لهذه الرسالة محددة في فقاعة أخرى أو مستلمة مسبقًا (قد تكون الرسالة مكررة)، لذلك لم يُختر بديل أضعف تلقائيًا.';
       case rm.AutoSelectOutcome.ambiguous:
@@ -914,8 +929,11 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         }
 
         if (!fit.currencyOk) {
+          final oldCurrency = _pastCurrencyMatching(tx, st);
           st.warningTexts.add(
-            'تحذير: عملة الحركة "${tx.beneficiary}" (${tx.currency}) تختلف عن عملة الرسالة (${_currencyLabel(st.currencyKey)}).',
+            oldCurrency != null
+                ? 'العملة في الرسالة ($oldCurrency) هي عملة الحركة قبل التعديل — العملة الجديدة ${tx.currency}.'
+                : 'تحذير: عملة الحركة "${tx.beneficiary}" (${tx.currency}) تختلف عن عملة الرسالة (${_currencyLabel(st.currencyKey)}).',
           );
         }
       }
@@ -926,6 +944,21 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     }
 
     st.ready = st.selectedTxIds.isNotEmpty;
+  }
+
+  /// عملة قديمة للحركة (من سجل التعديل) كانت مطابقة لعملة الرسالة وبنفس
+  /// المبلغ — لشرح اختلاف العملة بأنه تعديل لاحق. null إن لم توجد.
+  String? _pastCurrencyMatching(TransactionModel tx, _BubbleState st) {
+    final amount = st.amount;
+    final states = _pastStates[tx.id];
+    if (amount == null || states == null) return null;
+    for (final s in states) {
+      if ((s.amount - amount).abs() <= _AmountFit.tol &&
+          _currency.compare(s.currency, st.currencyKey) == true) {
+        return s.currency;
+      }
+    }
+    return null;
   }
 
   // ====== عرض الفقاعات حسب الفلترة والفرز ======
@@ -1159,39 +1192,43 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
             ),
             Expanded(
-              child: NotificationListener<ScrollNotification>(
-                onNotification: _handleListScroll,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 260),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  child: _building
-                      ? _buildingState()
-                      : visible.isEmpty
-                      ? _emptyState()
-                      : ListView.builder(
-                          key: ValueKey(
-                            '${_bubbleFilter.name}-${_bubbleSort.name}-${visible.length}-$_compactMode-$_showMessagePanel',
-                          ),
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
-                          itemCount: visible.length,
-                          itemBuilder: (context, i) =>
-                              TweenAnimationBuilder<double>(
-                                tween: Tween(begin: 0, end: 1),
-                                duration: Duration(
-                                  milliseconds: 220 + ((i < 8 ? i : 8) * 35),
-                                ),
-                                curve: Curves.easeOutCubic,
-                                builder: (context, v, child) => Opacity(
-                                  opacity: v,
-                                  child: Transform.translate(
-                                    offset: Offset(0, 14 * (1 - v)),
-                                    child: child,
+              child: ScrollEdgeButtons(
+                controller: _listScroll,
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: _handleListScroll,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 260),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: _building
+                        ? _buildingState()
+                        : visible.isEmpty
+                        ? _emptyState()
+                        : ListView.builder(
+                            key: ValueKey(
+                              '${_bubbleFilter.name}-${_bubbleSort.name}-${visible.length}-$_compactMode-$_showMessagePanel',
+                            ),
+                            controller: _listScroll,
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
+                            itemCount: visible.length,
+                            itemBuilder: (context, i) =>
+                                TweenAnimationBuilder<double>(
+                                  tween: Tween(begin: 0, end: 1),
+                                  duration: Duration(
+                                    milliseconds: 220 + ((i < 8 ? i : 8) * 35),
                                   ),
+                                  curve: Curves.easeOutCubic,
+                                  builder: (context, v, child) => Opacity(
+                                    opacity: v,
+                                    child: Transform.translate(
+                                      offset: Offset(0, 14 * (1 - v)),
+                                      child: child,
+                                    ),
+                                  ),
+                                  child: _bubbleCard(visible[i]),
                                 ),
-                                child: _bubbleCard(visible[i]),
-                              ),
-                        ),
+                          ),
+                  ),
                 ),
               ),
             ),
@@ -3238,6 +3275,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                             text: 'من سجل التعديل',
                             color: _historyColor,
                           ),
+                        if (st.amount != null && !c.currencyOk)
+                          _TinyPill(
+                            icon: Icons.currency_exchange_rounded,
+                            text: 'عملة مختلفة',
+                            color: Colors.orange.shade800,
+                          ),
                         if (c.exact && c.amountPart > 0)
                           _TinyPill(
                             icon: Icons.call_merge,
@@ -4016,25 +4059,26 @@ class _AmountFit {
   static const double tol = 0.0001;
 
   final double delta;
-  final bool currencyOk;
-  final bool currencyExact;
+  final rm.CurrencyFit currency;
   final int part;
 
   const _AmountFit({
     required this.delta,
-    required this.currencyOk,
-    required this.currencyExact,
+    required this.currency,
     required this.part,
   });
 
-  /// نفس المبلغ وعملة متوافقة
-  bool get matches => currencyOk && delta <= tol;
+  /// العملة غير متعارضة (مطابقة أو غير معروفة)
+  bool get currencyOk => currency != rm.CurrencyFit.conflict;
+
+  /// نفس المبلغ — العملة لا تُشترط (اختلافها تنبيه فقط)
+  bool get matches => delta <= tol;
 
   bool betterThan(_AmountFit o) {
     if (matches != o.matches) return matches;
     if (currencyOk != o.currencyOk) return currencyOk;
     if ((delta - o.delta).abs() > tol) return delta < o.delta;
-    if (currencyExact != o.currencyExact) return currencyExact;
+    if (currency != o.currency) return currency.index > o.currency.index;
     return false;
   }
 }

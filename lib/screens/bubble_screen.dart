@@ -10,8 +10,10 @@ import '../models.dart';
 import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
 import '../services/settings_words.dart';
+import '../utils/amount_format.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
+import '../widgets/scroll_edge_buttons.dart';
 import 'add_edit_transaction_screen.dart';
 import 'operations_log_screen.dart';
 import 'settings_screen.dart';
@@ -158,6 +160,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
   // إدخال يدوي للاسم
   final Map<int, String> _nameOverride = {};
   BubbleActionMode _viewMode = BubbleActionMode.add;
+
+  /// قائمة الفقاعات (لزرّي الصعود إلى الأعلى والنزول إلى الأسفل)
+  final ScrollController _listScroll = ScrollController();
   bool _isSending = false;
   final Set<int> _savedSegments = {};
   final Map<int, _SavedAddSummary> _savedAddSummaries = {};
@@ -253,6 +258,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   void dispose() {
     _analysisGeneration++;
     _progress.dispose();
+    _listScroll.dispose();
     super.dispose();
   }
 
@@ -2282,7 +2288,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   Future<double?> _numberDialog({required String title, double? initial}) {
     final ctrl = TextEditingController(
-      text: initial == null ? '' : _fmtAmount(initial),
+      text: initial == null ? '' : _rawAmount(initial),
     );
     return showDialog<double>(
       context: context,
@@ -2419,7 +2425,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     double? currentAmount,
   ) async {
     final ctrl = TextEditingController(
-      text: currentAmount != null ? currentAmount.toStringAsFixed(2) : '',
+      text: currentAmount != null ? _rawAmount(currentAmount) : '',
     );
     double? result;
 
@@ -2881,7 +2887,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     double? result = textVal ?? numericVal;
     String mode = (textVal != null) ? 'text' : 'num';
     final customCtrl = TextEditingController(
-      text: result?.toStringAsFixed(2) ?? '',
+      text: result == null ? '' : _rawAmount(result),
     );
 
     await showDialog(
@@ -2903,7 +2909,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                           groupValue: mode,
                           onChanged: (v) => setS(() => mode = v!),
                           title: Text(
-                            "استخدام النص المحسوب: ${textVal!.toStringAsFixed(2)}",
+                            "استخدام النص المحسوب: ${_fmtAmount(textVal!)}",
                           ),
                         ),
                       if (numericVal != null)
@@ -2912,7 +2918,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                           groupValue: mode,
                           onChanged: (v) => setS(() => mode = v!),
                           title: Text(
-                            "استخدام الرقم: ${numericVal!.toStringAsFixed(2)}",
+                            "استخدام الرقم: ${_fmtAmount(numericVal!)}",
                           ),
                         ),
                       RadioListTile<String>(
@@ -3173,13 +3179,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
     ).showSnackBar(SnackBar(content: Text('تم نسخ الاسم: $name')));
   }
 
-  String _fmtAmount(double value) {
+  /// المبلغ للعرض: نقطة بين كل 3 خانات والكسور بفاصلة إن وُجدت (250.000)
+  String _fmtAmount(double value) => AmountFormat.display(value);
+
+  /// المبلغ بالأرقام الخام لحقول الإدخال والنسخ (250000 أو 1234.50)
+  String _rawAmount(double value) {
     final isInt = value == value.roundToDouble();
     return isInt ? value.toStringAsFixed(0) : value.toStringAsFixed(2);
   }
 
   Future<void> _copyAmountToClipboard(double amount) async {
-    final text = _fmtAmount(amount);
+    final text = _rawAmount(amount);
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
 
@@ -3845,7 +3855,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            '${tx.amount.toStringAsFixed(2)} ${tx.currency}',
+                            '${_fmtAmount(tx.amount)} ${tx.currency}',
                             style: TextStyle(
                               color: color,
                               fontWeight: FontWeight.w800,
@@ -4090,7 +4100,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  '${w.draft.beneficiary} | ${w.draft.amount.toStringAsFixed(2)} ${w.draft.currency}$movementText',
+                                  '${w.draft.beneficiary} | ${_fmtAmount(w.draft.amount)} ${w.draft.currency}$movementText',
                                   style: const TextStyle(
                                     fontWeight: FontWeight.w900,
                                   ),
@@ -5228,7 +5238,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '${tx.beneficiary} — ${tx.amount.toStringAsFixed(2)} ${tx.currency}',
+                      '${tx.beneficiary} — ${_fmtAmount(tx.amount)} ${tx.currency}',
                       style: const TextStyle(fontWeight: FontWeight.w800),
                     ),
                     const SizedBox(height: 5),
@@ -7388,49 +7398,56 @@ class _BubbleScreenState extends State<BubbleScreen> {
             ),
           ),
 
-          body: ListView.builder(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
-            itemCount: order.length + 1 + (showTrailing ? 1 : 0),
-            itemBuilder: (context, idx) {
-              if (idx == 0) {
-                return _buildBubbleScreenHeader(
-                  context,
-                  addReadyCount: addReadyCount,
-                  editReadyCount: editReadyCount,
-                  cancelReadyCount: cancelReadyCount,
-                );
-              }
-              final k = idx - 1;
-              if (k < order.length) return _buildSegmentCard(context, order[k]);
+          body: ScrollEdgeButtons(
+            controller: _listScroll,
+            child: ListView.builder(
+              controller: _listScroll,
+              // مساحة في الأسفل حتى لا يغطي زرّا الصعود/النزول آخر فقاعة
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 112),
+              itemCount: order.length + 1 + (showTrailing ? 1 : 0),
+              itemBuilder: (context, idx) {
+                if (idx == 0) {
+                  return _buildBubbleScreenHeader(
+                    context,
+                    addReadyCount: addReadyCount,
+                    editReadyCount: editReadyCount,
+                    cancelReadyCount: cancelReadyCount,
+                  );
+                }
+                final k = idx - 1;
+                if (k < order.length) {
+                  return _buildSegmentCard(context, order[k]);
+                }
 
-              if (_analyzing) {
+                if (_analyzing) {
+                  return _inlineInfoBox(
+                    context,
+                    icon: Icons.hourglass_top_rounded,
+                    color: cs.primary,
+                    text:
+                        'جارٍ تحليل ${_segments.length - _selections.length} رسالة متبقية... يمكنك البدء بالفقاعات الظاهرة.',
+                  );
+                }
                 return _inlineInfoBox(
                   context,
-                  icon: Icons.hourglass_top_rounded,
-                  color: cs.primary,
-                  text:
-                      'جارٍ تحليل ${_segments.length - _selections.length} رسالة متبقية... يمكنك البدء بالفقاعات الظاهرة.',
+                  icon: _viewMode == BubbleActionMode.add
+                      ? Icons.add_circle_outline_rounded
+                      : (_viewMode == BubbleActionMode.edit
+                            ? Icons.edit_note_rounded
+                            : Icons.cancel_outlined),
+                  color: _viewMode == BubbleActionMode.add
+                      ? _chipGreen
+                      : (_viewMode == BubbleActionMode.edit
+                            ? _chipEdit
+                            : _chipRed),
+                  text: _viewMode == BubbleActionMode.add
+                      ? 'لا توجد فقاعات إضافة في هذا النص.'
+                      : (_viewMode == BubbleActionMode.edit
+                            ? 'لا توجد فقاعات تعديل في هذا النص.'
+                            : 'لا توجد فقاعات إلغاء في هذا النص.'),
                 );
-              }
-              return _inlineInfoBox(
-                context,
-                icon: _viewMode == BubbleActionMode.add
-                    ? Icons.add_circle_outline_rounded
-                    : (_viewMode == BubbleActionMode.edit
-                          ? Icons.edit_note_rounded
-                          : Icons.cancel_outlined),
-                color: _viewMode == BubbleActionMode.add
-                    ? _chipGreen
-                    : (_viewMode == BubbleActionMode.edit
-                          ? _chipEdit
-                          : _chipRed),
-                text: _viewMode == BubbleActionMode.add
-                    ? 'لا توجد فقاعات إضافة في هذا النص.'
-                    : (_viewMode == BubbleActionMode.edit
-                          ? 'لا توجد فقاعات تعديل في هذا النص.'
-                          : 'لا توجد فقاعات إلغاء في هذا النص.'),
-              );
-            },
+              },
+            ),
           ),
         ),
       ),

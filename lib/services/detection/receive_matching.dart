@@ -285,15 +285,29 @@ class CurrencyMatcher {
 // 4) الاختيار التلقائي
 // =============================================================
 
-/// مرشح مؤكد (الاسم + المبلغ + العملة) قابل للاختيار التلقائي.
+/// توافق عملة الحركة مع عملة الرسالة. للتفضيل فقط: المطابقة المؤكدة هي
+/// الاسم + المبلغ، والعملة لا تمنع الاختيار التلقائي.
+enum CurrencyFit {
+  /// العملتان معروفتان ومختلفتان.
+  conflict,
+
+  /// إحدى العملتين غير معروفة.
+  unknown,
+
+  /// العملتان معروفتان ومتطابقتان.
+  exact,
+}
+
+/// مرشح مؤكد (الاسم + المبلغ) قابل للاختيار التلقائي.
 class AutoPick {
   final int txId;
   final NameMatch name;
 
-  /// العملة معروفة ومطابقة (أفضل من عملة غير معروفة).
-  final bool currencyExact;
+  /// توافق العملة: لا يدخل في قوة المطابقة، لكن عند وجود أكثر من حركة نفضّل
+  /// العملة المطابقة ثم غير المعروفة ثم المختلفة.
+  final CurrencyFit currency;
 
-  /// حركات بنفس المفتاح متطابقة تمامًا (نفس الاسم والمبلغ والعملة)،
+  /// حركات بنفس المفتاح متطابقة (نفس الاسم والمبلغ، بأي عملة)،
   /// واختيار أي واحدة منها صحيح.
   final String twinKey;
 
@@ -306,23 +320,24 @@ class AutoPick {
   const AutoPick({
     required this.txId,
     required this.name,
-    this.currencyExact = false,
+    this.currency = CurrencyFit.unknown,
     this.twinKey = '',
     this.beforeMessage = true,
     this.dateMillis = 0,
   });
 
-  /// موجب إذا كان [a] أقوى من [b].
-  static int compareQuality(AutoPick a, AutoPick b) {
-    final n = a.name.compareTo(b.name);
-    if (n != 0) return n;
-    if (a.currencyExact != b.currencyExact) return a.currencyExact ? 1 : -1;
-    return 0;
-  }
+  /// موجب إذا كانت مطابقة اسم [a] أقوى من [b]. العملة لا تدخل في القوة.
+  static int compareQuality(AutoPick a, AutoPick b) => a.name.compareTo(b.name);
+
+  /// موجب إذا كانت عملة [a] أنسب من عملة [b].
+  static int compareCurrency(AutoPick a, AutoPick b) =>
+      a.currency.index.compareTo(b.currency.index);
 
   /// ترتيب التفضيل بين مرشحين بنفس القوة (سالب = [a] أولًا):
-  /// ما أُضيف قبل وقت الرسالة، ثم الأقدم.
+  /// العملة الأنسب، ثم ما أُضيف قبل وقت الرسالة، ثم الأقدم.
   static int compareOrder(AutoPick a, AutoPick b) {
+    final c = compareCurrency(b, a);
+    if (c != 0) return c;
     if (a.beforeMessage != b.beforeMessage) return a.beforeMessage ? -1 : 1;
     final d = a.dateMillis.compareTo(b.dateMillis);
     if (d != 0) return d;
@@ -413,10 +428,13 @@ List<AutoSelectDecision> autoSelect(
         _Claim(i, p, requests[i].previous == p.txId),
   ];
   claims.sort((a, b) {
-    // الأقوى أولًا، ثم الاختيار السابق (ثبات)، ثم ترتيب الرسائل، ثم الأقدم
+    // الأقوى اسمًا أولًا، ثم الاختيار السابق (ثبات)، ثم العملة الأنسب (حتى
+    // تأخذ كل رسالة الحركة التي بعملتها)، ثم ترتيب الرسائل، ثم الأقدم
     final q = AutoPick.compareQuality(b.pick, a.pick);
     if (q != 0) return q;
     if (a.isPrevious != b.isPrevious) return a.isPrevious ? -1 : 1;
+    final c = AutoPick.compareCurrency(b.pick, a.pick);
+    if (c != 0) return c;
     if (a.req != b.req) return a.req.compareTo(b.req);
     return AutoPick.compareOrder(a.pick, b.pick);
   });
@@ -431,11 +449,13 @@ List<AutoSelectDecision> autoSelect(
       continue;
     }
     if (!c.isPrevious) {
+      // منافس = حركة أخرى متاحة بنفس قوة الاسم وعملة لا تقل أنسبية وليست توأمًا
       final rivals = requests[i].picks.where(
         (p) =>
             p.txId != c.pick.txId &&
             !taken.contains(p.txId) &&
             AutoPick.compareQuality(p, c.pick) == 0 &&
+            AutoPick.compareCurrency(p, c.pick) >= 0 &&
             !AutoPick.areTwins(p, c.pick),
       );
       if (rivals.isNotEmpty) {
@@ -467,12 +487,17 @@ List<AutoSelectDecision> autoSelect(
       decisions[i] = const AutoSelectDecision(AutoSelectOutcome.bestTaken);
       continue;
     }
-    if (free.every((p) => AutoPick.areTwins(p, free.first))) {
-      taken.add(free.first.txId);
+    final top = free.first;
+    final stillAmbiguous = free.any(
+      (p) =>
+          !AutoPick.areTwins(p, top) && AutoPick.compareCurrency(p, top) >= 0,
+    );
+    if (!stillAmbiguous) {
+      taken.add(top.txId);
       decisions[i] = AutoSelectDecision(
         AutoSelectOutcome.selected,
-        txId: free.first.txId,
-        twins: twinCount(i, free.first),
+        txId: top.txId,
+        twins: twinCount(i, top),
       );
     }
   }

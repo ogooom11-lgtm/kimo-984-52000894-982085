@@ -12,6 +12,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 // تأكد من مسار هذا الاستيراد في مشروعك أو احذفه إذا لم تستخدم الويب
 import '../utils/web_saver.dart' as web_saver;
+import '../database_service.dart';
+import '../utils/amount_format.dart';
 
 /// بيانات الإحصائية
 class ShareStatsData {
@@ -43,6 +45,10 @@ class ShareStatsData {
   final String cancelledLabel;
   final String unreceivedLabel;
 
+  /// حساب شركة: الأقسام إرسال / استقبال / إلغاء مرسل / إلغاء استقبال
+  /// (ألوان وأيقونات خاصة بها، وخيارات عرض محفوظة منفصلة عن المكاتب)
+  final bool isCompany;
+
   const ShareStatsData({
     required this.accountName,
     required this.dateLabel,
@@ -66,6 +72,30 @@ class ShareStatsData {
     this.receivedLabel = 'مستلمة',
     this.cancelledLabel = 'ملغاة',
     this.unreceivedLabel = 'غير مستلمة',
+    this.isCompany = false,
+  });
+}
+
+/// قسم من أقسام الإحصائية: فقاعة في الملخص السريع وبطاقة في التفاصيل
+class _ShareSection {
+  final String label;
+  final int count;
+  final int yesterday;
+  final Map<String, double> totals;
+  final Map<String, int>? counts;
+  final IconData icon;
+  final IconData quickIcon;
+  final List<Color> gradient;
+
+  const _ShareSection({
+    required this.label,
+    required this.count,
+    required this.yesterday,
+    required this.totals,
+    required this.counts,
+    required this.icon,
+    required this.quickIcon,
+    required this.gradient,
   });
 }
 
@@ -85,17 +115,142 @@ class _ShareImagePageState extends State<ShareImagePage> {
   bool _busy = false;
 
   // التحكم العام
-  bool _showDetails = true;
-
-  // خيارات إظهار/إخفاء مفصلة
   bool _showHeader = true;
+
+  // الملخص السريع: إظهار/إخفاء كامل + كل فقاعة لوحدها
   bool _showQuickStats = true;
-  bool _showAddedCard = true;
-  bool _showReceivedCard = true;
-  bool _showCancelledCard = true;
-  bool _showUnreceivedCard = true;
+  final List<bool> _quickShow = [true, true, true, true];
+
+  // التفاصيل: إظهار/إخفاء كامل + كل بطاقة لوحدها
+  bool _showDetails = true;
+  final List<bool> _cardShow = [true, true, true, true];
   bool _showCurrencyRows = true;
   bool _showDeltaStrip = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDisplayPrefs();
+  }
+
+  /// الأقسام الأربعة بالترتيب (مكتب: مضافة/مستلمة/ملغاة/غير مستلمة،
+  /// شركة: إرسال/استقبال/إلغاء مرسل/إلغاء استقبال)
+  List<_ShareSection> _sections() {
+    final d = widget.data;
+    final company = d.isCompany;
+    return [
+      _ShareSection(
+        label: d.addedLabel,
+        count: d.addedCount,
+        yesterday: d.yesterdayAddedCount,
+        totals: d.totalsAdded,
+        counts: d.countsAddedByCurrency,
+        icon: company ? Icons.call_made_rounded : Icons.add_circle_rounded,
+        quickIcon: company
+            ? Icons.call_made_rounded
+            : Icons.add_circle_outline_rounded,
+        gradient: company
+            ? const [Color(0xFF5E35B1), Color(0xFF9575CD)]
+            : const [Colors.blue, Colors.blueAccent],
+      ),
+      _ShareSection(
+        label: d.receivedLabel,
+        count: d.receivedCount,
+        yesterday: d.yesterdayReceivedCount,
+        totals: d.totalsReceived,
+        counts: d.countsReceivedByCurrency,
+        icon: company
+            ? Icons.call_received_rounded
+            : Icons.check_circle_rounded,
+        quickIcon: company
+            ? Icons.call_received_rounded
+            : Icons.check_circle_outline_rounded,
+        gradient: company
+            ? const [Color(0xFF00897B), Color(0xFF4DB6AC)]
+            : const [Colors.green, Colors.lightGreen],
+      ),
+      _ShareSection(
+        label: d.cancelledLabel,
+        count: d.cancelledCount,
+        yesterday: d.yesterdayCancelledCount,
+        totals: d.totalsCancelled,
+        counts: d.countsCancelledByCurrency,
+        icon: company
+            ? Icons.cancel_schedule_send_rounded
+            : Icons.cancel_rounded,
+        quickIcon: company
+            ? Icons.cancel_schedule_send_rounded
+            : Icons.cancel_outlined,
+        gradient: company
+            ? const [Color(0xFFEF6C00), Color(0xFFFFB74D)]
+            : const [Colors.red, Colors.orange],
+      ),
+      _ShareSection(
+        label: d.unreceivedLabel,
+        count: d.unreceivedCount,
+        yesterday: d.yesterdayUnreceivedCount,
+        totals: d.totalsUnreceived,
+        counts: d.countsUnreceivedByCurrency,
+        icon: company ? Icons.cancel_rounded : Icons.hourglass_bottom_rounded,
+        quickIcon: company
+            ? Icons.cancel_outlined
+            : Icons.hourglass_empty_rounded,
+        gradient: company
+            ? const [Color(0xFFD84315), Color(0xFFFF8A65)]
+            : const [Colors.indigo, Colors.deepPurple],
+      ),
+    ];
+  }
+
+  /// =================== حفظ خيارات العرض ===================
+  /// تُحفظ منفصلة للمكاتب وللشركات لأن أقسامهما مختلفة.
+  String get _prefsKey =>
+      widget.data.isCompany ? 'share_design_company' : 'share_design_office';
+
+  void _loadDisplayPrefs() {
+    final raw = DatabaseService.uiPrefsBoxOrNull?.get(_prefsKey);
+    if (raw is! Map) return;
+    bool read(String key, bool fallback) {
+      final v = raw[key];
+      return v is bool ? v : fallback;
+    }
+
+    _showHeader = read('header', true);
+    _showQuickStats = read('quick', true);
+    _showDetails = read('details', true);
+    _showCurrencyRows = read('rows', true);
+    _showDeltaStrip = read('delta', true);
+    for (var i = 0; i < _quickShow.length; i++) {
+      _quickShow[i] = read('q$i', true);
+    }
+    for (var i = 0; i < _cardShow.length; i++) {
+      _cardShow[i] = read('c$i', true);
+    }
+  }
+
+  void _saveDisplayPrefs() {
+    final box = DatabaseService.uiPrefsBoxOrNull;
+    if (box == null) return;
+    box.put(_prefsKey, <String, bool>{
+      'header': _showHeader,
+      'quick': _showQuickStats,
+      'details': _showDetails,
+      'rows': _showCurrencyRows,
+      'delta': _showDeltaStrip,
+      for (var i = 0; i < _quickShow.length; i++) 'q$i': _quickShow[i],
+      for (var i = 0; i < _cardShow.length; i++) 'c$i': _cardShow[i],
+    });
+  }
+
+  void _resetDisplay() {
+    _showHeader = true;
+    _showQuickStats = true;
+    _showDetails = true;
+    _showCurrencyRows = true;
+    _showDeltaStrip = true;
+    _quickShow.fillRange(0, _quickShow.length, true);
+    _cardShow.fillRange(0, _cardShow.length, true);
+  }
 
   /// =================== التقاط الصورة ===================
   Future<Uint8List?> _capturePng() async {
@@ -257,7 +412,10 @@ class _ShareImagePageState extends State<ShareImagePage> {
   }
 
   /// =================== خيارات العرض ===================
+  /// أزرار منفصلة: الملخص السريع (كل فقاعة لوحدها) والتفاصيل (كل بطاقة
+  /// لوحدها)، والاختيارات تُحفظ للمرة القادمة.
   Future<void> _openDisplayOptions() async {
+    final sections = _sections();
     await showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -267,25 +425,59 @@ class _ShareImagePageState extends State<ShareImagePage> {
           textDirection: TextDirection.rtl,
           child: StatefulBuilder(
             builder: (context, setSheet) {
+              final cs = Theme.of(context).colorScheme;
+
               void sync(void Function() fn) {
                 setState(fn);
                 setSheet(() {});
+                _saveDisplayPrefs();
               }
 
               Widget tile({
                 required String title,
                 required bool value,
-                required ValueChanged<bool> onChanged,
+                required ValueChanged<bool>? onChanged,
                 String? subtitle,
                 IconData? icon,
+                Color? iconColor,
+                bool nested = false,
               }) {
-                return SwitchListTile.adaptive(
-                  value: value,
-                  onChanged: onChanged,
-                  secondary: icon == null ? null : Icon(icon),
-                  title: Text(title),
-                  subtitle: subtitle == null ? null : Text(subtitle),
-                  contentPadding: EdgeInsets.zero,
+                return Padding(
+                  padding: EdgeInsetsDirectional.only(start: nested ? 18 : 0),
+                  child: SwitchListTile.adaptive(
+                    value: value,
+                    onChanged: onChanged,
+                    dense: nested,
+                    secondary: icon == null
+                        ? null
+                        : Icon(
+                            icon,
+                            color: onChanged == null ? null : iconColor,
+                          ),
+                    title: Text(title),
+                    subtitle: subtitle == null ? null : Text(subtitle),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                );
+              }
+
+              Widget groupTitle(String text, IconData icon) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 2, bottom: 2),
+                  child: Row(
+                    children: [
+                      Icon(icon, size: 18, color: cs.primary),
+                      const SizedBox(width: 8),
+                      Text(
+                        text,
+                        style: TextStyle(
+                          color: cs.primary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
                 );
               }
 
@@ -303,68 +495,85 @@ class _ShareImagePageState extends State<ShareImagePage> {
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        const SizedBox(height: 12),
-
-                        tile(
-                          title: 'عرض التفاصيل',
-                          subtitle: 'إغلاقه يعطي ملخص سريع فقط',
-                          value: _showDetails,
-                          onChanged: (v) => sync(() => _showDetails = v),
-                          icon: Icons.tune_rounded,
+                        const SizedBox(height: 4),
+                        Text(
+                          widget.data.isCompany
+                              ? 'حساب شركة — الاختيارات تُحفظ لحسابات الشركات'
+                              : 'حساب مكتب — الاختيارات تُحفظ لحسابات المكاتب',
+                          style: TextStyle(
+                            color: cs.onSurfaceVariant,
+                            fontSize: 12.5,
+                          ),
                         ),
+                        const SizedBox(height: 8),
+
                         tile(
                           title: 'إظهار الهيدر',
                           value: _showHeader,
                           onChanged: (v) => sync(() => _showHeader = v),
                           icon: Icons.view_headline_rounded,
                         ),
+
+                        const Divider(height: 24),
+                        groupTitle('الملخص السريع', Icons.dashboard_rounded),
                         tile(
                           title: 'إظهار الملخص السريع',
+                          subtitle: 'الفقاعات الصغيرة في أعلى الصورة',
                           value: _showQuickStats,
                           onChanged: (v) => sync(() => _showQuickStats = v),
                           icon: Icons.dashboard_rounded,
                         ),
+                        for (var i = 0; i < sections.length; i++)
+                          tile(
+                            title: 'فقاعة ${sections[i].label}',
+                            subtitle: 'العدد: ${sections[i].count}',
+                            value: _quickShow[i],
+                            onChanged: _showQuickStats
+                                ? (v) => sync(() => _quickShow[i] = v)
+                                : null,
+                            icon: sections[i].quickIcon,
+                            iconColor: sections[i].gradient.first,
+                            nested: true,
+                          ),
 
-                        const Divider(height: 28),
-
+                        const Divider(height: 24),
+                        groupTitle('التفاصيل', Icons.view_agenda_rounded),
                         tile(
-                          title: 'إظهار قسم ${widget.data.addedLabel}',
-                          value: _showAddedCard,
-                          onChanged: (v) => sync(() => _showAddedCard = v),
-                          icon: Icons.add_circle_rounded,
+                          title: 'عرض التفاصيل',
+                          subtitle: 'بطاقات الأقسام مع مبالغ كل عملة',
+                          value: _showDetails,
+                          onChanged: (v) => sync(() => _showDetails = v),
+                          icon: Icons.tune_rounded,
                         ),
-                        tile(
-                          title: 'إظهار قسم ${widget.data.receivedLabel}',
-                          value: _showReceivedCard,
-                          onChanged: (v) => sync(() => _showReceivedCard = v),
-                          icon: Icons.check_circle_rounded,
-                        ),
-                        tile(
-                          title: 'إظهار قسم ${widget.data.cancelledLabel}',
-                          value: _showCancelledCard,
-                          onChanged: (v) => sync(() => _showCancelledCard = v),
-                          icon: Icons.cancel_rounded,
-                        ),
-                        tile(
-                          title: 'إظهار قسم ${widget.data.unreceivedLabel}',
-                          value: _showUnreceivedCard,
-                          onChanged: (v) => sync(() => _showUnreceivedCard = v),
-                          icon: Icons.hourglass_bottom_rounded,
-                        ),
-
-                        const Divider(height: 28),
-
+                        for (var i = 0; i < sections.length; i++)
+                          tile(
+                            title: 'بطاقة ${sections[i].label}',
+                            subtitle: 'العدد: ${sections[i].count}',
+                            value: _cardShow[i],
+                            onChanged: _showDetails
+                                ? (v) => sync(() => _cardShow[i] = v)
+                                : null,
+                            icon: sections[i].icon,
+                            iconColor: sections[i].gradient.first,
+                            nested: true,
+                          ),
                         tile(
                           title: 'إظهار صفوف العملات',
                           value: _showCurrencyRows,
-                          onChanged: (v) => sync(() => _showCurrencyRows = v),
+                          onChanged: _showDetails
+                              ? (v) => sync(() => _showCurrencyRows = v)
+                              : null,
                           icon: Icons.payments_rounded,
+                          nested: true,
                         ),
                         tile(
                           title: 'إظهار شريط عن أمس',
                           value: _showDeltaStrip,
-                          onChanged: (v) => sync(() => _showDeltaStrip = v),
+                          onChanged: _showDetails
+                              ? (v) => sync(() => _showDeltaStrip = v)
+                              : null,
                           icon: Icons.trending_up_rounded,
+                          nested: true,
                         ),
 
                         const SizedBox(height: 16),
@@ -372,19 +581,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
                           children: [
                             Expanded(
                               child: OutlinedButton.icon(
-                                onPressed: () {
-                                  sync(() {
-                                    _showDetails = true;
-                                    _showHeader = true;
-                                    _showQuickStats = true;
-                                    _showAddedCard = true;
-                                    _showReceivedCard = true;
-                                    _showCancelledCard = true;
-                                    _showUnreceivedCard = true;
-                                    _showCurrencyRows = true;
-                                    _showDeltaStrip = true;
-                                  });
-                                },
+                                onPressed: () => sync(_resetDisplay),
                                 icon: const Icon(Icons.restart_alt_rounded),
                                 label: const Text('إعادة الافتراضي'),
                               ),
@@ -596,7 +793,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
             ),
           ),
           Text(
-            total.toStringAsFixed(2),
+            AmountFormat.display(total),
             style: const TextStyle(
               fontWeight: FontWeight.w900,
               fontSize: 15,
@@ -685,11 +882,16 @@ class _ShareImagePageState extends State<ShareImagePage> {
     final d = widget.data;
     return Row(
       children: [
-        Icon(Icons.insights_rounded, color: cs.primary),
+        Icon(
+          d.isCompany ? Icons.business_rounded : Icons.insights_rounded,
+          color: cs.primary,
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
-            "إحصائيات — ${d.accountName}",
+            d.isCompany
+                ? "إحصائيات الشركة — ${d.accountName}"
+                : "إحصائيات — ${d.accountName}",
             textAlign: TextAlign.center,
             style: const TextStyle(
               fontWeight: FontWeight.w900,
@@ -712,7 +914,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
   }
 
   /// =================== تصميم الملخص السريع ===================
-  Widget _buildQuickStats(ShareStatsData d) {
+  Widget _buildQuickStats(List<_ShareSection> sections) {
     Widget quickCard({
       required String label,
       required int count,
@@ -772,48 +974,16 @@ class _ShareImagePageState extends State<ShareImagePage> {
       );
     }
 
-    final widgets = <Widget>[];
-
-    if (_showAddedCard) {
-      widgets.add(
-        quickCard(
-          label: d.addedLabel,
-          count: d.addedCount,
-          gradient: const [Colors.blue, Colors.blueAccent],
-          icon: Icons.add_circle_outline_rounded,
-        ),
-      );
-    }
-    if (_showReceivedCard) {
-      widgets.add(
-        quickCard(
-          label: d.receivedLabel,
-          count: d.receivedCount,
-          gradient: const [Colors.green, Colors.lightGreen],
-          icon: Icons.check_circle_outline_rounded,
-        ),
-      );
-    }
-    if (_showCancelledCard) {
-      widgets.add(
-        quickCard(
-          label: d.cancelledLabel,
-          count: d.cancelledCount,
-          gradient: const [Colors.red, Colors.orange],
-          icon: Icons.cancel_outlined,
-        ),
-      );
-    }
-    if (_showUnreceivedCard) {
-      widgets.add(
-        quickCard(
-          label: d.unreceivedLabel,
-          count: d.unreceivedCount,
-          gradient: const [Colors.indigo, Colors.deepPurple],
-          icon: Icons.hourglass_empty_rounded,
-        ),
-      );
-    }
+    final widgets = <Widget>[
+      for (var i = 0; i < sections.length; i++)
+        if (_quickShow[i])
+          quickCard(
+            label: sections[i].label,
+            count: sections[i].count,
+            gradient: sections[i].gradient,
+            icon: sections[i].quickIcon,
+          ),
+    ];
 
     if (widgets.isEmpty) {
       return const SizedBox.shrink();
@@ -828,53 +998,21 @@ class _ShareImagePageState extends State<ShareImagePage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final d = widget.data;
+    final sections = _sections();
 
     final cards = <Widget>[
-      if (_showAddedCard)
-        _categoryCard(
-          title: d.addedLabel,
-          count: d.addedCount,
-          totals: d.totalsAdded,
-          icon: Icons.add_circle_rounded,
-          gradient: const [Colors.blue, Colors.blueAccent],
-          cs: cs,
-          yesterday: d.yesterdayAddedCount,
-          countsByCurrency: d.countsAddedByCurrency,
-        ),
-      if (_showReceivedCard)
-        _categoryCard(
-          title: d.receivedLabel,
-          count: d.receivedCount,
-          totals: d.totalsReceived,
-          icon: Icons.check_circle_rounded,
-          gradient: const [Colors.green, Colors.lightGreen],
-          cs: cs,
-          yesterday: d.yesterdayReceivedCount,
-          countsByCurrency: d.countsReceivedByCurrency,
-        ),
-      if (_showCancelledCard)
-        _categoryCard(
-          title: d.cancelledLabel,
-          count: d.cancelledCount,
-          totals: d.totalsCancelled,
-          icon: Icons.cancel_rounded,
-          gradient: const [Colors.red, Colors.orange],
-          cs: cs,
-          yesterday: d.yesterdayCancelledCount,
-          countsByCurrency: d.countsCancelledByCurrency,
-        ),
-      if (_showUnreceivedCard)
-        _categoryCard(
-          title: d.unreceivedLabel,
-          count: d.unreceivedCount,
-          totals: d.totalsUnreceived,
-          icon: Icons.hourglass_bottom_rounded,
-          gradient: const [Colors.indigo, Colors.deepPurple],
-          cs: cs,
-          yesterday: d.yesterdayUnreceivedCount,
-          countsByCurrency: d.countsUnreceivedByCurrency,
-        ),
+      for (var i = 0; i < sections.length; i++)
+        if (_cardShow[i])
+          _categoryCard(
+            title: sections[i].label,
+            count: sections[i].count,
+            totals: sections[i].totals,
+            icon: sections[i].icon,
+            gradient: sections[i].gradient,
+            cs: cs,
+            yesterday: sections[i].yesterday,
+            countsByCurrency: sections[i].counts,
+          ),
     ];
 
     return Directionality(
@@ -956,9 +1094,10 @@ class _ShareImagePageState extends State<ShareImagePage> {
                               children: [
                                 if (_showHeader) _buildHeader(cs),
 
-                                if (_showQuickStats) ...[
+                                if (_showQuickStats &&
+                                    _quickShow.contains(true)) ...[
                                   const SizedBox(height: 20),
-                                  _buildQuickStats(d),
+                                  _buildQuickStats(sections),
                                 ],
 
                                 if (_showDetails && cards.isNotEmpty) ...[

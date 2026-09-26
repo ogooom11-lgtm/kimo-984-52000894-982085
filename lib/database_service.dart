@@ -16,6 +16,9 @@ class DatabaseService {
   /// سجل تعديلات الحركات (خرائط بسيطة بدون Adapter) — راجع TxHistoryService
   static const String txHistoryBoxName = "tx_edit_history";
 
+  /// تفضيلات عرض بسيطة (خرائط بدون Adapter) — مثل خيارات صورة المشاركة
+  static const String uiPrefsBoxName = "ui_prefs";
+
   // ===========================
   // 🚀 التهيئة
   // ===========================
@@ -28,13 +31,15 @@ class DatabaseService {
     await _openLogBox(operationLogBoxName);
     // صندوق كسول: السجل قد يكبر كثيرًا، فلا نحمّله كله في الذاكرة
     await _openLogBox(txHistoryBoxName, lazy: true);
+    await _openLogBox(uiPrefsBoxName);
 
     // ✅ اختيارية: ترحيل مفاتيح int قديمة (لو كنت سابقًا تستخدم put(id))
     // await migrateTransactionsIntKeysToString(); // فعّله مرة لو احتجت
     // await migrateParsesIntKeysToString();       // فعّله مرة لو احتجت
   }
 
-  /// صناديق السجلات: إذا تلف الملف لا نمنع تشغيل التطبيق، نحذفه ونفتح جديدًا
+  /// صناديق السجلات والتفضيلات: إذا تلف الملف لا نمنع تشغيل التطبيق، نحذفه
+  /// ونفتح جديدًا
   static Future<void> _openLogBox(String name, {bool lazy = false}) async {
     Future<void> open() =>
         lazy ? Hive.openLazyBox<dynamic>(name) : Hive.openBox<dynamic>(name);
@@ -56,6 +61,10 @@ class DatabaseService {
       Hive.box<TransactionModel>(transactionsBoxName);
   static Box<Settings> get settingsBox => Hive.box<Settings>(settingsBoxName);
   static Box<ParsedText> get parsesBox => Hive.box<ParsedText>(parsesBoxName);
+
+  /// صندوق تفضيلات العرض، أو null إن لم يكن مفتوحًا (الشاشات تعمل بدونه)
+  static Box<dynamic>? get uiPrefsBoxOrNull =>
+      Hive.isBoxOpen(uiPrefsBoxName) ? Hive.box<dynamic>(uiPrefsBoxName) : null;
 
   // ====================================================================
   // 📌 الحسابات (Accounts)

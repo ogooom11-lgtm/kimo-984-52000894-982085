@@ -4,6 +4,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/period_stats.dart';
+import '../utils/amount_format.dart';
 import 'share_image_page.dart';
 
 class AccountStatsScreen extends StatefulWidget {
@@ -155,22 +156,8 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
   double _sumTotals(Map<String, double> m) =>
       m.values.fold(0.0, (a, b) => a + b);
 
-  String _formatAmount(double v) {
-    final s = v.toStringAsFixed(2);
-    final parts = s.split('.');
-    final intPart = parts[0];
-    final dec = parts.length > 1 ? parts[1] : '00';
-
-    final chars = intPart.split('').reversed.toList();
-    final out = <String>[];
-    for (int i = 0; i < chars.length; i++) {
-      out.add(chars[i]);
-      if ((i + 1) % 3 == 0 && i != chars.length - 1) {
-        out.add(',');
-      }
-    }
-    return '${out.reversed.join()}.$dec';
-  }
+  /// نقطة بين كل 3 خانات، والكسور بفاصلة فقط إن وُجدت (250.000 / 1.234,5)
+  String _formatAmount(double v) => AmountFormat.display(v);
 
   String _formatMoneyParts(TransactionModel t) {
     final parts = _moneyPartsOf(t);
@@ -421,6 +408,7 @@ class _AccountStatsScreenState extends State<AccountStatsScreen> {
               PeriodStats.label(PeriodMetric.cancelled, company: isCompany),
           unreceivedLabel:
               PeriodStats.label(PeriodMetric.fourth, company: isCompany),
+          isCompany: isCompany,
         );
 
         final buckets = isCompany
@@ -1201,22 +1189,7 @@ class _CurrencyRow extends StatelessWidget {
     required this.count,
   });
 
-  String _formatAmount(double v) {
-    final s = v.toStringAsFixed(2);
-    final parts = s.split('.');
-    final intPart = parts[0];
-    final dec = parts.length > 1 ? parts[1] : '00';
-
-    final chars = intPart.split('').reversed.toList();
-    final out = <String>[];
-    for (int i = 0; i < chars.length; i++) {
-      out.add(chars[i]);
-      if ((i + 1) % 3 == 0 && i != chars.length - 1) {
-        out.add(',');
-      }
-    }
-    return '${out.reversed.join()}.$dec';
-  }
+  String _formatAmount(double v) => AmountFormat.display(v);
 
   @override
   Widget build(BuildContext context) {
