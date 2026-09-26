@@ -106,6 +106,7 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
   private TextView countView;
   private TextView listTitle;
   private TextView clearButton;
+  private TextView copyAllButton;
   private LinearLayout notesList;
   private final LinearLayout[] typeChips = new LinearLayout[TYPES.length];
   private String selectedType = NotesStore.TYPE_ADD;
@@ -124,6 +125,14 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
         public void run() {
           clearArmed = false;
           styleClearButton();
+        }
+      };
+
+  private final Runnable resetCopyAll =
+      new Runnable() {
+        @Override
+        public void run() {
+          styleCopyAllButton();
         }
       };
 
@@ -580,6 +589,7 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
     }
     handler.removeCallbacks(disarmClear);
     handler.removeCallbacks(resetAddText);
+    handler.removeCallbacks(resetCopyAll);
     clearArmed = false;
     if (input != null) {
       InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
@@ -803,6 +813,16 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
           }
         });
     row.addView(clearButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    copyAllButton = tv("", 12.5f, COLOR_ADD, true);
+    copyAllButton.setPadding(dp(8), dp(6), dp(8), dp(6));
+    copyAllButton.setOnClickListener(
+        new View.OnClickListener() {
+          @Override
+          public void onClick(View v) {
+            copyAll();
+          }
+        });
+    row.addView(copyAllButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     listTitle = tv("", 14, textColor, true);
     listTitle.setGravity(Gravity.RIGHT);
     row.addView(listTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -810,7 +830,86 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
     lp.bottomMargin = dp(6);
     row.setLayoutParams(lp);
     styleClearButton();
+    styleCopyAllButton();
     return row;
+  }
+
+  private void styleCopyAllButton() {
+    if (copyAllButton == null) {
+      return;
+    }
+    copyAllButton.setText("نسخ الكل");
+    copyAllButton.setTextColor(COLOR_ADD);
+  }
+
+  /** ينسخ كل الملاحظات بترتيبها، سطر لكل ملاحظة: «1. إلغاء: النص». */
+  private void copyAll() {
+    JSONArray arr = NotesStore.load(this);
+    StringBuilder sb = new StringBuilder();
+    int n = 0;
+    for (int i = 0; i < arr.length(); i++) {
+      JSONObject o = arr.optJSONObject(i);
+      if (o == null) {
+        continue;
+      }
+      String text = o.optString("text").trim();
+      if (text.length() == 0) {
+        continue;
+      }
+      n++;
+      if (sb.length() > 0) {
+        sb.append('\n');
+      }
+      sb.append(n)
+          .append(". ")
+          .append(labelFor(NotesStore.normalizeType(o.optString("type"))))
+          .append(": ")
+          .append(text);
+    }
+    if (n == 0) {
+      return;
+    }
+    if (copyText("notes", sb.toString(), "تم نسخ " + countLabel(n))) {
+      copyAllButton.setText("✓ تم النسخ");
+      copyAllButton.setTextColor(COLOR_DELIVER);
+      handler.removeCallbacks(resetCopyAll);
+      handler.postDelayed(resetCopyAll, 1500);
+    }
+  }
+
+  /**
+   * ينسخ النص إلى الحافظة. أندرويد 13 وما بعده يعرض تأكيد النسخ بنفسه، لذلك
+   * لا نعرض رسالة إضافية هناك.
+   */
+  private boolean copyText(String label, String text, String toast) {
+    try {
+      ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+      if (cm == null) {
+        return false;
+      }
+      cm.setPrimaryClip(ClipData.newPlainText(label, text));
+    } catch (Exception e) {
+      return false;
+    }
+    if (Build.VERSION.SDK_INT < 33) {
+      Toast.makeText(this, toast, Toast.LENGTH_SHORT).show();
+    }
+    return true;
+  }
+
+  /** أيقونة النسخ تتحول لعلامة ✓ خضراء لحظة ثم تعود. */
+  private void flashCopied(final NoteIconView icon) {
+    icon.setGlyph(NoteIconView.GLYPH_DELIVER);
+    icon.setColors(0, COLOR_DELIVER);
+    handler.postDelayed(
+        new Runnable() {
+          @Override
+          public void run() {
+            icon.setGlyph(NoteIconView.GLYPH_COPY);
+            icon.setColors(0, mutedColor);
+          }
+        },
+        1200);
   }
 
   private void styleClearButton() {
@@ -829,8 +928,9 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
     JSONArray arr = NotesStore.load(this);
     int n = arr.length();
     countView.setText(countLabel(n));
-    listTitle.setText("الملاحظات حسب وقت الإضافة");
+    listTitle.setText("الملاحظات بالترتيب");
     clearButton.setVisibility(n > 0 ? View.VISIBLE : View.GONE);
+    copyAllButton.setVisibility(n > 0 ? View.VISIBLE : View.GONE);
     if (n == 0) {
       TextView empty =
           tv("لا توجد ملاحظات بعد.\nاختر نوع الملاحظة واكتبها ثم اضغط «إضافة».", 13, mutedColor, false);
@@ -870,6 +970,21 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
         });
     row.addView(delete, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
+    final NoteIconView copy = new NoteIconView(this, NoteIconView.GLYPH_COPY, 0, mutedColor);
+    copy.setContentDescription("نسخ");
+    copy.setOnClickListener(
+        new View.OnClickListener() {
+          @Override
+          public void onClick(View v) {
+            if (copyText("note", text, "تم نسخ الملاحظة")) {
+              flashCopied(copy);
+            }
+          }
+        });
+    LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(dp(34), dp(34));
+    copyLp.leftMargin = dp(2);
+    row.addView(copy, copyLp);
+
     LinearLayout texts = new LinearLayout(this);
     texts.setOrientation(LinearLayout.VERTICAL);
     TextView body = tv(text, 15, textColor, false);
@@ -889,15 +1004,13 @@ public class FloatingNotesService extends Service implements NotesStore.Listener
     NoteIconView icon = new NoteIconView(this, glyphFor(type), colorFor(type), Color.WHITE);
     row.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
 
-    // ضغطة مطوّلة: نسخ نص الملاحظة
+    // ضغطة مطوّلة على الملاحظة: نسخ نصها أيضًا
     row.setOnLongClickListener(
         new View.OnLongClickListener() {
           @Override
           public boolean onLongClick(View v) {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            if (cm != null) {
-              cm.setPrimaryClip(ClipData.newPlainText("note", text));
-              Toast.makeText(FloatingNotesService.this, "تم نسخ الملاحظة", Toast.LENGTH_SHORT).show();
+            if (copyText("note", text, "تم نسخ الملاحظة")) {
+              flashCopied(copy);
             }
             return true;
           }

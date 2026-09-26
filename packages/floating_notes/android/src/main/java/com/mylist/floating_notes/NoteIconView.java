@@ -9,7 +9,7 @@ import android.view.View;
 
 /**
  * أيقونة مرسومة بالكود (بدون ملفات موارد): دائرة ملونة اختيارية وبداخلها رمز
- * (إضافة، تعديل، إلغاء، تسليم، ملاحظات، إغلاق، حذف).
+ * (إضافة، تعديل، إلغاء، تسليم، ملاحظات، إغلاق، حذف، نسخ).
  */
 final class NoteIconView extends View {
   static final int GLYPH_NOTES = 0;
@@ -19,6 +19,7 @@ final class NoteIconView extends View {
   static final int GLYPH_DELIVER = 4;
   static final int GLYPH_CLOSE = 5;
   static final int GLYPH_DELETE = 6;
+  static final int GLYPH_COPY = 7;
 
   private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -107,6 +108,19 @@ final class NoteIconView extends View {
         c.drawPath(path, stroke);
         c.drawLine(l + g * 0.43f, t + g * 0.46f, l + g * 0.45f, t + g * 0.78f, stroke);
         c.drawLine(l + g * 0.57f, t + g * 0.46f, l + g * 0.55f, t + g * 0.78f, stroke);
+        break;
+      case GLYPH_COPY:
+        // ورقتان متراكبتان: الخلفية (حرف L) ثم الأمامية كاملة
+        stroke.setStrokeWidth(Math.max(1.5f, g * 0.1f));
+        path.reset();
+        path.moveTo(l + g * 0.3f, t + g * 0.22f);
+        path.lineTo(l + g * 0.3f, t + g * 0.08f);
+        path.lineTo(l + g * 0.9f, t + g * 0.08f);
+        path.lineTo(l + g * 0.9f, t + g * 0.7f);
+        path.lineTo(l + g * 0.78f, t + g * 0.7f);
+        c.drawPath(path, stroke);
+        rect.set(l + g * 0.1f, t + g * 0.3f, l + g * 0.68f, t + g * 0.92f);
+        c.drawRoundRect(rect, g * 0.1f, g * 0.1f, stroke);
         break;
       case GLYPH_NOTES:
       default:
