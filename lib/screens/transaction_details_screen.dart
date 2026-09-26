@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import 'transaction_history_screen.dart';
 import '../utils/web_saver.dart' as web_saver;
 
 class TransactionDetailsScreen extends StatefulWidget {
@@ -904,6 +905,11 @@ class _TransactionDetailsScreenState extends State<TransactionDetailsScreen> {
               elevation: 0,
               scrolledUnderElevation: 0,
               actions: [
+                IconButton(
+                  tooltip: 'سجل التعديلات',
+                  onPressed: () => openTransactionHistory(context, tx),
+                  icon: const Icon(Icons.history_rounded),
+                ),
                 IconButton(
                   tooltip: _busy ? 'جارٍ الحفظ...' : 'حفظ كصورة',
                   onPressed: _busy

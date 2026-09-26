@@ -16,9 +16,11 @@ import 'unreceived_reconcile_screen.dart'; // 👈 جديد
 import '../database_service.dart';
 import '../models.dart';
 import '../services/operation_log_service.dart';
+import '../services/tx_history_service.dart';
 import 'add_edit_transaction_screen.dart';
 import 'account_stats_screen.dart';
 import 'transaction_details_screen.dart';
+import 'transaction_history_screen.dart';
 
 enum SortField { date, name, status, amount }
 
@@ -298,6 +300,9 @@ class _AccountScreenState extends State<AccountScreen> {
     );
     if (!ok) return;
 
+    if (items.length > 1) {
+      TxHistoryService.annotate(items.map((t) => t.id), 'نقل جماعي');
+    }
     final records = <OperationTxRecord>[];
     for (final tx in items) {
       final before = OperationLogService.snapshot(tx);
@@ -338,6 +343,7 @@ class _AccountScreenState extends State<AccountScreen> {
     if (!ok) return;
 
     final now = DateTime.now();
+    TxHistoryService.annotate(items.map((t) => t.id), 'إجراء جماعي');
     final records = <OperationTxRecord>[];
     for (final tx in items) {
       final before = OperationLogService.snapshot(tx);
@@ -401,6 +407,7 @@ class _AccountScreenState extends State<AccountScreen> {
           before: OperationLogService.snapshot(tx),
         ),
     ];
+    TxHistoryService.annotate(items.map((t) => t.id), 'حذف جماعي');
     for (final tx in items) {
       await tx.delete();
     }
@@ -2540,6 +2547,9 @@ class _TxBubble extends StatelessWidget {
                               case 'details':
                                 onOpenDetails();
                                 break;
+                              case 'history':
+                                await openTransactionHistory(context, t);
+                                break;
                             }
                           },
                           itemBuilder: (ctx) {
@@ -2581,6 +2591,10 @@ class _TxBubble extends StatelessWidget {
                               const PopupMenuItem(
                                 value: 'details',
                                 child: Text("تفاصيل الحركة"),
+                              ),
+                              const PopupMenuItem(
+                                value: 'history',
+                                child: Text("سجل التعديلات"),
                               ),
                             ];
                           },

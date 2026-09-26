@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 
 import 'database_service.dart';
 import 'models.dart';
+import 'services/tx_history_service.dart';
 
 class BackupStats {
   final int accountsCount;
@@ -92,6 +93,7 @@ class BackupService {
     final transactions = await DatabaseService.getAllTransactions();
     final parses = DatabaseService.getAllParses();
     final settings = DatabaseService.getSettings();
+    final txEditHistory = await TxHistoryService.exportAll();
 
     final payload = <String, dynamic>{
       'app': 'my_list',
@@ -101,6 +103,8 @@ class BackupService {
       'transactions': transactions.map(_transactionToMap).toList(),
       'settings': settings == null ? null : _settingsToMap(settings),
       'parses': parses.map(_parsedTextToMap).toList(),
+      // سجل تعديلات الحركات (مفتاح = معرّف الحركة)
+      'txEditHistory': txEditHistory,
     };
 
     final jsonString = const JsonEncoder.withIndent('  ').convert(payload);
@@ -168,25 +172,34 @@ class BackupService {
     final parsesJson = _asMapList(payload['parses']);
     final settingsJson = payload['settings'];
 
-    await DatabaseService.accountsBox.clear();
-    await DatabaseService.transactionsBox.clear();
-    await DatabaseService.parsesBox.clear();
-    await DatabaseService.clearSettings();
+    // استبدال كل الحركات ليس «تعديلات»: نوقف سجل التعديلات أثناء الاستعادة
+    // ثم نستعيد سجل النسخة نفسها
+    await TxHistoryService.suspend();
+    try {
+      await DatabaseService.accountsBox.clear();
+      await DatabaseService.transactionsBox.clear();
+      await DatabaseService.parsesBox.clear();
+      await DatabaseService.clearSettings();
 
-    for (final item in accountsJson) {
-      await DatabaseService.addAccount(_accountFromMap(item));
-    }
+      for (final item in accountsJson) {
+        await DatabaseService.addAccount(_accountFromMap(item));
+      }
 
-    for (final item in transactionsJson) {
-      await DatabaseService.addTransaction(_transactionFromMap(item));
-    }
+      for (final item in transactionsJson) {
+        await DatabaseService.addTransaction(_transactionFromMap(item));
+      }
 
-    if (settingsJson is Map<String, dynamic>) {
-      await DatabaseService.saveSettings(_settingsFromMap(settingsJson));
-    }
+      if (settingsJson is Map<String, dynamic>) {
+        await DatabaseService.saveSettings(_settingsFromMap(settingsJson));
+      }
 
-    for (final item in parsesJson) {
-      await DatabaseService.addParsedText(_parsedTextFromMap(item));
+      for (final item in parsesJson) {
+        await DatabaseService.addParsedText(_parsedTextFromMap(item));
+      }
+
+      await TxHistoryService.importAll(payload['txEditHistory']);
+    } finally {
+      await TxHistoryService.resume();
     }
   }
 

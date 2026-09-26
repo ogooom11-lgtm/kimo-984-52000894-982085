@@ -8,6 +8,7 @@ import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/operation_log_service.dart';
+import '../services/tx_history_service.dart';
 import '../services/settings_words.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
@@ -4393,6 +4394,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
         } else {
           d.transaction.applyStatus(TransactionStatus.cancelled, at: d.date);
         }
+        TxHistoryService.annotate([d.transaction.id], 'تحليل الرسائل');
         await d.transaction.save();
         cancelRecords.add(
           OperationTxRecord(

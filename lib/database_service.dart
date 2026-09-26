@@ -13,6 +13,9 @@ class DatabaseService {
   /// سجل العمليات (خرائط بسيطة بدون Adapter) — راجع OperationLogService
   static const String operationLogBoxName = "operation_logs";
 
+  /// سجل تعديلات الحركات (خرائط بسيطة بدون Adapter) — راجع TxHistoryService
+  static const String txHistoryBoxName = "tx_edit_history";
+
   // ===========================
   // 🚀 التهيئة
   // ===========================
@@ -22,19 +25,27 @@ class DatabaseService {
     await Hive.openBox<TransactionModel>(transactionsBoxName);
     await Hive.openBox<Settings>(settingsBoxName);
     await Hive.openBox<ParsedText>(parsesBoxName);
-    try {
-      await Hive.openBox<dynamic>(operationLogBoxName);
-    } catch (_) {
-      // إذا تلف ملف السجل لا نمنع تشغيل التطبيق: نحذفه ونفتح سجلًا جديدًا
-      try {
-        await Hive.deleteBoxFromDisk(operationLogBoxName);
-        await Hive.openBox<dynamic>(operationLogBoxName);
-      } catch (_) {}
-    }
+    await _openLogBox(operationLogBoxName);
+    // صندوق كسول: السجل قد يكبر كثيرًا، فلا نحمّله كله في الذاكرة
+    await _openLogBox(txHistoryBoxName, lazy: true);
 
     // ✅ اختيارية: ترحيل مفاتيح int قديمة (لو كنت سابقًا تستخدم put(id))
     // await migrateTransactionsIntKeysToString(); // فعّله مرة لو احتجت
     // await migrateParsesIntKeysToString();       // فعّله مرة لو احتجت
+  }
+
+  /// صناديق السجلات: إذا تلف الملف لا نمنع تشغيل التطبيق، نحذفه ونفتح جديدًا
+  static Future<void> _openLogBox(String name, {bool lazy = false}) async {
+    Future<void> open() =>
+        lazy ? Hive.openLazyBox<dynamic>(name) : Hive.openBox<dynamic>(name);
+    try {
+      await open();
+    } catch (_) {
+      try {
+        await Hive.deleteBoxFromDisk(name);
+        await open();
+      } catch (_) {}
+    }
   }
 
   // ===========================

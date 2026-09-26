@@ -4,7 +4,9 @@ import 'package:flutter/services.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/operation_log_service.dart';
+import '../services/tx_history_service.dart';
 import 'settings_screen.dart';
+import 'transaction_history_screen.dart';
 
 class AddEditTransactionScreen extends StatefulWidget {
   final Account account;
@@ -319,6 +321,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         if (widget.account.type.isCompany) {
           tx.companyMovementType = _companyMovement;
         }
+        TxHistoryService.annotate([tx.id], 'تعديل يدوي');
         await tx.save();
         await OperationLogService.log(
           kind: OperationKind.manualEdit,
@@ -911,6 +914,15 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           backgroundColor: Colors.transparent,
           foregroundColor: _cs.onSurface,
           title: Text(isEdit ? 'تعديل الحركة' : 'إضافة حركة'),
+          actions: [
+            if (isEdit)
+              IconButton(
+                tooltip: 'سجل التعديلات',
+                onPressed: () =>
+                    openTransactionHistory(context, widget.existing!),
+                icon: const Icon(Icons.history_rounded),
+              ),
+          ],
         ),
         body: ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),

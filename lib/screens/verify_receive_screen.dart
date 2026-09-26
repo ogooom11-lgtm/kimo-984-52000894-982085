@@ -19,6 +19,7 @@ import '../services/detection/receipt_extractor.dart';
 import '../services/detection/segment_splitter.dart';
 import '../services/detection/receive_matching.dart' as rm;
 import '../services/operation_log_service.dart';
+import '../services/tx_history_service.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
 
@@ -3401,6 +3402,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               DateTime.now(); // timestamp متاح من الهيدر
           final before = OperationLogService.snapshot(tx);
           tx.applyStatus(TransactionStatus.received, at: ts);
+          TxHistoryService.annotate([tx.id], 'صفحة التسليم');
           await tx.save();
           records.add(
             OperationTxRecord(

@@ -16,6 +16,7 @@ import 'theme/app_theme.dart';
 import 'screens/timeline_analytics_screen.dart';
 import 'screens/transaction_watch_screen.dart';
 import 'services/share_import/share_import_controller.dart';
+import 'services/tx_history_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,6 +34,13 @@ void main() async {
     Hive.registerAdapter(ParsedTextAdapter());
 
     await DatabaseService.init();
+
+    // سجل تعديلات الحركات: يراقب كل تغيير على الحركات من أي شاشة
+    try {
+      TxHistoryService.start();
+    } catch (e) {
+      debugPrint('TxHistory start error: $e');
+    }
 
     runApp(const MyApp());
   } catch (e, s) {

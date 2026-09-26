@@ -19,6 +19,7 @@ import '../database_service.dart';
 import '../models.dart';
 import '../services/detection/text_tokens.dart' show normalizeArabic;
 import '../services/settings_words.dart';
+import '../services/tx_history_service.dart';
 
 // =============================================================
 // الألوان المستخدمة لتمييز الأقسام
@@ -1624,7 +1625,9 @@ class _CurrencySplitDialogState extends State<_CurrencySplitDialog> {
     );
     if (!ok || !mounted) return;
     setState(() => _busy = true);
+    final source = 'أداة تقسيم المبالغ (÷ ${_fmtNum(divisor)})';
     for (final tx in matching) {
+      TxHistoryService.annotate([tx.id], source);
       if (tx.currency == _selected) tx.amount /= divisor;
       if (tx.secondAmount != null && tx.secondCurrency == _selected) {
         tx.secondAmount = tx.secondAmount! / divisor;

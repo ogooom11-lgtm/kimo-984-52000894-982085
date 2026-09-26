@@ -10,6 +10,7 @@ import 'add_account_screen.dart';
 import 'account_screen.dart';
 import 'add_edit_transaction_screen.dart';
 import 'operations_log_screen.dart';
+import 'transaction_history_screen.dart';
 
 enum _QuickStatusFilter { all, added, received, cancelled }
 
@@ -1036,6 +1037,21 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   if (t.notes.trim().isNotEmpty)
                     infoTile("ملاحظات", t.notes.trim(), Icons.notes_rounded),
+                  const SizedBox(height: 4),
+                  FilledButton.tonalIcon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      openTransactionHistory(context, t);
+                    },
+                    icon: const Icon(Icons.history_rounded),
+                    label: const Text('سجل التعديلات'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -3161,6 +3177,12 @@ class _SearchTxCardState extends State<_SearchTxCard>
                                 case 'details':
                                   widget.onTapDetails();
                                   break;
+                                case 'history':
+                                  await openTransactionHistory(
+                                    context,
+                                    widget.tx,
+                                  );
+                                  break;
                                 case 'received':
                                   await widget.onSetReceived();
                                   break;
@@ -3185,6 +3207,10 @@ class _SearchTxCardState extends State<_SearchTxCard>
                                 const PopupMenuItem(
                                   value: 'details',
                                   child: Text("تفاصيل"),
+                                ),
+                                const PopupMenuItem(
+                                  value: 'history',
+                                  child: Text("سجل التعديلات"),
                                 ),
                                 if (!isCompany)
                                   const PopupMenuItem(

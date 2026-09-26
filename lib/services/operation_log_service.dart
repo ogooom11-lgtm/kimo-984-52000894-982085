@@ -8,6 +8,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import 'tx_history_service.dart';
 
 enum OperationKind {
   bubbleAdd,
@@ -398,9 +399,12 @@ class OperationLogService {
     final byId = _txById();
     int affected = 0;
     final total = e.records.length;
+    final source = 'تراجع عن: ${e.title}';
     for (int i = 0; i < total; i++) {
       final r = e.records[i];
       final tx = byId[r.txId];
+      // يظهر في سجل تعديلات الحركة كمصدر للتغيير
+      TxHistoryService.annotate([r.txId], source);
       if (e.kind.createsTransactions) {
         if (tx != null) {
           await tx.delete();
