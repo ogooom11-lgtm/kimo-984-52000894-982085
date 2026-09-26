@@ -158,6 +158,92 @@ class TxHistoryEntry {
       kind == TxHistoryKind.edit && changes.any((c) => !c.field.isStatusField);
 }
 
+/// الإدخالات من الأحدث إلى الأقدم حسب وقتها (قد يحمل الإدخال وقت الرسالة لا
+/// وقت الحفظ)؛ عند تساوي الوقت يبقى ترتيب التسجيل.
+List<TxHistoryEntry> sortEntriesByTime(List<TxHistoryEntry> newestFirst) {
+  final indexed = [
+    for (var i = 0; i < newestFirst.length; i++) (i, newestFirst[i]),
+  ];
+  indexed.sort((a, b) {
+    final c = b.$2.at.compareTo(a.$2.at);
+    return c != 0 ? c : a.$1.compareTo(b.$1);
+  });
+  return [for (final e in indexed) e.$2];
+}
+
+// =============================================================
+// القيم السابقة (البحث في سجل التعديل)
+// =============================================================
+
+/// حالة سابقة للحركة: الاسم والمبلغ والعملة كما كانت قبل تعديلٍ ما.
+class TxPastState {
+  final String name;
+  final double amount;
+  final String currency;
+
+  /// وقت التعديل الذي غيّر هذه القيم
+  final DateTime changedAt;
+
+  const TxPastState({
+    required this.name,
+    required this.amount,
+    required this.currency,
+    required this.changedAt,
+  });
+
+  @override
+  String toString() => 'TxPastState($name, $amount $currency)';
+}
+
+/// يعيد بناء الأسماء والمبالغ والعملات السابقة للحركة بالتراجع عن تعديلاتها
+/// واحدًا واحدًا (من الأحدث إلى الأقدم) ابتداءً من قيمها الحالية.
+/// [newestFirst] بترتيب التسجيل كما يعيده TxHistoryService.entriesFor.
+/// لا تُعاد الحالة الحالية ولا الحالات المكررة.
+List<TxPastState> txPastStates(
+  List<TxHistoryEntry> newestFirst, {
+  required String name,
+  required double amount,
+  required String currency,
+}) {
+  var n = name.trim();
+  var a = amount;
+  var c = currency.trim();
+  String key() => '$n|${a.toStringAsFixed(4)}|$c';
+  final seen = <String>{key()};
+  final out = <TxPastState>[];
+  for (final e in newestFirst) {
+    if (e.kind != TxHistoryKind.edit) continue;
+    var touched = false;
+    for (final ch in e.changes) {
+      switch (ch.field) {
+        case TxField.beneficiary:
+          final v = _text(ch.oldValue);
+          if (v.isNotEmpty) {
+            n = v;
+            touched = true;
+          }
+        case TxField.amount:
+          final v = ch.oldValue;
+          if (v is num && v > 0) {
+            a = v.toDouble();
+            touched = true;
+          }
+        case TxField.currency:
+          final v = _text(ch.oldValue);
+          if (v.isNotEmpty) {
+            c = v;
+            touched = true;
+          }
+        default:
+          break;
+      }
+    }
+    if (!touched || !seen.add(key())) continue;
+    out.add(TxPastState(name: n, amount: a, currency: c, changedAt: e.at));
+  }
+  return out;
+}
+
 // =============================================================
 // اللقطات والفروقات
 // =============================================================

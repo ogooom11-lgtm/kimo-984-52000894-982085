@@ -33,7 +33,10 @@ class _TxState {
 class _Annotation {
   final String source;
   final DateTime until;
-  const _Annotation(this.source, this.until);
+
+  /// وقت التعديل المسجّل بدل وقت الحفظ (مثل وقت الرسالة)
+  final DateTime? at;
+  const _Annotation(this.source, this.until, [this.at]);
 }
 
 typedef _RawEntries = Map<String, List<Map<String, dynamic>>>;
@@ -162,22 +165,27 @@ class TxHistoryService {
 
   /// اذكر مصدر التعديل القادم لهذه الحركات (يظهر في السجل)، مثل «تعديل يدوي».
   /// يُستدعى قبل الحفظ مباشرة، ويسري على أول حفظ لكل حركة خلال ثوانٍ.
-  static void annotate(Iterable<int> txIds, String source) {
+  /// [at]: وقت التعديل الذي يظهر في السجل بدل وقت الحفظ، مثل وقت الرسالة عند
+  /// التعديل أو الإلغاء من تحليل الرسائل.
+  static void annotate(Iterable<int> txIds, String source, {DateTime? at}) {
     final now = DateTime.now();
     final until = now.add(_annotationTtl);
     for (final id in txIds) {
-      _annotations[id] = _Annotation(source, until);
+      _annotations[id] = _Annotation(source, until, at);
     }
     if (_annotations.length > 5000) {
       _annotations.removeWhere((_, a) => now.isAfter(a.until));
     }
   }
 
-  static String? _takeSource(int txId) {
+  static _Annotation? _takeAnnotation(int txId) {
     final a = _annotations.remove(txId);
     if (a == null || DateTime.now().isAfter(a.until)) return null;
-    return a.source;
+    return a;
   }
+
+  /// هل للحركة سجل تعديلات؟ (فحص سريع بدون قراءة من القرص)
+  static bool hasHistory(int txId) => _historyOpen && _hasHistory(txId);
 
   // ===========================
   // التسجيل
@@ -191,12 +199,13 @@ class TxHistoryService {
         final prev = _states.remove(ev.key);
         if (prev == null) return;
         final v = prev.values;
+        final ann = _takeAnnotation(prev.id);
         _record(
           prev.id,
           TxHistoryEntry(
-            at: now,
+            at: ann?.at ?? now,
             kind: TxHistoryKind.deleted,
-            source: _takeSource(prev.id),
+            source: ann?.source,
             ctx: {
               'name': v[TxField.beneficiary.index],
               'amount': v[TxField.amount.index],
@@ -212,7 +221,9 @@ class TxHistoryService {
       final after = txSnapshot(t);
       final prev = _states[ev.key];
       _states[ev.key] = _TxState(t.id, after);
-      final source = _takeSource(t.id);
+      final ann = _takeAnnotation(t.id);
+      final source = ann?.source;
+      final at = ann?.at ?? now;
 
       if (prev == null || prev.id != t.id) {
         // حركة جديدة: لا شيء للتسجيل، إلا إذا كان لها سجل سابق، أي أنها
@@ -221,7 +232,7 @@ class TxHistoryService {
           _record(
             t.id,
             TxHistoryEntry(
-              at: now,
+              at: at,
               kind: TxHistoryKind.restored,
               source: source,
             ),
@@ -240,7 +251,7 @@ class TxHistoryService {
       _record(
         t.id,
         TxHistoryEntry(
-          at: now,
+          at: at,
           kind: TxHistoryKind.edit,
           source: source,
           changes: changes,
@@ -319,7 +330,7 @@ class TxHistoryService {
   // القراءة
   // ===========================
 
-  /// سجل الحركة (الأحدث أولًا)
+  /// سجل الحركة (الأحدث تسجيلًا أولًا؛ للعرض حسب الوقت: [sortEntriesByTime])
   static Future<List<TxHistoryEntry>> entriesFor(int txId) async {
     if (!_historyOpen) return const [];
     final key = _keyOf(txId);

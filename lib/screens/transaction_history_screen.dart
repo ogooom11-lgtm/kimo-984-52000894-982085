@@ -101,7 +101,10 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
     try {
       do {
         _dirty = false;
-        final list = await TxHistoryService.entriesFor(widget.txId);
+        // حسب الوقت: التعديل من رسالة يحمل وقت الرسالة لا وقت الحفظ
+        final list = sortEntriesByTime(
+          await TxHistoryService.entriesFor(widget.txId),
+        );
         if (!mounted) return;
         setState(() => _entries = list);
       } while (_dirty);

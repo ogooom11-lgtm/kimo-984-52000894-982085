@@ -56,6 +56,13 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   late final ReceiptExtractor _extractor;
   late final rm.CurrencyMatcher _currency;
 
+  // سجل التعديلات: الأسماء والمبالغ التي كانت عليها الحركات المضافة قبل
+  // تعديلها، حتى تُطابق رسائل التسليم المكتوبة بالقيم القديمة
+  final Map<int, List<TxPastState>> _pastStates = {};
+  rm.PendingNameIndex? _pastNames;
+  final List<({int txId, String name})> _pastNameRefs = [];
+  static const Color _historyColor = Color(0xFFE65100);
+
   // تحليل الرسائل يتم على دفعات مع شريط تقدم حتى لا تتجمد الواجهة
   bool _building = true;
   final ValueNotifier<OperationProgress?> _progress =
@@ -117,6 +124,8 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   Future<void> _buildBubbles() async {
     const label = 'جارٍ تحليل الرسائل';
     try {
+      await _loadPastStates();
+      if (!mounted) return;
       await runTimeSliced(
         total: _segments.length,
         work: (i) {
@@ -148,6 +157,50 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         setState(() => _building = false);
       }
     }
+  }
+
+  /// يقرأ من سجل التعديلات الأسماء والمبالغ السابقة للحركات المضافة (التي لها
+  /// سجل فقط)، ويبني فهرسًا للأسماء القديمة.
+  Future<void> _loadPastStates() async {
+    final edited = [
+      for (final t in _addedOnly)
+        if (TxHistoryService.hasHistory(t.id)) t,
+    ];
+    for (var i = 0; i < edited.length; i++) {
+      final tx = edited[i];
+      try {
+        final states = txPastStates(
+          await TxHistoryService.entriesFor(tx.id),
+          name: tx.beneficiary,
+          amount: tx.amount,
+          currency: tx.currency,
+        );
+        if (states.isNotEmpty) _pastStates[tx.id] = states;
+      } catch (e) {
+        debugPrint('VerifyReceiveScreen history error: $e');
+      }
+      if (!mounted) return;
+      if (edited.length >= 40 && i % 20 == 0) {
+        _progress.value = OperationProgress(
+          label: 'جارٍ قراءة سجل التعديلات',
+          done: i,
+          total: edited.length,
+        );
+      }
+    }
+    final names = <int, String>{};
+    _pastStates.forEach((txId, states) {
+      final tx = _pendingById[txId];
+      if (tx == null) return;
+      final seen = <String>{rm.nameKeysOf(tx.beneficiary).join(' ')};
+      for (final s in states) {
+        final key = rm.nameKeysOf(s.name).join(' ');
+        if (key.isEmpty || !seen.add(key)) continue;
+        names[_pastNameRefs.length] = s.name;
+        _pastNameRefs.add((txId: txId, name: s.name));
+      }
+    });
+    if (names.isNotEmpty) _pastNames = rm.PendingNameIndex(names);
   }
 
   @override
@@ -438,35 +491,56 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     st.amount = st.manualAmount ?? st.detectedAmount;
 
     final ex = st.extraction;
-    final matches = _pending.match(
-      nameKeys: rm.nameKeysOf(_effectiveName(st)),
-      lineKeys: [
-        if (ex != null)
-          for (final line in ex.lines) rm.nameKeysOfTokens(line.tokens),
-      ],
-    );
+    final nameKeys = rm.nameKeysOf(_effectiveName(st));
+    final lineKeys = [
+      if (ex != null)
+        for (final line in ex.lines) rm.nameKeysOfTokens(line.tokens),
+    ];
+    final matches = _pending.match(nameKeys: nameKeys, lineKeys: lineKeys);
+
+    // الأسماء القديمة من سجل التعديل: أفضل تطابق لكل حركة
+    final pastMatches = <int, ({rm.NameMatch match, String name})>{};
+    final pastIndex = _pastNames;
+    if (pastIndex != null) {
+      pastIndex.match(nameKeys: nameKeys, lineKeys: lineKeys).forEach((ref, m) {
+        final r = _pastNameRefs[ref];
+        final cur = pastMatches[r.txId];
+        if (cur == null || m.compareTo(cur.match) > 0) {
+          pastMatches[r.txId] = (match: m, name: r.name);
+        }
+      });
+    }
 
     // بين الحركات المتطابقة تمامًا نفضّل ما أُضيف قبل وقت الرسالة
     final latest = st.segment.timestamp?.add(const Duration(minutes: 1));
 
     void buildCandidates() {
       st.candidates.clear();
-      matches.forEach((id, m) {
+      for (final id in {...matches.keys, ...pastMatches.keys}) {
         final tx = _pendingById[id];
-        if (tx == null) return;
+        if (tx == null) continue;
+        final m = matches[id];
         final fit = _amountFit(tx, st.amount, st.currencyKey);
-        final exact = st.amount != null && fit.matches && m.tier >= 2;
+        final exact =
+            m != null && st.amount != null && fit.matches && m.tier >= 2;
+        // غير مؤكدة بالقيم الحالية: هل تطابق اسمًا أو مبلغًا قبل التعديل؟
+        final hit = exact
+            ? null
+            : _historyHitFor(tx, st, m, pastMatches[id], fit);
+        final name = hit?.nameMatch ?? m;
+        if (name == null) continue;
         st.candidates.add(
           _Candidate(
             tx: tx,
             delta: fit.delta,
             exact: exact,
-            rank: m.tier,
+            rank: name.tier,
             currencyOk: fit.currencyOk,
             amountPart: fit.part,
+            history: hit,
             pick: rm.AutoPick(
               txId: tx.id,
-              name: m,
+              name: m ?? name,
               currencyExact: fit.currencyExact,
               twinKey: _twinKeyOf(tx),
               beforeMessage: latest == null || !tx.date.isAfter(latest),
@@ -474,7 +548,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             ),
           ),
         );
-      });
+      }
     }
 
     buildCandidates();
@@ -510,8 +584,52 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     _recomputeWarningsAndReady(st);
   }
 
-  /// المؤكدة أولًا (الأقوى ثم الأقدم، بنفس ترتيب الاختيار التلقائي)، ثم البقية
-  /// حسب درجة الاسم وفرق المبلغ والأحدث.
+  /// نتيجة من سجل التعديل: الرسالة تطابق اسمًا أو مبلغًا كانت عليه الحركة قبل
+  /// تعديلها. null إن لم يُضف السجل شيئًا. لا تُختار تلقائيًا أبدًا: تُعرض مع
+  /// الاسم الجديد أو المبلغ الجديد ويختار المستخدم بنفسه.
+  _HistoryHit? _historyHitFor(
+    TransactionModel tx,
+    _BubbleState st,
+    rm.NameMatch? current,
+    ({rm.NameMatch match, String name})? past,
+    _AmountFit fit,
+  ) {
+    final states = _pastStates[tx.id];
+    if (states == null) return null;
+
+    // الاسم القديم يُعتمد فقط إذا طابق الرسالة أقوى من الاسم الحالي
+    final pastMatch = past?.match;
+    final usePastName =
+        pastMatch != null &&
+        (current == null || pastMatch.compareTo(current) > 0);
+    final nameMatch = usePastName ? pastMatch : current;
+    if (nameMatch == null) return null;
+
+    // المبلغ: الحالي، وإلا أحدث مبلغ قديم يساوي مبلغ الرسالة (بعملته وقتها)
+    final amount = st.amount;
+    final amountNow = amount != null && fit.matches;
+    TxPastState? oldAmount;
+    if (amount != null && !amountNow) {
+      for (final s in states) {
+        if ((s.amount - amount).abs() <= _AmountFit.tol &&
+            _currency.compare(s.currency, st.currencyKey) != false) {
+          oldAmount = s;
+          break;
+        }
+      }
+    }
+    if (!usePastName && oldAmount == null) return null;
+    return _HistoryHit(
+      nameMatch: nameMatch,
+      oldName: usePastName ? past?.name : null,
+      oldAmount: oldAmount?.amount,
+      oldCurrency: oldAmount?.currency,
+      strong: nameMatch.tier >= 2 && (amountNow || oldAmount != null),
+    );
+  }
+
+  /// المؤكدة أولًا (الأقوى ثم الأقدم، بنفس ترتيب الاختيار التلقائي)، ثم
+  /// المطابقة من سجل التعديل، ثم البقية حسب درجة الاسم وفرق المبلغ والأحدث.
   void _sortCandidates(_BubbleState st) {
     st.candidates.sort((a, b) {
       if (a.exact != b.exact) return a.exact ? -1 : 1;
@@ -520,6 +638,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         if (q != 0) return q;
         return rm.AutoPick.compareOrder(a.pick, b.pick);
       }
+      final ha = a.history?.strong ?? false;
+      final hb = b.history?.strong ?? false;
+      if (ha != hb) return ha ? -1 : 1;
       final r = b.rank.compareTo(a.rank);
       if (r != 0) return r;
       final d = a.delta.compareTo(b.delta);
@@ -575,7 +696,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       b.selectedTxIds.clear();
       if (d.txId != null) b.selectedTxIds.add(d.txId!);
       b.hasAmbiguousExactMatches = d.outcome == rm.AutoSelectOutcome.ambiguous;
-      b.autoNote = _autoNoteFor(d);
+      b.autoNote =
+          _autoNoteFor(d) ??
+          (b.selectedTxIds.isEmpty &&
+                  b.candidates.any((c) => c.history?.strong ?? false)
+              ? 'وجدت نتيجة من سجل التعديل: الرسالة تطابق اسم حركة أو مبلغها قبل تعديلها. راجع قسم «من سجل التعديل» واخترها إذا كانت هي الصحيحة.'
+              : null);
     }
 
     final owners = <int, _BubbleState>{};
@@ -764,16 +890,34 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       }
 
       final fit = _amountFit(tx, st.amount, st.currencyKey);
-      if (st.amount != null && fit.delta > tol) {
+      final hist = match.first.history;
+      final oldName = hist?.oldName;
+      if (oldName != null) {
         st.warningTexts.add(
-          'تحذير: اختلاف مبلغ مع "${tx.beneficiary}" (${_formatAmount(tx.amount)} ≠ ${_formatAmount(st.amount!)}).',
+          'الاسم في الرسالة «$oldName» هو اسم الحركة قبل التعديل — الاسم الجديد «${tx.beneficiary}».',
         );
       }
-
-      if (!fit.currencyOk) {
+      final oldAmount = hist?.oldAmount;
+      if (oldAmount != null) {
+        // فرق المبلغ/العملة سببه تعديل الحركة بعد الرسالة، لا خطأ في المطابقة
+        final oldCurrency = hist?.oldCurrency ?? tx.currency;
         st.warningTexts.add(
-          'تحذير: عملة الحركة "${tx.beneficiary}" (${tx.currency}) تختلف عن عملة الرسالة (${_currencyLabel(st.currencyKey)}).',
+          (oldAmount - tx.amount).abs() > tol
+              ? 'المبلغ في الرسالة (${_formatAmount(oldAmount)} $oldCurrency) هو مبلغ الحركة قبل التعديل — المبلغ الجديد ${_formatAmount(tx.amount)} ${tx.currency}.'
+              : 'العملة في الرسالة ($oldCurrency) هي عملة الحركة قبل التعديل — العملة الجديدة ${tx.currency}.',
         );
+      } else {
+        if (st.amount != null && fit.delta > tol) {
+          st.warningTexts.add(
+            'تحذير: اختلاف مبلغ مع "${tx.beneficiary}" (${_formatAmount(tx.amount)} ≠ ${_formatAmount(st.amount!)}).',
+          );
+        }
+
+        if (!fit.currencyOk) {
+          st.warningTexts.add(
+            'تحذير: عملة الحركة "${tx.beneficiary}" (${tx.currency}) تختلف عن عملة الرسالة (${_currencyLabel(st.currencyKey)}).',
+          );
+        }
       }
     }
 
@@ -2926,8 +3070,13 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   }
 
   Widget _candidatesList(_BubbleState st) {
+    bool strongHistory(_Candidate c) =>
+        !c.exact && (c.history?.strong ?? false);
     final exact = st.candidates.where((c) => c.exact).toList();
-    final similar = st.candidates.where((c) => !c.exact).toList();
+    final fromHistory = st.candidates.where(strongHistory).toList();
+    final similar = st.candidates
+        .where((c) => !c.exact && !strongHistory(c))
+        .toList();
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 220),
@@ -2944,6 +3093,15 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               count: exact.length,
             ),
             ...exact.map((c) => _candidateRow(st, c)),
+            const SizedBox(height: 8),
+          ],
+          if (fromHistory.isNotEmpty) ...[
+            _subHeader(
+              'من سجل التعديل',
+              icon: Icons.history_rounded,
+              count: fromHistory.length,
+            ),
+            ...fromHistory.map((c) => _candidateRow(st, c)),
             const SizedBox(height: 8),
           ],
           if (similar.isNotEmpty && _showSimilarCandidates) ...[
@@ -2979,9 +3137,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     final movable = owner != null && owner.selectionMode == _SelectionMode.auto;
     final disabled =
         st.isReadOnly || isReceived || (lockedByAnother && !movable);
+    final hist = c.history;
     final accent = selected
         ? cs.primary
-        : (c.exact ? Colors.green.shade700 : cs.outline);
+        : (c.exact
+              ? Colors.green.shade700
+              : ((hist?.strong ?? false) ? _historyColor : cs.outline));
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
@@ -3071,6 +3232,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                             text: c.rank >= 3 ? 'مطابق تمامًا' : 'مؤكدة',
                             color: Colors.green.shade700,
                           ),
+                        if (hist != null)
+                          _TinyPill(
+                            icon: Icons.history_rounded,
+                            text: 'من سجل التعديل',
+                            color: _historyColor,
+                          ),
                         if (c.exact && c.amountPart > 0)
                           _TinyPill(
                             icon: Icons.call_merge,
@@ -3135,6 +3302,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               ),
             ],
           ),
+          if (hist != null) _historyNote(c, hist, selected: selected),
           if (st.isReadOnly)
             _inlineHint(
               'هذه الفقاعة نُفذت سابقًا وأصبحت للقراءة فقط، لذلك لا يمكن اختيار هذه النتيجة.',
@@ -3173,6 +3341,92 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                         Clipboard.setData(ClipboardData(text: err)),
                   ),
                 ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// ما الذي تغيّر في الحركة بعد الرسالة: الاسم الجديد و/أو المبلغ الجديد
+  Widget _historyNote(_Candidate c, _HistoryHit h, {required bool selected}) {
+    final tx = c.tx;
+    final oldName = h.oldName;
+    final oldAmount = h.oldAmount;
+    final oldCurrency = h.oldCurrency ?? tx.currency;
+    final lines = <(String, String, String)>[
+      if (oldName != null) ('الاسم الجديد', tx.beneficiary, oldName),
+      if (oldAmount != null && (oldAmount - tx.amount).abs() > _AmountFit.tol)
+        (
+          'المبلغ الجديد',
+          '${_formatAmount(tx.amount)} ${tx.currency}',
+          '${_formatAmount(oldAmount)} $oldCurrency',
+        ),
+      if (oldAmount != null && (oldAmount - tx.amount).abs() <= _AmountFit.tol)
+        ('العملة الجديدة', tx.currency, oldCurrency),
+    ];
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsetsDirectional.only(start: 44, top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: _historyColor.withValues(alpha: .07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _historyColor.withValues(alpha: .35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.history_rounded, size: 16, color: _historyColor),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  h.strong
+                      ? 'الرسالة تطابق هذه الحركة قبل تعديلها'
+                      : 'تشبه هذه الحركة قبل تعديلها',
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w900,
+                    color: _historyColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          for (final l in lines)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      text: '${l.$1}: ',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    TextSpan(
+                      text: l.$2,
+                      style: const TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                    TextSpan(
+                      text: '  (كان: ${l.$3})',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    ),
+                  ],
+                ),
+                style: const TextStyle(fontSize: 12.5),
+              ),
+            ),
+          if (h.strong && !selected)
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: Text(
+                'لا تُختار تلقائيًا — اضغط عليها إذا كانت هي الحركة الصحيحة.',
+                style: TextStyle(fontSize: 11.5),
               ),
             ),
         ],
@@ -3710,6 +3964,9 @@ class _Candidate {
   /// بيانات الاختيار التلقائي (قوة المطابقة، التوأم، التاريخ)
   final rm.AutoPick pick;
 
+  /// مطابقة من سجل التعديل (اسم أو مبلغ قبل تعديل الحركة)، أو null
+  final _HistoryHit? history;
+
   _Candidate({
     required this.tx,
     required this.delta,
@@ -3718,6 +3975,31 @@ class _Candidate {
     this.rank = 0,
     this.currencyOk = true,
     this.amountPart = 0,
+    this.history,
+  });
+}
+
+/// الرسالة تطابق اسمًا أو مبلغًا كانت عليه الحركة قبل تعديلها.
+class _HistoryHit {
+  /// تطابق الاسم المعتمد: القديم إن كان هو الأقوى، وإلا الحالي
+  final rm.NameMatch nameMatch;
+
+  /// الاسم القديم الذي طابق الرسالة (null = الاسم الحالي هو المطابق)
+  final String? oldName;
+
+  /// المبلغ القديم وعملته اللذان طابقا الرسالة (null = المبلغ الحالي)
+  final double? oldAmount;
+  final String? oldCurrency;
+
+  /// الاسم والمبلغ كلاهما متطابقان بعد احتساب القيم القديمة
+  final bool strong;
+
+  const _HistoryHit({
+    required this.nameMatch,
+    this.oldName,
+    this.oldAmount,
+    this.oldCurrency,
+    this.strong = false,
   });
 }
 

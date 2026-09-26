@@ -1174,8 +1174,32 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
     }
 
+    // كلمة مقدار في سطر بعده («250» ثم «الف»): تُحسب مع السطر المضغوط
+    final extraLines = <String>[];
+    if (keptTokens.isNotEmpty) {
+      for (int li = lineIndex + 1; li < seg.lines.length; li++) {
+        final toks = _tokensFromLine(seg.lines[li]);
+        final next = <String>[];
+        for (int ti = 0; ti < toks.length; ti++) {
+          final pos = _TokPos(li, ti);
+          if (sel.nameTokens.contains(pos)) continue;
+          if (sel.phoneLikeTokens.contains(pos)) continue;
+          if (_isIgnoredWord(toks[ti])) continue;
+          next.add(toks[ti]);
+        }
+        if (next.isEmpty) continue;
+        if (ad.AmountDetector.isMagnitudeOnlyLine(
+          next,
+          currencyHints: _currencyHintsFromSettings(),
+        )) {
+          extraLines.add(next.join(' '));
+        }
+        break;
+      }
+    }
+
     final amtRes = ad.AmountDetector.detect(
-      [keptTokens.join(' ')],
+      [keptTokens.join(' '), ...extraLines],
       currencyHints: _currencyHintsFromSettings(),
       conflictThreshold: 0.35,
       customWordValues: _amountWordValues,
@@ -3553,20 +3577,19 @@ class _BubbleScreenState extends State<BubbleScreen> {
   String _anyTxLabel(TransactionModel tx) =>
       tx.companyMovementType?.label ?? _txStatusLabel(tx.status);
 
-  /// فحص التكرار على دفعات مع شريط تقدم:
-  /// - مطابقة تامة (الاسم + المبلغ + العملة + نفس الدقيقة): في كل الحسابات
-  ///   وكل الأوقات وكل الحالات (حتى الملغية والمستلمة).
+  /// فحص التكرار على دفعات مع شريط تقدم — داخل الحساب الحالي فقط:
+  /// - مطابقة تامة (الاسم + المبلغ + العملة + نفس الدقيقة): كل الأوقات وكل
+  ///   الحالات (حتى الملغية والمستلمة).
   /// - الاسم + المبلغ + العملة: خلال المدة المحددة في الإعدادات، بكل الحالات.
   /// - الاسم فقط: آخر يومين.
   /// - التكرار داخل النص نفسه.
   Future<List<_DuplicateWarningItem>> _scanDuplicates(
     List<_PendingTxDraft> drafts,
   ) async {
-    final all = DatabaseService.transactionsBox.values.toList();
-    final accountsById = <int, Account>{
-      for (final account in DatabaseService.accountsBox.values)
-        account.id: account,
-    };
+    final accountId = widget.account.id;
+    final all = DatabaseService.transactionsBox.values
+        .where((t) => t.accountId == accountId)
+        .toList();
     final now = DateTime.now();
     final strongDays = _prefs.duplicateDays;
     const weakDays = 2;
@@ -3606,22 +3629,18 @@ class _BubbleScreenState extends State<BubbleScreen> {
         final t = all[ti];
         final idxs = byName[_txNormName(t)];
         if (idxs == null) return;
-        final account = accountsById[t.accountId];
 
         for (final di in idxs) {
           final d = drafts[di];
           final sameAmount = _sameAmount(t.amount, d.amount);
           final sameCurrency = _eqCur(t.currency, d.currency);
 
-          // مطابقة تامة: أي حساب، أي وقت، أي حالة
+          // مطابقة تامة: أي وقت، أي حالة
           if (sameAmount && sameCurrency && _sameExactMinute(t.date, d.date)) {
             items[di].exactCritical.add(t);
             continue;
           }
 
-          if (account == null || account.type != widget.account.type) {
-            continue;
-          }
           // في حسابات الشركة نقارن نفس الاتجاه (مرسلة/مستقبلة) حتى لو كانت ملغية
           if (_isCompanyAccount &&
               (t.companyMovementType?.isSent ?? false) !=
@@ -3744,8 +3763,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
     );
     final needsConfirm = hasCritical || hasStrong;
     final scopeLabel = _isCompanyAccount
-        ? 'حسابات الشركة وبنفس اتجاه الحركة (يشمل الملغية)'
-        : 'حسابات المكتب (يشمل المستلمة والملغية)';
+        ? 'هذا الحساب فقط وبنفس اتجاه الحركة (يشمل الملغية)'
+        : 'هذا الحساب فقط (يشمل المستلمة والملغية)';
 
     return await showDialog<bool>(
           context: context,
@@ -4035,7 +4054,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  'المطابقة التامة: كل الحسابات وكل الأوقات • '
+                                  'المطابقة التامة: كل الأوقات • '
                                   'الاسم+المبلغ+العملة: آخر ${_prefs.duplicateDays} يومًا • '
                                   'الاسم فقط: آخر يومين — ضمن $scopeLabel',
                                   style: TextStyle(
@@ -4505,7 +4524,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
         } else {
           d.transaction.applyStatus(TransactionStatus.cancelled, at: d.date);
         }
-        TxHistoryService.annotate([d.transaction.id], 'تحليل الرسائل');
+        TxHistoryService.annotate(
+          [d.transaction.id],
+          'تحليل الرسائل',
+          at: d.date,
+        );
         await d.transaction.save();
         cancelRecords.add(
           OperationTxRecord(
@@ -5837,7 +5860,13 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (amount != null && amount > 0) tx.amount = amount;
         final currency = d.currency;
         if (currency != null && currency.isNotEmpty) tx.currency = currency;
-        TxHistoryService.annotate([tx.id], 'تحليل الرسائل (رسالة تعديل)');
+        // وقت التعديل = وقت الرسالة (مثل الإضافة والإلغاء)
+        final at = _segments[d.segIndex].timestamp ?? DateTime.now();
+        TxHistoryService.annotate(
+          [tx.id],
+          'تحليل الرسائل (رسالة تعديل)',
+          at: at,
+        );
         await tx.save();
         _txNormNames[tx] = null;
         if (name != null && !_knownBeneficiaryNames.contains(tx.beneficiary)) {
@@ -5855,7 +5884,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
         _editedSummaries[d.segIndex] = _EditedSummary(
           name: tx.beneficiary,
           lines: lines,
-          date: DateTime.now(),
+          date: at,
         );
         done++;
         _setProgress(

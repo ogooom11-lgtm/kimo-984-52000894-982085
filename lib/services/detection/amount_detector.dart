@@ -578,6 +578,121 @@ class AmountDetector {
     return double.tryParse(t);
   }
 
+  // ========= كلمة المقدار في سطر مستقل =========
+
+  /// توكن رقمي صالح ليكون جزءًا من مبلغ (ليس هاتفًا ولا كودًا ولا وقتًا).
+  static bool _isMoneyDigitToken(String t) {
+    if (!_hasDigits(t)) return false;
+    if (t.contains('+') || t.contains('#')) return false;
+    if (_isPhoneLikeToken(t) || _isLongIdToken(t)) return false;
+    if (_isTimeOrDateToken(t)) return false;
+    return parseAmountToken(_normalizeInlineAmountToken(t)) != null;
+  }
+
+  /// سطر يبدأ بكلمة مقدار (ألف، مليون...) وليس بعدها إلا عملة أو كلمة مبلغ
+  /// أو كلمة متجاهلة: «الف» ، «ألف دولار» ، «مليون $».
+  static bool isMagnitudeOnlyLine(
+    List<String> tokens, {
+    Set<String> currencyHints = const <String>{},
+    List<String> amountKeywords = const <String>[],
+    List<String> ignoredWords = const <String>[],
+  }) => _isMagnitudeOnlyTokens(
+    tokens,
+    currencyHints,
+    amountKeywords.map(_cleanToken).where((e) => e.isNotEmpty).toSet(),
+    ignoredWords.map(_cleanToken).where((e) => e.isNotEmpty).toSet(),
+  );
+
+  static bool _isMagnitudeOnlyTokens(
+    List<String> tokens,
+    Set<String> currencyHints,
+    Set<String> amountKeywordSet,
+    Set<String> ignoredSet,
+  ) {
+    var seenMagnitude = false;
+    for (final t in tokens) {
+      if (_cleanToken(t).isEmpty || _isIgnoredExact(t, ignoredSet)) continue;
+      if (!seenMagnitude) {
+        if (!_isMoneyMagnitudeToken(t)) return false;
+        seenMagnitude = true;
+        continue;
+      }
+      if (_containsCurrencyHint(t, currencyHints)) continue;
+      if (_isAmountKeywordExact(t, amountKeywordSet)) continue;
+      return false;
+    }
+    return seenMagnitude;
+  }
+
+  /// آخر كلمة في السطر رقم مبلغ (بدون مقدار ملزوق به) أو عدد لفظي ليس مقدارًا.
+  static bool _endsWithAmount(
+    List<String> tokens,
+    Set<String> ignoredSet,
+    Map<String, double> customWordValues,
+    Map<String, bool> numberWordCache,
+  ) {
+    if (tokens.join(' ').contains('#')) return false;
+    if (_lineLooksLikeSplitPhone(tokens)) return false;
+    for (int i = tokens.length - 1; i >= 0; i--) {
+      final t = tokens[i];
+      if (_cleanToken(t).isEmpty || _isIgnoredExact(t, ignoredSet)) continue;
+      if (_hasDigits(t)) {
+        return _isMoneyDigitToken(t) &&
+            _extractEmbeddedMoneyMagnitude(_normalizeInlineAmountToken(t)) ==
+                null;
+      }
+      if (_isMagnitudeWord(_normalizeArabic(_cleanToken(t)))) return false;
+      return _isNumberWord(t, customWordValues, numberWordCache);
+    }
+    return false;
+  }
+
+  /// «250» ثم «الف» في سطر بعده (ولو بينهما أسطر فارغة) = «250 الف»: سطر كلمة
+  /// المقدار يُلحق بآخر سطر غير فارغ قبله إذا كان ينتهي برقم أو عدد لفظي.
+  /// التوكنات تحتفظ بمواقعها الأصلية، فتعليم المبلغ في النص لا يتأثر.
+  static List<List<AmountPreparedToken>> _joinMagnitudeLines(
+    List<List<AmountPreparedToken>> rows, {
+    required Set<String> currencyHints,
+    required Set<String> amountKeywordSet,
+    required Set<String> ignoredSet,
+    required Map<String, double> customWordValues,
+    required Map<String, bool> numberWordCache,
+  }) {
+    List<List<AmountPreparedToken>>? out;
+    int? lastIdx;
+    for (int li = 0; li < rows.length; li++) {
+      final row = out?[li] ?? rows[li];
+      if (row.isEmpty) continue;
+      final prevIdx = lastIdx;
+      lastIdx = li;
+      if (prevIdx == null) continue;
+      final tokens = [for (final p in row) p.token];
+      if (!_isMagnitudeOnlyTokens(
+        tokens,
+        currencyHints,
+        amountKeywordSet,
+        ignoredSet,
+      )) {
+        continue;
+      }
+      final prevRow = out?[prevIdx] ?? rows[prevIdx];
+      final prevTokens = [for (final p in prevRow) p.token];
+      if (!_endsWithAmount(
+        prevTokens,
+        ignoredSet,
+        customWordValues,
+        numberWordCache,
+      )) {
+        continue;
+      }
+      out ??= List<List<AmountPreparedToken>>.of(rows);
+      out[prevIdx] = [...prevRow, ...row];
+      out[li] = const <AmountPreparedToken>[];
+      lastIdx = prevIdx;
+    }
+    return out ?? rows;
+  }
+
   // ========= التحضير من lines إلى prepared =========
 
   static List<List<AmountPreparedToken>> _toPrepared(List<String> lines) {
@@ -665,6 +780,16 @@ class AmountDetector {
       return bonus;
     }
 
+    // كلمة المقدار في سطر مستقل بعد الرقم: «250» ثم «الف» = 250 ألف
+    final rows = _joinMagnitudeLines(
+      preparedTokensByLine,
+      currencyHints: currencyHints,
+      amountKeywordSet: amountKeywordSet,
+      ignoredSet: ignoredSet,
+      customWordValues: customWordValues,
+      numberWordCache: numberWordCache,
+    );
+
     int anchorBonus(Position pos) {
       if (currencyAnchor == null || currencyAnchor.x != pos.x) return 0;
       var bonus = 2;
@@ -679,8 +804,8 @@ class AmountDetector {
       return bonus;
     }
 
-    for (int li = 0; li < preparedTokensByLine.length; li++) {
-      final row = preparedTokensByLine[li];
+    for (int li = 0; li < rows.length; li++) {
+      final row = rows[li];
       if (row.isEmpty) continue;
 
       final tokens = row.map((e) => e.token).toList();
