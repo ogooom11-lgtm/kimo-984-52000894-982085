@@ -129,6 +129,7 @@ class _SettingsScreenState extends State<SettingsScreen>
             onTap: () => _open(_WordValuesPage(store: _store)),
           ),
           wordTile(WordListKind.cancelKeyword),
+          wordTile(WordListKind.editKeyword),
         ],
       ),
       _HubGroup(
@@ -336,6 +337,7 @@ class _SettingsStore extends ChangeNotifier {
     ignoredWords: [],
     lineIgnoredWords: [],
     cancelKeywords: ['الغاء'],
+    editKeywords: ['تعديل'],
     amountWordValues: {},
     bubbleReadyNames: [],
     bubbleQuickActions: [
@@ -362,6 +364,7 @@ class _SettingsStore extends ChangeNotifier {
     ignoredWords: List<String>.from(s.ignoredWords),
     lineIgnoredWords: List<String>.from(s.lineIgnoredWords),
     cancelKeywords: List<String>.from(s.cancelKeywords),
+    editKeywords: List<String>.from(s.editKeywords),
     amountWordValues: Map<String, double>.from(s.amountWordValues),
     bubbleReadyNames: List<String>.from(s.bubbleReadyNames),
     companyUserNames: List<String>.from(s.companyUserNames),
@@ -725,6 +728,19 @@ const List<_WordSpec> _wordSpecs = [
     icon: Icons.cancel_schedule_send_rounded,
     color: _kPink,
     keywords: 'الغاء ملغي',
+  ),
+  _WordSpec(
+    kind: WordListKind.editKeyword,
+    title: 'كلمات التعديل',
+    subtitle: 'تجعل الرسالة تعديلًا لحركة موجودة',
+    description:
+        'إذا ظهرت إحدى هذه الكلمات داخل رسالة، تُعامل الفقاعة كتعديل لحركة موجودة: '
+        'يُبحث عن الحركة بالاسم، ثم تختار الحركة وتختار ما تريد تعديله (الاسم أو المبلغ أو العملة).',
+    hint: 'أضف كلمة، مثل: تعديل',
+    icon: Icons.edit_note_rounded,
+    color: _kAmber,
+    keywords: 'تعديل تصحيح تغيير',
+    presets: ['تعديل', 'تعديل:', 'تصحيح', 'عدل'],
   ),
   _WordSpec(
     kind: WordListKind.forbidden,

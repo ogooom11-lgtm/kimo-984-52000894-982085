@@ -302,6 +302,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
         forbiddenPhrases: _settings.forbiddenPhrases,
         amountKeywords: _amountKeywords,
         cancelKeywords: _settings.cancelKeywords,
+        editKeywords: _settings.editKeywords,
       );
 
   _BubbleState _buildInitialState(_ParsedSegment seg, int segIndex) {

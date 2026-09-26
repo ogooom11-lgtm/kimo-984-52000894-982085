@@ -14,6 +14,7 @@ enum WordListKind {
   ignored,
   lineIgnored,
   cancelKeyword,
+  editKeyword,
   readyName,
   companyUser,
 }
@@ -35,6 +36,8 @@ extension WordListKindInfo on WordListKind {
         return 'كلمات تجاهل السطر';
       case WordListKind.cancelKeyword:
         return 'كلمات الإلغاء';
+      case WordListKind.editKeyword:
+        return 'كلمات التعديل';
       case WordListKind.readyName:
         return 'الأسماء الجاهزة';
       case WordListKind.companyUser:
@@ -50,6 +53,7 @@ class SettingsWords {
     currencyMap: {'\$': 'دولار'},
     ignoredWords: [],
     cancelKeywords: ['الغاء'],
+    editKeywords: ['تعديل'],
   );
 
   static Settings load() => DatabaseService.getSettings() ?? defaults();
@@ -70,6 +74,8 @@ class SettingsWords {
         return s.lineIgnoredWords;
       case WordListKind.cancelKeyword:
         return s.cancelKeywords;
+      case WordListKind.editKeyword:
+        return s.editKeywords;
       case WordListKind.readyName:
         return s.bubbleReadyNames;
       case WordListKind.companyUser:
@@ -99,6 +105,9 @@ class SettingsWords {
         break;
       case WordListKind.cancelKeyword:
         s.cancelKeywords = v;
+        break;
+      case WordListKind.editKeyword:
+        s.editKeywords = v;
         break;
       case WordListKind.readyName:
         s.bubbleReadyNames = v;

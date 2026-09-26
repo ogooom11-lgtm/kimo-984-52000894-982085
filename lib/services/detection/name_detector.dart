@@ -139,6 +139,7 @@ class NameDetectorConfig {
   final PhraseSet forbidden;
   final PhraseSet amountKeywords;
   final PhraseSet cancelKeywords;
+  final PhraseSet editKeywords;
 
   final List<List<String>> _knownNames = [];
   final Map<String, List<int>> _knownIndex = {};
@@ -153,13 +154,15 @@ class NameDetectorConfig {
     List<String> forbiddenPhrases = const [],
     List<String> amountKeywords = const [],
     List<String> cancelKeywords = const [],
+    List<String> editKeywords = const [],
   }) : nameKeywords = PhraseSet(nameKeywords),
        ignored = PhraseSet(ignoredWords),
        lineIgnored = PhraseSet(lineIgnoredWords),
        currency = PhraseSet(currencyWords),
        forbidden = PhraseSet([...forbiddenWords, ...forbiddenPhrases]),
        amountKeywords = PhraseSet(amountKeywords),
-       cancelKeywords = PhraseSet(cancelKeywords) {
+       cancelKeywords = PhraseSet(cancelKeywords),
+       editKeywords = PhraseSet(editKeywords) {
     final seen = <String>{};
     for (final name in knownNames) {
       final keys = tokensFromLine(
@@ -220,6 +223,7 @@ class NameDetectorConfig {
     if (amountKeywords.matchAt(keys, i) > 0) return 'كلمة مبلغ';
     if (nameKeywords.matchAt(keys, i) > 0) return 'كلمة اسم';
     if (cancelKeywords.matchAt(keys, i) > 0) return 'كلمة إلغاء';
+    if (editKeywords.matchAt(keys, i) > 0) return 'كلمة تعديل';
     if (lineIgnored.containsKey(k)) return 'كلمة تجاهل سطر';
     if (phoneWordKeys.contains(k)) return 'كلمة هاتف';
     if (amountUnitKeys.contains(k)) return 'وحدة مبلغ';
@@ -270,7 +274,8 @@ class NameDetectorConfig {
         forbidden.matchAt(keys, i) > 0 ||
         amountKeywords.matchAt(keys, i) > 0 ||
         nameKeywords.matchAt(keys, i) > 0 ||
-        cancelKeywords.matchAt(keys, i) > 0) {
+        cancelKeywords.matchAt(keys, i) > 0 ||
+        editKeywords.matchAt(keys, i) > 0) {
       return const [];
     }
     final rest = collectSpan(
@@ -617,10 +622,21 @@ class NameDetector {
         final onlyForbiddenBefore =
             others.isNotEmpty &&
             others.every((x) => line.forbiddenIdx.contains(x) && x < run.first);
-        if (others.isEmpty &&
+        // كلمة إلغاء/تعديل قبل الاسم (مثل «تعديل سامر خليل») لا تمنع اعتبار
+        // بقية السطر اسمًا
+        final actionIdx = <int>{
+          for (final set in [config.cancelKeywords, config.editKeywords])
+            for (final hit in set.findAll(keys))
+              for (int x = hit.start; x < hit.start + hit.length; x++) x,
+        };
+        final onlyActionBefore =
+            others.isNotEmpty &&
+            others.every((x) => actionIdx.contains(x) && x < run.first);
+        final nameShaped =
             run.length >= 2 &&
             run.length <= 5 &&
-            run.every((x) => keys[x].length >= 2)) {
+            run.every((x) => keys[x].length >= 2);
+        if ((others.isEmpty || onlyActionBefore) && nameShaped) {
           addCandidate(li, run, 30, NameEvidence.lineShape);
         } else if (onlyForbiddenBefore && run.length <= 5) {
           addCandidate(li, run, 30, NameEvidence.lineShape);

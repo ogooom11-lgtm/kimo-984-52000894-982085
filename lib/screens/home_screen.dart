@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:floating_notes/floating_notes.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
@@ -45,9 +46,22 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<dynamic, String> _searchBlobCache = {};
   final Map<dynamic, int> _searchStampCache = {};
 
+  // فقاعة الملاحظات العائمة
+  bool _notesShowing = false;
+  int _notesCount = 0;
+  bool _notesPendingShow = false;
+  StreamSubscription<String>? _notesSub;
+  AppLifecycleListener? _notesLifecycle;
+
   @override
   void initState() {
     super.initState();
+
+    if (FloatingNotes.isSupported) {
+      _notesSub = FloatingNotes.changes.listen((_) => _refreshNotesState());
+      _notesLifecycle = AppLifecycleListener(onResume: _onResumeForNotes);
+      _refreshNotesState();
+    }
 
     _searchCtrl.addListener(() {
       _liveQuery = _searchCtrl.text.trim();
@@ -70,7 +84,96 @@ class _HomeScreenState extends State<HomeScreen> {
     _debounce?.cancel();
     _searchCtrl.dispose();
     _searchFocus.dispose();
+    _notesSub?.cancel();
+    _notesLifecycle?.dispose();
     super.dispose();
+  }
+
+  // ---------------- فقاعة الملاحظات ----------------
+
+  Future<void> _refreshNotesState() async {
+    final showing = await FloatingNotes.isShowing();
+    final notes = await FloatingNotes.getNotes();
+    if (!mounted) return;
+    if (showing == _notesShowing && notes.length == _notesCount) return;
+    setState(() {
+      _notesShowing = showing;
+      _notesCount = notes.length;
+    });
+  }
+
+  /// بعد الرجوع من صفحة الإذن: نُظهر الفقاعة تلقائيًا إن مُنح الإذن
+  Future<void> _onResumeForNotes() async {
+    if (_notesPendingShow) {
+      _notesPendingShow = false;
+      if (await FloatingNotes.canDrawOverlays()) {
+        final shown = await FloatingNotes.show();
+        if (shown) _notesSnack(_notesShownMessage);
+      }
+    }
+    await _refreshNotesState();
+  }
+
+  static const String _notesShownMessage =
+      'ظهرت فقاعة الملاحظات: اسحبها لأي مكان، واضغط عليها لإضافة ملاحظة';
+
+  void _notesSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _toggleFloatingNotes() async {
+    if (!FloatingNotes.isSupported) {
+      _notesSnack('فقاعة الملاحظات متاحة على أندرويد فقط');
+      return;
+    }
+    if (await FloatingNotes.isShowing()) {
+      await FloatingNotes.hide();
+      await _refreshNotesState();
+      _notesSnack('تم إخفاء فقاعة الملاحظات (ملاحظاتك محفوظة)');
+      return;
+    }
+    if (!await FloatingNotes.canDrawOverlays()) {
+      if (!mounted) return;
+      final ok = await _askNotesPermission();
+      if (ok != true) return;
+      _notesPendingShow = true;
+      await FloatingNotes.openPermissionSettings();
+      return;
+    }
+    final shown = await FloatingNotes.show();
+    await _refreshNotesState();
+    _notesSnack(shown ? _notesShownMessage : 'تعذر إظهار فقاعة الملاحظات');
+  }
+
+  Future<bool?> _askNotesPermission() {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          icon: const Icon(Icons.sticky_note_2_rounded),
+          title: const Text('السماح بالظهور فوق التطبيقات'),
+          content: const Text(
+            'حتى تبقى فقاعة الملاحظات ظاهرة وأنت خارج التطبيق، فعّل إذن '
+            '«الظهور فوق التطبيقات الأخرى» لتطبيق «مدير الحسابات» ثم ارجع '
+            'إلى التطبيق، وستظهر الفقاعة تلقائيًا.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('لاحقًا'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('فتح الإعدادات'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   bool get _hasActiveSearch =>
@@ -1186,11 +1289,21 @@ class _HomeScreenState extends State<HomeScreen> {
                       foregroundColor: cs.onSurface,
                       surfaceTintColor: Colors.transparent,
                       scrolledUnderElevation: 0,
-                      title: _HomeGreeting(
-                        greeting: _greeting(),
-                        morning: _isMorning(),
+                      title: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: AlignmentDirectional.centerStart,
+                        child: _HomeGreeting(
+                          greeting: _greeting(),
+                          morning: _isMorning(),
+                        ),
                       ),
                       actions: [
+                        _NotesHeaderButton(
+                          active: _notesShowing,
+                          count: _notesCount,
+                          onPressed: _toggleFloatingNotes,
+                        ),
+                        const SizedBox(width: 8),
                         _HeaderIconButton(
                           icon: Icons.history_rounded,
                           tooltip: 'سجل العمليات',
@@ -1946,6 +2059,79 @@ class _HomeGreeting extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// زر «ملاحظات» في رأس الصفحة: يُظهر فقاعة الملاحظات العائمة أو يخفيها
+class _NotesHeaderButton extends StatelessWidget {
+  final bool active;
+  final int count;
+  final VoidCallback onPressed;
+
+  const _NotesHeaderButton({
+    required this.active,
+    required this.count,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = active ? cs.onPrimary : cs.onSurface;
+    return Tooltip(
+      message: active ? 'إخفاء فقاعة الملاحظات' : 'إظهار فقاعة الملاحظات',
+      child: Material(
+        color: active ? cs.primary : _cardBg(context),
+        shape: StadiumBorder(
+          side: BorderSide(color: active ? cs.primary : _outline(context)),
+        ),
+        child: InkWell(
+          customBorder: const StadiumBorder(),
+          onTap: onPressed,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.sticky_note_2_rounded, size: 19, color: fg),
+                const SizedBox(width: 6),
+                Text(
+                  'ملاحظات',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13.5,
+                    color: fg,
+                  ),
+                ),
+                if (count > 0) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: active
+                          ? cs.onPrimary.withValues(alpha: .22)
+                          : cs.primary.withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '$count',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w900,
+                        color: active ? cs.onPrimary : cs.primary,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

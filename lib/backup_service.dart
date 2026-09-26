@@ -341,6 +341,7 @@ class BackupService {
       'ignoredWords': s.ignoredWords,
       'lineIgnoredWords': s.lineIgnoredWords,
       'cancelKeywords': s.cancelKeywords,
+      'editKeywords': s.editKeywords,
       'amountWordValues': s.amountWordValues,
       'bubbleReadyNames': s.bubbleReadyNames,
       'bubbleQuickActions': s.bubbleQuickActions
@@ -372,6 +373,10 @@ class BackupService {
       cancelKeywords: _stringList(map['cancelKeywords']).isEmpty
           ? const ['الغاء']
           : _stringList(map['cancelKeywords']),
+      // نسخة قديمة بدون كلمات تعديل: الكلمة الافتراضية «تعديل»
+      editKeywords: map.containsKey('editKeywords')
+          ? _stringList(map['editKeywords'])
+          : const ['تعديل'],
       amountWordValues: _doubleMap(map['amountWordValues']),
       bubbleReadyNames: _stringList(map['bubbleReadyNames']),
       bubbleQuickActions: _bubbleActionsFromAny(map['bubbleQuickActions']),

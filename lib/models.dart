@@ -268,6 +268,10 @@ class Settings extends HiveObject {
   @HiveField(12)
   Map<String, dynamic> bubbleUiPrefs;
 
+  /// كلمات تجعل الرسالة «تعديل حركة موجودة» في شاشة الفقاعات.
+  @HiveField(13)
+  List<String> editKeywords;
+
   Settings({
     required this.nameKeywords,
     required this.amountKeywords,
@@ -282,6 +286,7 @@ class Settings extends HiveObject {
     this.forbiddenWords = const [],
     this.forbiddenPhrases = const [],
     this.bubbleUiPrefs = const {},
+    this.editKeywords = const ['تعديل'],
   });
 }
 

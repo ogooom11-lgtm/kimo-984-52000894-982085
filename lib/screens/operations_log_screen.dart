@@ -101,6 +101,7 @@ class _OperationsLogScreenState extends State<OperationsLogScreen> {
       case OperationKind.delete:
         return const Color(0xFF6D4C41);
       case OperationKind.manualEdit:
+      case OperationKind.bubbleEdit:
         return const Color(0xFFF08006);
     }
   }
@@ -121,6 +122,8 @@ class _OperationsLogScreenState extends State<OperationsLogScreen> {
         return Icons.delete_sweep_rounded;
       case OperationKind.manualEdit:
         return Icons.edit_note_rounded;
+      case OperationKind.bubbleEdit:
+        return Icons.mark_chat_read_rounded;
     }
   }
 
@@ -161,7 +164,8 @@ class _OperationsLogScreenState extends State<OperationsLogScreen> {
         return e.kind == OperationKind.statusChange ||
             e.kind == OperationKind.move ||
             e.kind == OperationKind.delete ||
-            e.kind == OperationKind.manualEdit;
+            e.kind == OperationKind.manualEdit ||
+            e.kind == OperationKind.bubbleEdit;
       case _LogFilter.undone:
         return e.undone;
     }

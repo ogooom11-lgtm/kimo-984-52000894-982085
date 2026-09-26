@@ -1,0 +1,21 @@
+name: floating_notes
+description: >-
+  Local Android plugin for my_list: a draggable floating notes bubble that stays
+  over other apps (overlay + foreground service), with notes kept in order.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.8.1
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.mylist.floating_notes
+        pluginClass: FloatingNotesPlugin

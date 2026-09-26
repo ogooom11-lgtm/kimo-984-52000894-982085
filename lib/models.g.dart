@@ -168,13 +168,16 @@ class SettingsAdapter extends TypeAdapter<Settings> {
               (key, value) => MapEntry(key.toString(), value),
             )
           : const <String, dynamic>{},
+      editKeywords: fields[13] is List
+          ? (fields[13] as List).map((e) => e.toString()).toList()
+          : const <String>['تعديل'],
     );
   }
 
   @override
   void write(BinaryWriter writer, Settings obj) {
     writer
-      ..writeByte(13)
+      ..writeByte(14)
       ..writeByte(0)
       ..write(obj.nameKeywords)
       ..writeByte(1)
@@ -200,7 +203,9 @@ class SettingsAdapter extends TypeAdapter<Settings> {
       ..writeByte(11)
       ..write(obj.forbiddenPhrases)
       ..writeByte(12)
-      ..write(obj.bubbleUiPrefs);
+      ..write(obj.bubbleUiPrefs)
+      ..writeByte(13)
+      ..write(obj.editKeywords);
   }
 
   @override

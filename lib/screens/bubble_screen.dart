@@ -22,11 +22,12 @@ import '../services/detection/amount_detector.dart' as ad;
 import '../services/detection/currency_detector.dart' as cd;
 import '../services/detection/segment_splitter.dart';
 import '../services/detection/text_tokens.dart' as tt;
+import '../services/detection/edit_message.dart' as em;
 
 /// مراحل التحديد
 enum SelectionStage { name, amount, currency, done }
 
-enum BubbleActionMode { add, cancel }
+enum BubbleActionMode { add, edit, cancel }
 
 /// مقطع واحد بين هيدر واتساب والهيدر التالي
 class ParsedSegment {
@@ -88,6 +89,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   static const _chipYellow = Color(0xFFF0C100); // amber 700
   static const _chipRed = Color(0xFFE53935); // red 600
   static const _chipGreen = Color(0xFF43A047); // green 600
+  static const _chipEdit = Color(0xFFE08600); // amber — رسائل التعديل
   static const _forbiddenColor = Color(0xFFD84315); // deep orange 800
 
   // ألوان الأدوار (قابلة للتخصيص من الإعدادات)
@@ -106,6 +108,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   late List<String> _ignored;
   late List<String> _lineIgnored;
   late List<String> _cancelKeywords;
+  late List<String> _editKeywords;
   late Map<String, double> _amountWordValues;
   late List<String> _bubbleReadyNames;
   late List<String> _companyUserNames;
@@ -122,7 +125,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   // كاش للتوكنات والأسماء المطبّعة
   final Map<String, List<String>> _tokenCache = {};
-  final Expando<String> _txNormNames = Expando<String>('txNormName');
+  Expando<String> _txNormNames = Expando<String>('txNormName');
 
   // اقتراحات تعلّم (من كاشف العملة)
   final Set<String> _suggestCurrencySymbols = {};
@@ -137,6 +140,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
   final Set<int> _cancelCandidatesLoading = {};
   final Map<int, bool> _cancelShowMore = {};
   final Map<int, CompanyMovementType> _companyMovementOverrides = {};
+
+  // رسائل التعديل: الحركة المختارة، الحقول المختارة للتعديل، اسم بحث يدوي،
+  // فتح قائمة النتائج بعد اختيار الحركة، وملخص ما تم تعديله
+  final Map<int, int> _editSelectedTxIds = {};
+  final Map<int, Set<em.EditField>> _editFields = {};
+  final Map<int, String> _editSearchQueries = {};
+  final Set<int> _editPickerOpen = {};
+  final Map<int, _EditedSummary> _editedSummaries = {};
 
   // تعارض/اختيارات المبلغ
   final Map<int, double> _amountOverride = {};
@@ -252,6 +263,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     ignoredWords: const [],
     lineIgnoredWords: const [],
     cancelKeywords: const ['الغاء'],
+    editKeywords: const ['تعديل'],
     amountWordValues: const {},
     bubbleReadyNames: const [],
     bubbleQuickActions: const [],
@@ -266,6 +278,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _ignored = List.of(_settings.ignoredWords);
     _lineIgnored = List.of(_settings.lineIgnoredWords);
     _cancelKeywords = List.of(_settings.cancelKeywords);
+    _editKeywords = List.of(_settings.editKeywords);
     _amountWordValues = Map.of(_settings.amountWordValues);
     _bubbleReadyNames = List.of(_settings.bubbleReadyNames);
     _companyUserNames = List.of(_settings.companyUserNames);
@@ -286,6 +299,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       forbiddenPhrases: _forbiddenPhrases,
       amountKeywords: _amountKeywords,
       cancelKeywords: _cancelKeywords,
+      editKeywords: _editKeywords,
     );
     _forbiddenPhraseSet = tt.PhraseSet(_forbiddenPhrases);
     _forbiddenWordSet = tt.PhraseSet(_forbiddenWords);
@@ -308,9 +322,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final seg = _segments[i];
     final sel = _autoDetect(seg, i);
     _selections.add(sel);
-    final mode = _segmentLooksLikeCancel(seg)
-        ? BubbleActionMode.cancel
-        : BubbleActionMode.add;
+    final mode = _modeForSegment(seg);
     _segmentModes[i] = mode;
     if (mode == BubbleActionMode.cancel) {
       sel.stage = SelectionStage.name;
@@ -348,15 +360,19 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
     if (!mounted || gen != _analysisGeneration) return;
 
+    // الترتيب: الإضافات أولًا، ثم التعديلات، ثم الإلغاء
     final hasAdd = _segmentModes.values.any((m) => m == BubbleActionMode.add);
+    final hasEdit = _segmentModes.values.any((m) => m == BubbleActionMode.edit);
     setState(() {
       _analyzing = false;
-      _viewMode = hasAdd ? BubbleActionMode.add : BubbleActionMode.cancel;
+      _viewMode = hasAdd
+          ? BubbleActionMode.add
+          : (hasEdit ? BubbleActionMode.edit : BubbleActionMode.cancel);
     });
     _setProgress(null);
 
     for (var i = 0; i < _selections.length; i++) {
-      if (_modeOf(i) == BubbleActionMode.cancel) {
+      if (_needsTarget(i)) {
         _requestCancelCandidates(i);
       }
     }
@@ -367,7 +383,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     if (_busy) return;
     final targets = <int>[
       for (var i = 0; i < _selections.length; i++)
-        if (!_savedSegments.contains(i) && !_cancelledSummaries.containsKey(i))
+        if (!_savedSegments.contains(i) &&
+            !_cancelledSummaries.containsKey(i) &&
+            !_editedSummaries.containsKey(i))
           i,
     ];
     if (targets.isEmpty) return;
@@ -406,7 +424,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
     if (!mounted) return;
     for (final i in targets) {
-      if (i < _selections.length && _modeOf(i) == BubbleActionMode.cancel) {
+      if (i < _selections.length && _needsTarget(i)) {
         _requestCancelCandidates(i);
       }
     }
@@ -430,17 +448,30 @@ class _BubbleScreenState extends State<BubbleScreen> {
   String _normalizeForSearch(String s) =>
       _normalizeArabic(s).toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
 
-  bool _segmentLooksLikeCancel(ParsedSegment seg) {
+  /// نوع الفقاعة حسب كلمات الإلغاء والتعديل في الإعدادات
+  BubbleActionMode _modeForSegment(ParsedSegment seg) {
     // عنوان صف الملف المستورد («صف 5 • اسم الملف») وصفي فقط ولا يُفحص
     final header = seg.senderName.isEmpty ? '' : seg.header;
-    final text = _normalizeForSearch('$header\n${seg.lines.join('\n')}');
-    if (text.isEmpty) return false;
-
-    for (final word in _cancelKeywords) {
-      final normalized = _normalizeForSearch(word);
-      if (normalized.isNotEmpty && text.contains(normalized)) return true;
+    final kind = em.classifyMessage(
+      '$header\n${seg.lines.join('\n')}',
+      cancelKeywords: _cancelKeywords,
+      editKeywords: _editKeywords,
+      normalize: _normalizeForSearch,
+    );
+    switch (kind) {
+      case em.MessageKind.cancel:
+        return BubbleActionMode.cancel;
+      case em.MessageKind.edit:
+        return BubbleActionMode.edit;
+      case em.MessageKind.add:
+        return BubbleActionMode.add;
     }
-    return false;
+  }
+
+  /// فقاعات تحتاج اختيار حركة موجودة (إلغاء أو تعديل)
+  bool _needsTarget(int segIndex) {
+    final m = _modeOf(segIndex);
+    return m == BubbleActionMode.cancel || m == BubbleActionMode.edit;
   }
 
   BubbleActionMode _modeOf(int segIndex) =>
@@ -474,15 +505,23 @@ class _BubbleScreenState extends State<BubbleScreen> {
     setState(() {
       _segmentModes[segIndex] = mode;
       _invalidateCancelCandidates(segIndex);
+      _clearEditState(segIndex);
       if (mode == BubbleActionMode.cancel) {
         _selections[segIndex].stage = SelectionStage.name;
       } else {
         _refreshStageForSegment(segIndex);
       }
     });
-    if (mode == BubbleActionMode.cancel) {
+    if (_needsTarget(segIndex)) {
       _requestCancelCandidates(segIndex);
     }
+  }
+
+  void _clearEditState(int segIndex) {
+    _editSelectedTxIds.remove(segIndex);
+    _editFields.remove(segIndex);
+    _editSearchQueries.remove(segIndex);
+    _editPickerOpen.remove(segIndex);
   }
 
   List<String> _nameWords(String value) => _normalizeForSearch(
@@ -557,11 +596,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
   bool _isExactCancelMatch(TransactionModel tx, String name) =>
       _normalizeForSearch(tx.beneficiary) == _normalizeForSearch(name);
 
-  Future<List<TransactionModel>> _computeCancelCandidates(String name) async {
+  /// نتائج البحث بالاسم داخل هذا الحساب. للإلغاء: الحركات القابلة للإلغاء في
+  /// حسابات الشركات؛ للتعديل: كل حركات الحساب.
+  Future<List<TransactionModel>> _computeCancelCandidates(
+    String name, {
+    bool forEdit = false,
+  }) async {
     final pool = <TransactionModel>[
       for (final tx in _allTransactions)
         if (tx.accountId == widget.account.id &&
-            (!_isCompanyAccount ||
+            (forEdit ||
+                !_isCompanyAccount ||
                 (tx.companyMovementType != null &&
                     !tx.companyMovementType!.isCancelled)))
           tx,
@@ -600,9 +645,22 @@ class _BubbleScreenState extends State<BubbleScreen> {
     return scored.map((e) => e.tx).toList();
   }
 
-  String _cancelQueryForSegment(int segIndex) => _normalizeForSearch(
-    _buildSelectedName(_segments[segIndex], _selections[segIndex], segIndex),
-  );
+  String _cancelQueryForSegment(int segIndex) =>
+      _normalizeForSearch(_targetSearchName(segIndex));
+
+  /// الاسم الذي نبحث به عن الحركة. في التعديل يمكن كتابة اسم بحث يدويًا، وإلا
+  /// فهو الاسم المحدد في الرسالة.
+  String _targetSearchName(int segIndex) {
+    if (_modeOf(segIndex) == BubbleActionMode.edit) {
+      final manual = (_editSearchQueries[segIndex] ?? '').trim();
+      if (manual.isNotEmpty) return manual;
+    }
+    return _buildSelectedName(
+      _segments[segIndex],
+      _selections[segIndex],
+      segIndex,
+    ).trim();
+  }
 
   void _invalidateCancelCandidates(int segIndex) {
     _cancelCandidatesCache.remove(segIndex);
@@ -621,12 +679,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   void _requestCancelCandidates(int segIndex) {
     if (!mounted || segIndex >= _selections.length) return;
-    if (_modeOf(segIndex) != BubbleActionMode.cancel) return;
-    final name = _buildSelectedName(
-      _segments[segIndex],
-      _selections[segIndex],
-      segIndex,
-    ).trim();
+    if (!_needsTarget(segIndex)) return;
+    final name = _targetSearchName(segIndex);
     final query = _normalizeForSearch(name);
     if (query.isEmpty) return;
     if (_cancelCandidatesLoading.contains(segIndex) &&
@@ -643,7 +697,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _cancelCandidateQueries[segIndex] = query;
     });
 
-    _computeCancelCandidates(name).then((candidates) {
+    _computeCancelCandidates(
+      name,
+      forEdit: _modeOf(segIndex) == BubbleActionMode.edit,
+    ).then((candidates) {
       if (!mounted) return;
       final currentQuery = _cancelQueryForSegment(segIndex);
       if (currentQuery != query) return;
@@ -1572,7 +1629,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
             _refreshStageForSegment(segIndex);
           });
         }
-        if (_modeOf(segIndex) == BubbleActionMode.cancel) {
+        if (_needsTarget(segIndex)) {
           _requestCancelCandidates(segIndex);
         }
         return;
@@ -1689,7 +1746,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _invalidateCancelCandidates(segIndex);
       _refreshStageForSegment(segIndex);
     });
-    if (_modeOf(segIndex) == BubbleActionMode.cancel) {
+    if (_needsTarget(segIndex)) {
       _requestCancelCandidates(segIndex);
     }
   }
@@ -1751,6 +1808,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       if (inList(WordListKind.ignored)) 'مهملة',
       if (inList(WordListKind.lineIgnored)) 'تجاهل سطر',
       if (inList(WordListKind.cancelKeyword)) 'كلمة إلغاء',
+      if (inList(WordListKind.editKeyword)) 'كلمة تعديل',
       if (wordValue != null) 'قيمة: ${_fmtAmount(wordValue)}',
     ];
 
@@ -1927,6 +1985,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
                       remove: inList(WordListKind.cancelKeyword),
                     ),
                     tile(
+                      'editKeyword',
+                      Icons.edit_note_rounded,
+                      addOrRemove(WordListKind.editKeyword),
+                      Colors.orange,
+                      subtitle:
+                          'الرسالة التي تحتويها تُعامل كتعديل لحركة موجودة',
+                      remove: inList(WordListKind.editKeyword),
+                    ),
+                    tile(
                       'wordValue',
                       Icons.calculate_rounded,
                       'تعيين قيمة رقمية لهذه الكلمة',
@@ -1988,6 +2055,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
         break;
       case 'cancelKeyword':
         await toggle(WordListKind.cancelKeyword);
+        break;
+      case 'editKeyword':
+        await toggle(WordListKind.editKeyword);
         break;
       case 'currency':
         if (currencyOf != null) {
@@ -2314,7 +2384,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
       _refreshStageForSegment(segIndex);
     });
-    if (_modeOf(segIndex) == BubbleActionMode.cancel) {
+    if (_needsTarget(segIndex)) {
       _requestCancelCandidates(segIndex);
     }
   }
@@ -2639,6 +2709,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     if (_modeOf(segIndex) == BubbleActionMode.cancel) {
       return _cancelReady(segIndex) || _cancelAlreadyResolved(segIndex);
     }
+    if (_modeOf(segIndex) == BubbleActionMode.edit) {
+      return _editReady(segIndex);
+    }
     return _segmentReady(_selections[segIndex], segIndex);
   }
 
@@ -2657,6 +2730,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
       if (_modeOf(i) == BubbleActionMode.add &&
           !_savedSegments.contains(i) &&
           _segmentReady(_selections[i], i)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// فقاعات تعديل لم تُنفّذ بعد
+  bool _hasEditSegments() {
+    for (int i = 0; i < _selections.length; i++) {
+      if (_modeOf(i) == BubbleActionMode.edit &&
+          !_editedSummaries.containsKey(i)) {
         return true;
       }
     }
@@ -3332,6 +3416,29 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _companyMovementOverrides
       ..clear()
       ..addAll(newMovementOverrides);
+
+    _shiftKeys(_editSelectedTxIds, deletedIndex);
+    _shiftKeys(_editFields, deletedIndex);
+    _shiftKeys(_editSearchQueries, deletedIndex);
+    _shiftKeys(_editedSummaries, deletedIndex);
+    final newPickerOpen = <int>{
+      for (final v in _editPickerOpen)
+        if (v != deletedIndex) v > deletedIndex ? v - 1 : v,
+    };
+    _editPickerOpen
+      ..clear()
+      ..addAll(newPickerOpen);
+  }
+
+  /// إزاحة مفاتيح خريطة بعد حذف فقاعة
+  static void _shiftKeys<V>(Map<int, V> map, int deletedIndex) {
+    final next = <int, V>{};
+    map.forEach((k, v) {
+      if (k != deletedIndex) next[k > deletedIndex ? k - 1 : k] = v;
+    });
+    map
+      ..clear()
+      ..addAll(next);
   }
 
   Future<void> _confirmDeleteSegment(int segIndex) async {
@@ -4263,6 +4370,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   Future<void> _sendForMode(BubbleActionMode mode) async {
     if (_busy) return;
+    if (mode == BubbleActionMode.edit) {
+      await _sendEdits();
+      return;
+    }
 
     final drafts = mode == BubbleActionMode.add
         ? _collectReadyDrafts()
@@ -4379,7 +4490,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
       if (saved > 0) {
         for (var i = 0; i < _selections.length; i++) {
-          if (_modeOf(i) == BubbleActionMode.cancel) {
+          if (_needsTarget(i)) {
             _invalidateCancelCandidates(i);
           }
         }
@@ -4445,7 +4556,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     if (saved > 0) {
       for (var i = 0; i < _selections.length; i++) {
-        if (_modeOf(i) == BubbleActionMode.cancel) {
+        if (_needsTarget(i)) {
           _requestCancelCandidates(i);
         }
       }
@@ -4486,7 +4597,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     if (!mounted) return;
 
+    // الترتيب: بعد الإضافات ننتقل إلى التعديلات ثم الإلغاء
     if (mode == BubbleActionMode.add) {
+      if (_hasEditSegments()) {
+        setState(() => _viewMode = BubbleActionMode.edit);
+        return;
+      }
       if (_hasCancelSegments()) {
         setState(() => _viewMode = BubbleActionMode.cancel);
         return;
@@ -4495,7 +4611,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
       return;
     }
 
-    if (!_hasCancelSegments() && !_hasPendingAddSegments()) {
+    if (!_hasCancelSegments() &&
+        !_hasPendingAddSegments() &&
+        !_hasEditSegments()) {
       Navigator.pop(context, true);
     }
   }
@@ -4514,17 +4632,20 @@ class _BubbleScreenState extends State<BubbleScreen> {
           _savedSegments.remove(i);
           _savedAddSummaries.remove(i);
           _cancelledSummaries.remove(i);
+          _editedSummaries.remove(i);
           if (i < _selections.length) _refreshStageForSegment(i);
         }
         _allTransactions.removeWhere((t) => deletedIds.contains(t.id));
+        // التراجع عن تعديل يعيد الأسماء القديمة: نعيد تطبيع الأسماء
+        _txNormNames = Expando<String>('txNormName');
         for (var i = 0; i < _selections.length; i++) {
-          if (_modeOf(i) == BubbleActionMode.cancel) {
+          if (_needsTarget(i)) {
             _invalidateCancelCandidates(i);
           }
         }
       });
       for (var i = 0; i < _selections.length; i++) {
-        if (_modeOf(i) == BubbleActionMode.cancel) _requestCancelCandidates(i);
+        if (_needsTarget(i)) _requestCancelCandidates(i);
       }
     }
     messenger.showSnackBar(
@@ -4540,14 +4661,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
     // قد يكون المستخدم تراجع عن عمليات: نحدّث نسخة الحركات
     setState(() {
       _allTransactions = DatabaseService.transactionsBox.values.toList();
+      _txNormNames = Expando<String>('txNormName');
       for (var i = 0; i < _selections.length; i++) {
-        if (_modeOf(i) == BubbleActionMode.cancel) {
+        if (_needsTarget(i)) {
           _invalidateCancelCandidates(i);
         }
       }
     });
     for (var i = 0; i < _selections.length; i++) {
-      if (_modeOf(i) == BubbleActionMode.cancel) _requestCancelCandidates(i);
+      if (_needsTarget(i)) _requestCancelCandidates(i);
     }
   }
 
@@ -4580,6 +4702,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
       return _chipRed;
     }
+    if (_modeOf(segIndex) == BubbleActionMode.edit) {
+      return _editReady(segIndex) ? _chipGreen : _chipEdit;
+    }
 
     return _stageBorderColor(sel.stage, _segmentReady(sel, segIndex));
   }
@@ -4597,6 +4722,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
       if (_cancelReady(segIndex)) return 'تم اختيار الحركة المطلوب إلغاؤها';
       return 'اختر الحركة التي تريد تحويلها إلى ملغية';
+    }
+
+    if (_modeOf(segIndex) == BubbleActionMode.edit) {
+      if (_targetSearchName(segIndex).isEmpty) {
+        return 'حدد الاسم أو اضغط «بحث باسم آخر» لعرض الحركات المراد تعديلها';
+      }
+      if (_selectedEditTx(segIndex) == null) {
+        return 'اختر الحركة التي تريد تعديلها من النتائج';
+      }
+      if (_editReady(segIndex)) return 'جاهزة: راجع التعديلات ثم نفّذها';
+      return 'اختر ما تريد تعديله: الاسم أو المبلغ أو العملة';
     }
 
     return _stageHint(sel.stage);
@@ -4691,6 +4827,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
           Icons.add_circle_rounded,
           _chipGreen,
         ),
+        chip(BubbleActionMode.edit, 'تعديل', Icons.edit_rounded, _chipEdit),
         chip(BubbleActionMode.cancel, 'إلغاء', Icons.cancel_rounded, _chipRed),
       ],
     );
@@ -4825,7 +4962,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
           _invalidateCancelCandidates(segIndex);
           _refreshStageForSegment(segIndex);
         });
-        if (_modeOf(segIndex) == BubbleActionMode.cancel) {
+        if (_needsTarget(segIndex)) {
           _requestCancelCandidates(segIndex);
         }
         return;
@@ -5135,6 +5272,710 @@ class _BubbleScreenState extends State<BubbleScreen> {
     );
   }
 
+  // ====== رسائل التعديل: تعديل حركة موجودة ======
+
+  /// الحركة المختارة للتعديل (من كل حركات الحساب، حتى لو تغيّرت نتائج البحث)
+  TransactionModel? _selectedEditTx(int segIndex) {
+    final id = _editSelectedTxIds[segIndex];
+    if (id == null) return null;
+    for (final tx in _allTransactions) {
+      if (tx.id == id && tx.accountId == widget.account.id) return tx;
+    }
+    return null;
+  }
+
+  /// نفس العملة؟ (الاختصار أو الرمز يُحوّل إلى اسم العملة من الإعدادات)
+  bool _sameCurrencyName(String a, String b) =>
+      _eqCur(_currencyNameForToken(a) ?? a, _currencyNameForToken(b) ?? b);
+
+  /// مقارنة ما اكتُشف في الرسالة مع قيم الحركة المختارة
+  List<em.EditProposal> _editProposalsFor(int segIndex, TransactionModel tx) {
+    final seg = _segments[segIndex];
+    final sel = _selections[segIndex];
+    return em.buildEditProposals(
+      oldName: tx.beneficiary,
+      oldAmount: tx.amount,
+      oldCurrency: tx.currency,
+      newName: _buildSelectedName(seg, sel, segIndex),
+      newAmount: _buildSelectedAmount(seg, sel, segIndex),
+      newCurrency: _buildSelectedCurrency(seg, sel),
+      normalizeName: _normalizeForSearch,
+      sameCurrency: _sameCurrencyName,
+      formatAmount: _fmtAmount,
+    );
+  }
+
+  bool _editReady(int segIndex) {
+    if (_modeOf(segIndex) != BubbleActionMode.edit ||
+        _editedSummaries.containsKey(segIndex)) {
+      return false;
+    }
+    final tx = _selectedEditTx(segIndex);
+    if (tx == null) return false;
+    return em
+        .effectiveEditFields(
+          _editProposalsFor(segIndex, tx),
+          _editFields[segIndex] ?? const <em.EditField>{},
+        )
+        .isNotEmpty;
+  }
+
+  List<_PendingEditDraft> _collectReadyEditDrafts() {
+    final drafts = <_PendingEditDraft>[];
+    for (var i = 0; i < _selections.length; i++) {
+      if (_modeOf(i) != BubbleActionMode.edit) continue;
+      if (_editedSummaries.containsKey(i)) continue;
+      final tx = _selectedEditTx(i);
+      if (tx == null) continue;
+      final proposals = _editProposalsFor(i, tx);
+      final fields = em.effectiveEditFields(
+        proposals,
+        _editFields[i] ?? const <em.EditField>{},
+      );
+      if (fields.isEmpty) continue;
+      final seg = _segments[i];
+      final sel = _selections[i];
+      drafts.add(
+        _PendingEditDraft(
+          segIndex: i,
+          transaction: tx,
+          proposals: proposals,
+          fields: fields,
+          name: fields.contains(em.EditField.name)
+              ? _buildSelectedName(seg, sel, i).trim()
+              : null,
+          amount: fields.contains(em.EditField.amount)
+              ? _buildSelectedAmount(seg, sel, i)
+              : null,
+          currency: fields.contains(em.EditField.currency)
+              ? _buildSelectedCurrency(seg, sel)
+              : null,
+        ),
+      );
+    }
+    return drafts;
+  }
+
+  void _selectEditTx(int segIndex, TransactionModel tx) {
+    setState(() {
+      _editSelectedTxIds[segIndex] = tx.id;
+      _editPickerOpen.remove(segIndex);
+      _editFields[segIndex] = em.defaultEditSelection(
+        _editProposalsFor(segIndex, tx),
+      );
+    });
+  }
+
+  void _toggleEditField(int segIndex, em.EditField field) {
+    setState(() {
+      final chosen = _editFields.putIfAbsent(segIndex, () => <em.EditField>{});
+      if (!chosen.remove(field)) chosen.add(field);
+    });
+  }
+
+  /// اسم بحث يدوي (null أو فارغ = الرجوع إلى الاسم المحدد في الرسالة)
+  void _setEditSearch(int segIndex, String? query) {
+    final q = query?.trim() ?? '';
+    setState(() {
+      if (q.isEmpty) {
+        _editSearchQueries.remove(segIndex);
+      } else {
+        _editSearchQueries[segIndex] = q;
+      }
+      _invalidateCancelCandidates(segIndex);
+      _editPickerOpen.add(segIndex);
+    });
+    _requestCancelCandidates(segIndex);
+  }
+
+  Future<void> _openEditSearchDialog(int segIndex) async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (_) => _EditSearchDialog(initial: _targetSearchName(segIndex)),
+    );
+    if (!mounted || result == null) return;
+    _setEditSearch(segIndex, result);
+  }
+
+  Widget _buildEditPanel(BuildContext context, int segIndex) {
+    const color = _chipEdit;
+    final searchName = _targetSearchName(segIndex);
+    final manual = (_editSearchQueries[segIndex] ?? '').trim();
+    final selectedTx = _selectedEditTx(segIndex);
+    final pickerOpen = selectedTx == null || _editPickerOpen.contains(segIndex);
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .07),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: .32)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.manage_search_rounded, color: color),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  searchName.isEmpty
+                      ? 'البحث عن الحركة'
+                      : 'البحث عن: «$searchName»',
+                  style: const TextStyle(fontWeight: FontWeight.w900),
+                ),
+              ),
+              if (manual.isNotEmpty)
+                IconButton(
+                  tooltip: 'البحث بالاسم الموجود في الرسالة',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close_rounded, size: 20),
+                  onPressed: () => _setEditSearch(segIndex, null),
+                ),
+              TextButton.icon(
+                onPressed: () => _openEditSearchDialog(segIndex),
+                icon: const Icon(Icons.search_rounded, size: 18),
+                label: Text(manual.isEmpty ? 'بحث باسم آخر' : 'تغيير البحث'),
+                style: TextButton.styleFrom(
+                  foregroundColor: _readable(context, color),
+                ),
+              ),
+            ],
+          ),
+          if (pickerOpen) _buildEditCandidates(context, segIndex, searchName),
+          if (selectedTx != null)
+            _buildEditChoices(
+              context,
+              segIndex,
+              selectedTx,
+              pickerOpen: pickerOpen,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEditCandidates(
+    BuildContext context,
+    int segIndex,
+    String searchName,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    const color = _chipEdit;
+    if (searchName.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: _inlineInfoBox(
+          context,
+          icon: Icons.person_search_rounded,
+          color: color,
+          text:
+              'حدد الاسم من الفقاعات، أو اضغط «بحث باسم آخر» واكتب اسم صاحب الحركة.',
+        ),
+      );
+    }
+
+    final loading = _cancelCandidatesLoading.contains(segIndex);
+    final query = _cancelQueryForSegment(segIndex);
+    final stale =
+        _cancelCandidateQueries[segIndex] != query ||
+        !_cancelCandidatesCache.containsKey(segIndex);
+    if (!loading && stale) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _requestCancelCandidates(segIndex);
+      });
+    }
+    final candidates = _cancelCandidatesForSegment(segIndex);
+    if (candidates.isEmpty) {
+      if (loading || stale) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2.4),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'جارٍ البحث في هذا الحساب عن «$searchName»...',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+      return Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: _inlineInfoBox(
+          context,
+          icon: Icons.search_off_rounded,
+          color: color,
+          text:
+              'لا توجد حركات مطابقة للاسم «$searchName» في هذا الحساب. جرّب «بحث باسم آخر».',
+        ),
+      );
+    }
+
+    final showAll = _cancelShowMore[segIndex] == true;
+    final visible = showAll ? candidates : candidates.take(5).toList();
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'اختر الحركة التي تريد تعديلها (${candidates.length})',
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 12.5,
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (final tx in visible)
+            _buildEditCandidateRow(context, segIndex, tx, searchName),
+          if (candidates.length > 5)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: TextButton.icon(
+                onPressed: () =>
+                    setState(() => _cancelShowMore[segIndex] = !showAll),
+                icon: Icon(
+                  showAll
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                ),
+                label: Text(
+                  showAll ? 'عرض أقل' : 'عرض الكل (${candidates.length})',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEditCandidateRow(
+    BuildContext context,
+    int segIndex,
+    TransactionModel tx,
+    String searchName,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    const color = _chipEdit;
+    final selected = _editSelectedTxIds[segIndex] == tx.id;
+    final exact = _isExactCancelMatch(tx, searchName);
+    final movement = tx.companyMovementType;
+    final statusColor = movement != null
+        ? (movement.isCancelled
+              ? _chipRed
+              : (movement.isSent ? _chipIndigo : _chipGreen))
+        : _txStatusColor(tx.status);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: selected
+            ? color.withValues(alpha: .14)
+            : cs.surface.withValues(alpha: .85),
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _selectEditTx(segIndex, tx),
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected
+                    ? color
+                    : cs.outlineVariant.withValues(alpha: .35),
+                width: selected ? 1.6 : 1,
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  selected
+                      ? Icons.check_circle_rounded
+                      : Icons.radio_button_unchecked_rounded,
+                  color: selected ? color : cs.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${tx.beneficiary} — ${_fmtAmount(tx.amount)} ${tx.currency}',
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 5),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          _statusChip(context, _anyTxLabel(tx), statusColor),
+                          if (exact)
+                            _statusChip(context, 'مطابقة تمامًا', _chipGreen),
+                          Text(
+                            _fmtDateTime(tx.date),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEditChoices(
+    BuildContext context,
+    int segIndex,
+    TransactionModel tx, {
+    required bool pickerOpen,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    const color = _chipEdit;
+    final proposals = _editProposalsFor(segIndex, tx);
+    final chosen = _editFields[segIndex] ?? const <em.EditField>{};
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+      decoration: BoxDecoration(
+        color: cs.surface.withValues(alpha: .9),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: .45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.edit_note_rounded, color: color, size: 20),
+              const SizedBox(width: 6),
+              const Expanded(
+                child: Text(
+                  'الحركة المختارة',
+                  style: TextStyle(fontWeight: FontWeight.w900),
+                ),
+              ),
+              if (!pickerOpen)
+                TextButton(
+                  onPressed: () =>
+                      setState(() => _editPickerOpen.add(segIndex)),
+                  child: const Text('تغيير الحركة'),
+                ),
+            ],
+          ),
+          Text(
+            '${tx.beneficiary} — ${_fmtAmount(tx.amount)} ${tx.currency}',
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '${_anyTxLabel(tx)} • ${_fmtDateTime(tx.date)}',
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+          ),
+          const Divider(height: 18),
+          const Text(
+            'ما الذي تريد تعديله؟',
+            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+          ),
+          const SizedBox(height: 2),
+          for (final p in proposals)
+            _buildEditFieldRow(context, segIndex, p, chosen),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEditFieldRow(
+    BuildContext context,
+    int segIndex,
+    em.EditProposal p,
+    Set<em.EditField> chosen,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    const color = _chipEdit;
+    final enabled = p.available;
+    final checked = enabled && chosen.contains(p.field);
+    final muted = cs.onSurfaceVariant;
+    final icon = switch (p.field) {
+      em.EditField.name => Icons.person_rounded,
+      em.EditField.amount => Icons.payments_rounded,
+      em.EditField.currency => Icons.currency_exchange_rounded,
+    };
+
+    final Widget detail;
+    if (p.newText == null) {
+      detail = Text(
+        'لم يُحدَّد في الرسالة',
+        style: TextStyle(color: muted, fontSize: 12.5),
+      );
+    } else if (!p.changes) {
+      detail = Text(
+        'بدون تغيير (${p.oldText})',
+        style: TextStyle(color: muted, fontSize: 12.5),
+      );
+    } else {
+      detail = Text.rich(
+        TextSpan(
+          style: TextStyle(color: cs.onSurface, fontSize: 13),
+          children: [
+            const TextSpan(text: 'من '),
+            TextSpan(
+              text: p.oldText,
+              style: TextStyle(
+                color: muted,
+                decoration: TextDecoration.lineThrough,
+                decorationColor: muted,
+              ),
+            ),
+            const TextSpan(text: ' إلى '),
+            TextSpan(
+              text: p.newText,
+              style: TextStyle(
+                color: _readable(context, color),
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: enabled ? () => _toggleEditField(segIndex, p.field) : null,
+      child: Row(
+        children: [
+          Checkbox(
+            value: checked,
+            onChanged: enabled
+                ? (_) => _toggleEditField(segIndex, p.field)
+                : null,
+            activeColor: color,
+            visualDensity: VisualDensity.compact,
+          ),
+          Icon(icon, size: 18, color: enabled ? color : muted),
+          const SizedBox(width: 6),
+          Text(
+            '${em.EditFieldInfo(p.field).label}:',
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              color: enabled ? cs.onSurface : muted,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(child: detail),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLockedEditBubble(BuildContext context, _EditedSummary summary) {
+    return _lockedSummaryCard(
+      context: context,
+      color: _chipEdit,
+      icon: Icons.edit_note_rounded,
+      title: 'تم تعديل ${summary.name}',
+      lines: [...summary.lines, 'وقت التعديل: ${_fmtDateTime(summary.date)}'],
+    );
+  }
+
+  /// تنفيذ رسائل التعديل الجاهزة (بعد الإضافات وقبل الإلغاء)
+  Future<void> _sendEdits() async {
+    if (_busy) return;
+    final drafts = _collectReadyEditDrafts();
+    if (drafts.isEmpty) {
+      _snack('لا توجد تعديلات جاهزة للتنفيذ');
+      return;
+    }
+
+    setState(() => _isSending = true);
+    final records = <OperationTxRecord>[];
+    final editedSegments = <int>[];
+    var done = 0;
+    _setProgress(
+      OperationProgress(
+        label: 'جارٍ تنفيذ التعديلات...',
+        done: 0,
+        total: drafts.length,
+      ),
+    );
+
+    try {
+      for (final d in drafts) {
+        final tx = d.transaction;
+        final before = OperationLogService.snapshot(tx);
+        final lines = <String>[
+          for (final p in d.proposals)
+            if (d.fields.contains(p.field)) p.sentence,
+        ];
+        final name = d.name;
+        if (name != null && name.isNotEmpty) tx.beneficiary = name;
+        final amount = d.amount;
+        if (amount != null && amount > 0) tx.amount = amount;
+        final currency = d.currency;
+        if (currency != null && currency.isNotEmpty) tx.currency = currency;
+        TxHistoryService.annotate([tx.id], 'تحليل الرسائل (رسالة تعديل)');
+        await tx.save();
+        _txNormNames[tx] = null;
+        if (name != null && !_knownBeneficiaryNames.contains(tx.beneficiary)) {
+          _knownBeneficiaryNames.add(tx.beneficiary);
+          _nameConfig.addKnownName(tx.beneficiary);
+        }
+        records.add(
+          OperationTxRecord(
+            txId: tx.id,
+            before: before,
+            after: OperationLogService.snapshot(tx),
+          ),
+        );
+        editedSegments.add(d.segIndex);
+        _editedSummaries[d.segIndex] = _EditedSummary(
+          name: tx.beneficiary,
+          lines: lines,
+          date: DateTime.now(),
+        );
+        done++;
+        _setProgress(
+          OperationProgress(
+            label: 'جارٍ تنفيذ التعديلات...',
+            done: done,
+            total: drafts.length,
+          ),
+        );
+        if (done % 20 == 0) await yieldToUi();
+      }
+    } finally {
+      _setProgress(null);
+      if (mounted) {
+        setState(() => _isSending = false);
+      }
+    }
+
+    OperationLogEntry? entry;
+    if (records.isNotEmpty) {
+      entry = await OperationLogService.log(
+        kind: OperationKind.bubbleEdit,
+        title: 'تعديل ${records.length} حركة في «${widget.account.name}»',
+        subtitle: widget.account.type.label,
+        records: records,
+      );
+    }
+    if (!mounted) return;
+
+    // الأسماء أو المبالغ تغيّرت: نحدّث نتائج البحث في فقاعات الإلغاء والتعديل
+    setState(() {
+      for (var i = 0; i < _selections.length; i++) {
+        if (_needsTarget(i)) _invalidateCancelCandidates(i);
+      }
+    });
+    for (var i = 0; i < _selections.length; i++) {
+      if (_needsTarget(i)) _requestCancelCandidates(i);
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    final loggedEntry = entry;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text('تم تعديل ${records.length} حركة'),
+          action: loggedEntry == null
+              ? null
+              : SnackBarAction(
+                  label: 'تراجع',
+                  onPressed: () =>
+                      _undoFromSnackBar(loggedEntry, editedSegments, messenger),
+                ),
+        ),
+      );
+
+    // بعد التعديلات يأتي الإلغاء
+    if (_hasCancelSegments()) {
+      setState(() => _viewMode = BubbleActionMode.cancel);
+      return;
+    }
+    if (!_hasPendingAddSegments() && !_hasEditSegments()) {
+      Navigator.pop(context, true);
+    }
+  }
+
+  /// زر التنفيذ في الشريط السفلي (مضغوط عند وجود ثلاثة أزرار)
+  Widget _sendButton({
+    required BubbleActionMode mode,
+    required bool enabled,
+    required IconData icon,
+    required String label,
+    required Color color,
+    required bool compact,
+  }) {
+    final busy = _isSending && _viewMode == mode;
+    final Widget iconWidget = busy
+        ? const SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : Icon(icon);
+    final style = FilledButton.styleFrom(
+      padding: compact
+          ? const EdgeInsets.symmetric(vertical: 10, horizontal: 6)
+          : const EdgeInsets.symmetric(vertical: 14),
+      backgroundColor: color,
+      foregroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    );
+    final onPressed = enabled ? () => _sendForMode(mode) : null;
+    if (!compact) {
+      return FilledButton.icon(
+        onPressed: onPressed,
+        icon: iconWidget,
+        label: Text(label),
+        style: style,
+      );
+    }
+    return FilledButton(
+      onPressed: onPressed,
+      style: style,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          iconWidget,
+          const SizedBox(height: 3),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _inlineInfoBox(
     BuildContext context, {
     required IconData icon,
@@ -5176,16 +6017,22 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   int _readyCancelCount() => _collectReadyCancelDrafts().length;
 
+  int _readyEditCount() => _collectReadyEditDrafts().length;
+
   int _forbiddenSegmentsCount() =>
       _selections.where((s) => s.forbiddenPhrases.isNotEmpty).length;
 
   Widget _buildBubbleScreenHeader(
     BuildContext context, {
     required int addReadyCount,
+    required int editReadyCount,
     required int cancelReadyCount,
   }) {
     final cs = Theme.of(context).colorScheme;
     final forbiddenCount = _forbiddenSegmentsCount();
+    final showEditChip =
+        _segmentCountForMode(BubbleActionMode.edit) > 0 ||
+        _viewMode == BubbleActionMode.edit;
 
     Widget stat({
       required IconData icon,
@@ -5232,7 +6079,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     Widget modeChip(BubbleActionMode mode, String label, IconData icon) {
       final selected = _viewMode == mode;
-      final color = mode == BubbleActionMode.add ? _chipGreen : _chipRed;
+      final color = mode == BubbleActionMode.add
+          ? _chipGreen
+          : (mode == BubbleActionMode.edit ? _chipEdit : _chipRed);
       return Expanded(
         child: InkWell(
           onTap: () => setState(() => _viewMode = mode),
@@ -5249,25 +6098,53 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     : cs.outlineVariant.withValues(alpha: .35),
               ),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: selected ? Colors.white : color, size: 19),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    label,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: selected
-                          ? Colors.white
-                          : _readable(context, color),
-                      fontWeight: FontWeight.w900,
-                    ),
+            child: showEditChip
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        icon,
+                        color: selected ? Colors.white : color,
+                        size: 19,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: selected
+                              ? Colors.white
+                              : _readable(context, color),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        icon,
+                        color: selected ? Colors.white : color,
+                        size: 19,
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          label,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: selected
+                                ? Colors.white
+                                : _readable(context, color),
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-              ],
-            ),
           ),
         ),
       );
@@ -5306,6 +6183,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 value: '$addReadyCount',
                 color: _chipGreen,
               ),
+              if (showEditChip) ...[
+                const SizedBox(width: 8),
+                stat(
+                  icon: Icons.edit_note_rounded,
+                  label: 'تعديل جاهز',
+                  value: '$editReadyCount',
+                  color: _chipEdit,
+                ),
+              ],
               const SizedBox(width: 8),
               stat(
                 icon: Icons.cancel_rounded,
@@ -5332,6 +6218,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 'الإضافات (${_segmentCountForMode(BubbleActionMode.add)})',
                 Icons.add_task_rounded,
               ),
+              if (showEditChip) ...[
+                const SizedBox(width: 10),
+                modeChip(
+                  BubbleActionMode.edit,
+                  'التعديلات (${_segmentCountForMode(BubbleActionMode.edit)})',
+                  Icons.edit_note_rounded,
+                ),
+              ],
               const SizedBox(width: 10),
               modeChip(
                 BubbleActionMode.cancel,
@@ -5826,7 +6720,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
               ),
           ],
         ),
-        if (mode == BubbleActionMode.add)
+        if (mode != BubbleActionMode.cancel)
           _rolePill(
             context,
             icon: Icons.numbers_rounded,
@@ -5849,7 +6743,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 ),
             ],
           ),
-        if (mode == BubbleActionMode.add)
+        if (mode != BubbleActionMode.cancel)
           _rolePill(
             context,
             icon: Icons.currency_exchange_rounded,
@@ -6141,6 +7035,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
     if (mode == BubbleActionMode.cancel && cancelledSummary != null) {
       return _buildLockedCancelBubble(context, cancelledSummary);
     }
+    final editedSummary = _editedSummaries[si];
+    if (mode == BubbleActionMode.edit && editedSummary != null) {
+      return _buildLockedEditBubble(context, editedSummary);
+    }
 
     final nameText = _buildSelectedName(seg, sel, si);
     final amountVal = _buildSelectedAmount(seg, sel, si);
@@ -6156,6 +7054,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
     String statusText;
     if (mode == BubbleActionMode.cancel) {
       statusText = ready ? 'جاهزة للإلغاء' : 'إلغاء';
+    } else if (mode == BubbleActionMode.edit) {
+      statusText = ready ? 'جاهزة للتعديل' : 'تعديل';
     } else if (ready) {
       statusText = 'جاهزة';
     } else {
@@ -6210,7 +7110,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                   Row(
                     children: [
                       Expanded(child: _buildModeSwitch(si)),
-                      if (mode == BubbleActionMode.cancel &&
+                      if (_needsTarget(si) &&
                           _cancelCandidatesLoading.contains(si))
                         const SizedBox(
                           width: 22,
@@ -6299,10 +7199,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     _buildCancelCandidatesPanel(context, si),
 
                   // اختيار العملة من القائمة
-                  if (mode == BubbleActionMode.add &&
+                  if (mode != BubbleActionMode.cancel &&
                       (sel.stage == SelectionStage.currency ||
                           sel.stage == SelectionStage.done))
                     _buildCurrencyPickerRow(context, si),
+
+                  // التعديل: البحث عن الحركة واختيار ما يُعدَّل
+                  if (mode == BubbleActionMode.edit)
+                    _buildEditPanel(context, si),
                 ],
               ),
             ),
@@ -6316,6 +7220,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   Widget build(BuildContext context) {
     final addReadyCount = _readyAddCount();
     final cancelReadyCount = _readyCancelCount();
+    final editReadyCount = _readyEditCount();
 
     // اعرض نمطًا واحدًا في كل مرة (وغير المكتمل أولًا إن كان مفعّلًا)
     final analyzed = _selections.length;
@@ -6345,6 +7250,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final canSendAdd =
         !_busy && addReadyCount > 0 && !_hasUnresolvedConflicts();
     final canSendCancel = !_busy && cancelReadyCount > 0;
+    final canSendEdit = !_busy && editReadyCount > 0;
+    final showEdit = _segmentCountForMode(BubbleActionMode.edit) > 0;
     final showTrailing = order.isEmpty || _analyzing;
 
     return Directionality(
@@ -6408,55 +7315,41 @@ class _BubbleScreenState extends State<BubbleScreen> {
                   Row(
                     children: [
                       Expanded(
-                        child: FilledButton.icon(
-                          onPressed: canSendAdd
-                              ? () => _sendForMode(BubbleActionMode.add)
-                              : null,
-                          icon: _isSending && _viewMode == BubbleActionMode.add
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.add_task_rounded),
-                          label: Text('تنفيذ الإضافات ($addReadyCount)'),
-                          style: FilledButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            backgroundColor: _chipGreen,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
+                        child: _sendButton(
+                          mode: BubbleActionMode.add,
+                          enabled: canSendAdd,
+                          icon: Icons.add_task_rounded,
+                          label: showEdit
+                              ? 'الإضافات ($addReadyCount)'
+                              : 'تنفيذ الإضافات ($addReadyCount)',
+                          color: _chipGreen,
+                          compact: showEdit,
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: canSendCancel
-                              ? () => _sendForMode(BubbleActionMode.cancel)
-                              : null,
-                          icon:
-                              _isSending && _viewMode == BubbleActionMode.cancel
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.cancel_schedule_send_rounded),
-                          label: Text('تنفيذ الإلغاء ($cancelReadyCount)'),
-                          style: FilledButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            backgroundColor: _chipRed,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
+                      if (showEdit) ...[
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _sendButton(
+                            mode: BubbleActionMode.edit,
+                            enabled: canSendEdit,
+                            icon: Icons.edit_note_rounded,
+                            label: 'التعديلات ($editReadyCount)',
+                            color: _chipEdit,
+                            compact: true,
                           ),
+                        ),
+                      ],
+                      SizedBox(width: showEdit ? 8 : 10),
+                      Expanded(
+                        child: _sendButton(
+                          mode: BubbleActionMode.cancel,
+                          enabled: canSendCancel,
+                          icon: Icons.cancel_schedule_send_rounded,
+                          label: showEdit
+                              ? 'الإلغاء ($cancelReadyCount)'
+                              : 'تنفيذ الإلغاء ($cancelReadyCount)',
+                          color: _chipRed,
+                          compact: showEdit,
                         ),
                       ),
                     ],
@@ -6474,6 +7367,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 return _buildBubbleScreenHeader(
                   context,
                   addReadyCount: addReadyCount,
+                  editReadyCount: editReadyCount,
                   cancelReadyCount: cancelReadyCount,
                 );
               }
@@ -6493,13 +7387,19 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 context,
                 icon: _viewMode == BubbleActionMode.add
                     ? Icons.add_circle_outline_rounded
-                    : Icons.cancel_outlined,
+                    : (_viewMode == BubbleActionMode.edit
+                          ? Icons.edit_note_rounded
+                          : Icons.cancel_outlined),
                 color: _viewMode == BubbleActionMode.add
                     ? _chipGreen
-                    : _chipRed,
+                    : (_viewMode == BubbleActionMode.edit
+                          ? _chipEdit
+                          : _chipRed),
                 text: _viewMode == BubbleActionMode.add
                     ? 'لا توجد فقاعات إضافة في هذا النص.'
-                    : 'لا توجد فقاعات إلغاء في هذا النص.',
+                    : (_viewMode == BubbleActionMode.edit
+                          ? 'لا توجد فقاعات تعديل في هذا النص.'
+                          : 'لا توجد فقاعات إلغاء في هذا النص.'),
               );
             },
           ),
@@ -6677,6 +7577,92 @@ class _PendingCancelDraft {
     required this.transaction,
     required this.date,
   });
+}
+
+class _PendingEditDraft {
+  final int segIndex;
+  final TransactionModel transaction;
+  final List<em.EditProposal> proposals;
+  final Set<em.EditField> fields;
+  final String? name;
+  final double? amount;
+  final String? currency;
+
+  const _PendingEditDraft({
+    required this.segIndex,
+    required this.transaction,
+    required this.proposals,
+    required this.fields,
+    this.name,
+    this.amount,
+    this.currency,
+  });
+}
+
+/// ملخص فقاعة تعديل بعد تنفيذها
+class _EditedSummary {
+  final String name;
+  final List<String> lines;
+  final DateTime date;
+
+  const _EditedSummary({
+    required this.name,
+    required this.lines,
+    required this.date,
+  });
+}
+
+/// نافذة كتابة اسم البحث عن الحركة المراد تعديلها (تملك المتحكم وتتخلص منه
+/// بعد إغلاق النافذة بالكامل)
+class _EditSearchDialog extends StatefulWidget {
+  final String initial;
+
+  const _EditSearchDialog({required this.initial});
+
+  @override
+  State<_EditSearchDialog> createState() => _EditSearchDialogState();
+}
+
+class _EditSearchDialogState extends State<_EditSearchDialog> {
+  late final TextEditingController _ctrl = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.pop(context, _ctrl.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: AlertDialog(
+        title: const Text('البحث عن الحركة المراد تعديلها'),
+        content: TextField(
+          controller: _ctrl,
+          autofocus: true,
+          textInputAction: TextInputAction.search,
+          onSubmitted: (_) => _submit(),
+          decoration: const InputDecoration(
+            hintText: 'اكتب اسم صاحب الحركة...',
+            prefixIcon: Icon(Icons.search_rounded),
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(onPressed: _submit, child: const Text('بحث')),
+        ],
+      ),
+    );
+  }
 }
 
 class _DuplicateWarningItem {

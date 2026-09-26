@@ -13,6 +13,7 @@ import 'tx_history_service.dart';
 enum OperationKind {
   bubbleAdd,
   bubbleCancel,
+  bubbleEdit,
   statusChange,
   move,
   delete,
@@ -27,6 +28,8 @@ extension OperationKindInfo on OperationKind {
         return 'إضافة من الفقاعات';
       case OperationKind.bubbleCancel:
         return 'إلغاء من الفقاعات';
+      case OperationKind.bubbleEdit:
+        return 'تعديل من الفقاعات';
       case OperationKind.statusChange:
         return 'تغيير حالة';
       case OperationKind.move:

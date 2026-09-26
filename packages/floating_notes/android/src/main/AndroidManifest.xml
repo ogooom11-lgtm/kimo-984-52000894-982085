@@ -1,0 +1,22 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="com.mylist.floating_notes">
+
+  <!-- يُدمج هذا الملف تلقائيًا مع AndroidManifest الخاص بالتطبيق عند البناء. -->
+
+  <!-- الظهور فوق التطبيقات الأخرى (يمنحه المستخدم من الإعدادات أول مرة) -->
+  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+  <!-- خدمة أمامية تُبقي الفقاعة ظاهرة حتى عند الخروج من التطبيق -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+  <application>
+    <service
+      android:name="com.mylist.floating_notes.FloatingNotesService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Floating notes bubble shown over other apps so the user can write quick notes" />
+    </service>
+  </application>
+</manifest>

@@ -35,6 +35,8 @@ dependencies:
   archive: ^3.6.1
   share_intake:
     path: packages/share_intake
+  floating_notes:
+    path: packages/floating_notes
 
 
 
