@@ -7,6 +7,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/period_stats.dart';
+import '../utils/amount_format.dart';
 import 'add_account_screen.dart';
 import 'account_screen.dart';
 import 'add_edit_transaction_screen.dart';
@@ -325,31 +326,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return "${_formatDay(dt)} ${_formatTime(dt)}";
   }
 
-  String _formatAmount(double v) {
-    if (!v.isFinite) return "0,00";
-
-    final s = v.toStringAsFixed(2);
-    final parts = s.split('.');
-
-    if (parts.length < 2) {
-      return s.replaceAll('.', ',');
-    }
-
-    final intPart = parts[0];
-    final dec = parts[1];
-
-    final buf = StringBuffer();
-    for (int i = 0; i < intPart.length; i++) {
-      final idx = intPart.length - 1 - i;
-      buf.write(intPart[idx]);
-      if (i % 3 == 2 && idx != 0) {
-        buf.write('.');
-      }
-    }
-
-    final withSep = buf.toString().split('').reversed.join();
-    return "$withSep,$dec";
-  }
+  /// المبلغ للعرض: نقطة بين كل 3 خانات، والكسور بفاصلة فقط إن وُجدت
+  /// (250.000 بدل 250.000,00)
+  String _formatAmount(double v) => AmountFormat.display(v);
 
   bool _hasSecondAmount(TransactionModel t) =>
       t.secondAmount != null && t.secondAmount! > 0;

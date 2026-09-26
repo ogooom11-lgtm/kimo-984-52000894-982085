@@ -64,6 +64,9 @@ class AmountDetectResult {
   /// هل المبلغ المختار جاء من تعبير لفظي/مركّب (numericPos = أول توكن فيه)؟
   final bool fromText;
 
+  /// موقع أقوى مرشح لكل قيمة في [candidateValues] (بنفس الترتيب)
+  final List<Position> candidatePositions;
+
   const AmountDetectResult({
     required this.numericPos,
     required this.numericValue,
@@ -72,6 +75,7 @@ class AmountDetectResult {
     required this.hasMultipleCandidates,
     required this.candidateValues,
     this.fromText = false,
+    this.candidatePositions = const <Position>[],
   });
 
   @override
@@ -330,6 +334,18 @@ class AmountDetector {
   static bool _isNonMoneyUnitToken(String token) {
     final t = _normalizeArabic(_cleanToken(token));
     return _nonMoneyUnits.contains(t);
+  }
+
+  /// العملة المكتوبة بأكثر من كلمة («ليرة سورية») تُضاف كلماتها أيضًا: الرسالة
+  /// تُقرأ كلمة كلمة، فالعبارة كاملة لا تطابق أي كلمة وحدها.
+  static Set<String> _expandHints(Set<String> hints) {
+    if (!hints.any((h) => h.trim().contains(RegExp(r'\s')))) return hints;
+    return {
+      ...hints,
+      for (final h in hints)
+        for (final w in h.trim().split(RegExp(r'\s+')))
+          if (_cleanToken(w).length >= 2) _cleanToken(w),
+    };
   }
 
   static bool _containsCurrencyHint(String token, Set<String> currencyHints) {
@@ -598,9 +614,23 @@ class AmountDetector {
     List<String> ignoredWords = const <String>[],
   }) => _isMagnitudeOnlyTokens(
     tokens,
-    currencyHints,
+    _expandHints(currencyHints),
     amountKeywords.map(_cleanToken).where((e) => e.isNotEmpty).toSet(),
     ignoredWords.map(_cleanToken).where((e) => e.isNotEmpty).toSet(),
+  );
+
+  /// هل يُربط سطر كلمة مقدار («الف») بهذا السطر؟ نعم إذا انتهى برقم أقل من
+  /// 1000 أو بعدد لفظي: «250» ثم «الف» = 250 ألف، أما «10.000» ثم «مليون»
+  /// فليست «عشرة آلاف مليون».
+  static bool canTakeMagnitudeLine(
+    List<String> tokens, {
+    List<String> ignoredWords = const <String>[],
+    Map<String, double> customWordValues = const <String, double>{},
+  }) => _endsWithAmount(
+    tokens,
+    ignoredWords.map(_cleanToken).where((e) => e.isNotEmpty).toSet(),
+    customWordValues,
+    _numberWordCaches[customWordValues] ??= <String, bool>{},
   );
 
   static bool _isMagnitudeOnlyTokens(
@@ -624,7 +654,18 @@ class AmountDetector {
     return seenMagnitude;
   }
 
-  /// آخر كلمة في السطر رقم مبلغ (بدون مقدار ملزوق به) أو عدد لفظي ليس مقدارًا.
+  /// آخر كلمة فعلية في السطر (بدون الفارغة والمتجاهلة)، أو -1
+  static int _lastEffectiveIndex(List<String> tokens, Set<String> ignoredSet) {
+    for (int i = tokens.length - 1; i >= 0; i--) {
+      final t = tokens[i];
+      if (_cleanToken(t).isEmpty || _isIgnoredExact(t, ignoredSet)) continue;
+      return i;
+    }
+    return -1;
+  }
+
+  /// آخر كلمة في السطر رقم مبلغ صغير (أقل من 1000، بدون مقدار ملزوق به) أو
+  /// عدد لفظي ليس مقدارًا.
   static bool _endsWithAmount(
     List<String> tokens,
     Set<String> ignoredSet,
@@ -633,23 +674,28 @@ class AmountDetector {
   ) {
     if (tokens.join(' ').contains('#')) return false;
     if (_lineLooksLikeSplitPhone(tokens)) return false;
-    for (int i = tokens.length - 1; i >= 0; i--) {
-      final t = tokens[i];
-      if (_cleanToken(t).isEmpty || _isIgnoredExact(t, ignoredSet)) continue;
-      if (_hasDigits(t)) {
-        return _isMoneyDigitToken(t) &&
-            _extractEmbeddedMoneyMagnitude(_normalizeInlineAmountToken(t)) ==
-                null;
-      }
-      if (_isMagnitudeWord(_normalizeArabic(_cleanToken(t)))) return false;
-      return _isNumberWord(t, customWordValues, numberWordCache);
+    final i = _lastEffectiveIndex(tokens, ignoredSet);
+    if (i < 0) return false;
+    final t = tokens[i];
+    if (_hasDigits(t)) {
+      if (!_isMoneyDigitToken(t)) return false;
+      final norm = _normalizeInlineAmountToken(t);
+      if (_extractEmbeddedMoneyMagnitude(norm) != null) return false;
+      // «10.000» ثم «مليون» ليست «عشرة آلاف مليون»: الربط للأرقام الصغيرة فقط
+      final v = parseAmountToken(norm);
+      return v != null && v.abs() < 1000;
     }
-    return false;
+    if (_isMagnitudeWord(_normalizeArabic(_cleanToken(t)))) return false;
+    return _isNumberWord(t, customWordValues, numberWordCache);
   }
 
   /// «250» ثم «الف» في سطر بعده (ولو بينهما أسطر فارغة) = «250 الف»: سطر كلمة
-  /// المقدار يُلحق بآخر سطر غير فارغ قبله إذا كان ينتهي برقم أو عدد لفظي.
+  /// المقدار يُلحق بآخر سطر غير فارغ قبله إذا كان ينتهي برقم صغير أو عدد لفظي.
   /// التوكنات تحتفظ بمواقعها الأصلية، فتعليم المبلغ في النص لا يتأثر.
+  ///
+  /// [currencyAnchor] موقع العملة التي حُذفت قبل كشف المبلغ: إن كان السطر
+  /// السابق ينتهي بها («10.000 سوري») فمبلغه اكتمل، وسطر «مليون قديم» بعده
+  /// مبلغ آخر وليس مقدارًا له.
   static List<List<AmountPreparedToken>> _joinMagnitudeLines(
     List<List<AmountPreparedToken>> rows, {
     required Set<String> currencyHints,
@@ -657,6 +703,7 @@ class AmountDetector {
     required Set<String> ignoredSet,
     required Map<String, double> customWordValues,
     required Map<String, bool> numberWordCache,
+    Position? currencyAnchor,
   }) {
     List<List<AmountPreparedToken>>? out;
     int? lastIdx;
@@ -677,6 +724,15 @@ class AmountDetector {
       }
       final prevRow = out?[prevIdx] ?? rows[prevIdx];
       final prevTokens = [for (final p in prevRow) p.token];
+      if (currencyAnchor != null) {
+        final lastEff = _lastEffectiveIndex(prevTokens, ignoredSet);
+        if (lastEff >= 0) {
+          final last = prevRow[lastEff].originalPos;
+          if (currencyAnchor.x == last.x && currencyAnchor.y >= last.y) {
+            continue;
+          }
+        }
+      }
       if (!_endsWithAmount(
         prevTokens,
         ignoredSet,
@@ -745,6 +801,7 @@ class AmountDetector {
     Position? currencyAnchor,
     int keywordLookAhead = 3,
   }) {
+    currencyHints = _expandHints(currencyHints);
     final amountKeywordSet = amountKeywords
         .map(_cleanToken)
         .where((e) => e.isNotEmpty)
@@ -788,6 +845,7 @@ class AmountDetector {
       ignoredSet: ignoredSet,
       customWordValues: customWordValues,
       numberWordCache: numberWordCache,
+      currencyAnchor: currencyAnchor,
     );
 
     int anchorBonus(Position pos) {
@@ -1045,12 +1103,19 @@ class AmountDetector {
       }
     }
 
-    // 3) المرشحات المميزة
+    // 3) المرشحات المميزة (مع موقع أقوى مرشح لكل قيمة)
     final candidateValues = <double>[];
     for (final c in candidates) {
       _addUniqueAmount(candidateValues, c.value);
     }
     candidateValues.sort();
+    final candidatePositions = <Position>[
+      for (final v in candidateValues)
+        candidates
+            .where((c) => _sameAmount(c.value, v))
+            .reduce((a, b) => b.beats(a) ? b : a)
+            .pos,
+    ];
 
     // 4) أفضل مرشح إجمالًا (بدل «آخر سطر نصي يفوز»)
     _AmountCandidate? best;
@@ -1087,6 +1152,7 @@ class AmountDetector {
       hasMultipleCandidates: hasMultipleCandidates,
       candidateValues: candidateValues,
       fromText: best?.fromText ?? false,
+      candidatePositions: candidatePositions,
     );
   }
 }

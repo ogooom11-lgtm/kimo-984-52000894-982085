@@ -20,6 +20,7 @@ import '../services/detection/segment_splitter.dart';
 import '../services/detection/receive_matching.dart' as rm;
 import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
+import '../utils/amount_format.dart';
 import '../utils/chunked_task.dart';
 import '../widgets/operation_progress_bar.dart';
 import '../widgets/scroll_edge_buttons.dart';
@@ -247,19 +248,18 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     }.where((e) => e.trim().isNotEmpty).toList();
   }
 
-  String _formatAmount(double v) {
+  /// المبلغ للعرض: نقطة بين كل 3 خانات والكسور بفاصلة إن وُجدت (250.000)
+  String _formatAmount(double v) => AmountFormat.display(v);
+
+  /// المبلغ بالأرقام الخام لحقل الإدخال (250000 أو 1234.50)
+  String _rawAmount(double v) {
     final isInt = v == v.roundToDouble();
     return isInt ? v.toInt().toString() : v.toStringAsFixed(2);
   }
 
   String _formatAmountList(List<double> values) {
     if (values.isEmpty) return '';
-    return values
-        .map((e) {
-          final isInt = e == e.roundToDouble();
-          return isInt ? e.toInt().toString() : e.toStringAsFixed(2);
-        })
-        .join(' ، ');
+    return values.map(AmountFormat.display).join(' ، ');
   }
 
   String _formatTxDateTime(DateTime dt) {
@@ -342,13 +342,14 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
   // ====== الحالة الأولى لكل فقاعة ======
   // إعدادات كاشف الاسم تُجهّز مرة واحدة لكل الرسائل (بدل إعادة فرز كل
-  // الحركات وبناء فهرس الأسماء لكل رسالة، وهو ما كان يسبب التجمّد)
+  // الحركات وبناء فهرس الأسماء لكل رسالة، وهو ما كان يسبب التجمّد).
+  // الأسماء المعروفة من كل الحسابات (مثل صفحة الإضافة)؛ أما المطابقة فتبقى
+  // مع حركات هذا الحساب فقط.
   nd.NameDetectorConfig? _nameConfigCache;
   nd.NameDetectorConfig get _nameConfig =>
       _nameConfigCache ??= nd.NameDetectorConfig(
         nameKeywords: _nameKeywords,
         knownNames: DatabaseService.transactionsBox.values
-            .where((t) => t.accountId == widget.account.id)
             .map((t) => t.beneficiary)
             .where((s) => s.trim().isNotEmpty)
             .toSet()
@@ -378,13 +379,20 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     st.detectedName = ex.name;
 
     st.currencyPos = ex.currencyPos;
-    st.currencyKey = ex.currencyKey;
-
-    st.detectedAmount = ex.amount;
-    st.amount = ex.amount;
-    st.detectedAmountTokens = {
-      for (final p in ex.amountTokens) _TokPos(p.x, p.y),
+    st.currencyPositions = {
+      for (final p in ex.currencyPositions) _TokPos(p.x, p.y),
     };
+    st.currencyKey = ex.currencyKey;
+    st.currencyNames = List<String>.from(ex.currencyNames);
+
+    // أكثر من مبلغ وأكثر من عملة: لا يُعتمد المبلغ تلقائيًا، يختاره المستخدم
+    // (مع تحذير). العملة تبقى المكتشفة.
+    st.moneyAmbiguous = ex.moneyAmbiguous;
+    st.detectedAmount = ex.moneyAmbiguous ? null : ex.amount;
+    st.amount = st.detectedAmount;
+    st.detectedAmountTokens = ex.moneyAmbiguous
+        ? <_TokPos>{}
+        : {for (final p in ex.amountTokens) _TokPos(p.x, p.y)};
     st.amountHasConflict = ex.amountHasConflict;
     st.amountHasMultipleCandidates = ex.amountHasMultipleCandidates;
     st.amountCandidateValues = List<double>.from(ex.amountCandidates);
@@ -444,6 +452,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     }
     return best!;
   }
+
+  /// هل مبلغ الحركة (أو مبلغها الثاني أو مجموعهما) أحد المبالغ في الرسالة؟
+  /// يساعد على الاختيار اليدوي حين لا يُحدد المبلغ تلقائيًا.
+  bool _amountInMessage(_BubbleState st, TransactionModel tx) => st
+      .amountCandidateValues
+      .any((v) => _amountFit(tx, v, st.currencyKey).matches);
 
   String _secondCurrencyOf(TransactionModel tx) {
     final c = tx.secondCurrency?.trim() ?? '';
@@ -558,8 +572,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
     buildCandidates();
 
-    // الرسالة فيها أكثر من رقم: نعتمد الرقم الذي يطابق حركة مضافة (الأقوى اسمًا)
+    // الرسالة فيها أكثر من رقم: نعتمد الرقم الذي يطابق حركة مضافة (الأقوى اسمًا)،
+    // إلا إذا كان فيها أيضًا أكثر من عملة: عندها الاختيار للمستخدم
     if (st.manualAmount == null &&
+        !st.moneyAmbiguous &&
         !st.candidates.any((c) => c.exact) &&
         st.amountCandidateValues.length > 1) {
       double? bestValue;
@@ -774,7 +790,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       ..addAll(st.manualAmount == null ? const <_TokPos>{} : tokens);
     st.amountController.text = st.manualAmount == null
         ? ''
-        : _formatAmount(st.manualAmount!);
+        : _rawAmount(st.manualAmount!);
     _refreshAndAssign(st);
     setState(() {});
   }
@@ -840,7 +856,15 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
     final manualAmount = st.manualAmount != null;
 
-    if (st.amountChosenByMatch && st.amount != null) {
+    if (st.moneyAmbiguous) {
+      final vals = _formatAmountList(st.amountCandidateValues);
+      final curs = st.currencyNames.join(' ، ');
+      st.warningTexts.add(
+        manualAmount
+            ? 'الرسالة فيها أكثر من مبلغ ($vals) وأكثر من عملة ($curs): تأكد أن المبلغ المختار هو الصحيح.'
+            : 'الرسالة فيها أكثر من مبلغ ($vals) وأكثر من عملة ($curs)، لذلك ما تم تحديد المبلغ تلقائيًا. اختر المبلغ الصحيح من الأرقام تحت أو اضغط عليه في الرسالة.',
+      );
+    } else if (st.amountChosenByMatch && st.amount != null) {
       st.warningTexts.add(
         'الرسالة فيها أكثر من رقم، وتم اعتماد المبلغ ${_formatAmount(st.amount!)} لأنه يطابق حركة مضافة.',
       );
@@ -853,7 +877,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
       );
     }
 
-    if (st.amountHasConflict && !manualAmount && !st.amountChosenByMatch) {
+    if (st.amountHasConflict &&
+        !manualAmount &&
+        !st.amountChosenByMatch &&
+        !st.moneyAmbiguous) {
       st.warningTexts.add(
         'يوجد تعارض واضح بين المبلغ الرقمي والمبلغ النصي، وتم اعتماد النتيجة الأقوى من كاشف المبلغ.',
       );
@@ -2590,7 +2617,10 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
               : st.detectedAmountTokens);
     if (amountSet.contains(pos)) return _TokRole.amount;
     final cp = st.currencyPos;
-    if (cp != null && cp.x == li && cp.y == ti) return _TokRole.currency;
+    if (st.currencyPositions.contains(pos) ||
+        (cp != null && cp.x == li && cp.y == ti)) {
+      return _TokRole.currency;
+    }
     final m = st.noiseTokens[pos];
     if (m != null) {
       return m.kind == NoiseKind.context ? _TokRole.context : _TokRole.noise;
@@ -3001,7 +3031,9 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text(
-                'أرقام أخرى في الرسالة:',
+                st.amount == null
+                    ? 'المبالغ في الرسالة — اختر الصحيح:'
+                    : 'أرقام أخرى في الرسالة:',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w800,
@@ -3053,7 +3085,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                 title: '${c.tx.beneficiary} • ${_txAmountText(c.tx)}',
                 subtitle:
                     'الحالة: ${_statusLabel(c.tx.status)}'
-                    '${delta != null && delta > 0 ? ' • Δ ${delta.toStringAsFixed(2)}' : ''}'
+                    '${delta != null && delta > 0 ? ' • Δ ${_formatAmount(delta)}' : ''}'
                     ' • ${_formatTxDateTime(c.tx.date)}'
                     '${st.selectionMode == _SelectionMode.auto ? ' • اختيار تلقائي' : ''}',
                 trailing: Row(
@@ -3257,7 +3289,7 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                         if (st.amount != null)
                           _TinyPill(
                             icon: Icons.call_split_rounded,
-                            text: 'Δ ${delta.toStringAsFixed(2)}',
+                            text: 'Δ ${_formatAmount(delta)}',
                           ),
                         _TinyPill(
                           icon: Icons.schedule_outlined,
@@ -3280,6 +3312,12 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
                             icon: Icons.currency_exchange_rounded,
                             text: 'عملة مختلفة',
                             color: Colors.orange.shade800,
+                          ),
+                        if (st.amount == null && _amountInMessage(st, c.tx))
+                          _TinyPill(
+                            icon: Icons.find_in_page_outlined,
+                            text: 'مبلغها موجود بالرسالة',
+                            color: Colors.teal.shade700,
                           ),
                         if (c.exact && c.amountPart > 0)
                           _TinyPill(
@@ -4118,7 +4156,16 @@ class _BubbleState {
   bool amountFromSuspect = false;
 
   Point<int>? currencyPos;
+
+  /// كل كلمات العملة المختارة («ليرة سورية» = كلمتان)
+  Set<_TokPos> currencyPositions = {};
   String? currencyKey;
+
+  /// كل العملات المختلفة في الرسالة
+  List<String> currencyNames = [];
+
+  /// أكثر من مبلغ وأكثر من عملة: المبلغ لا يُحدد تلقائيًا
+  bool moneyAmbiguous = false;
 
   final List<_Candidate> candidates = [];
   final Set<int> selectedTxIds = {};

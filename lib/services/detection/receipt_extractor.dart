@@ -59,6 +59,16 @@ class ReceiptExtraction {
   final Point<int>? currencyPos;
   final String? currencyKey;
 
+  /// مواقع كل كلمات العملة المختارة («ليرة سورية» = موقعان)
+  final List<Point<int>> currencyPositions;
+
+  /// كل العملات المختلفة في الرسالة (بالاسم المعروض)
+  final List<String> currencyNames;
+
+  /// في الرسالة أكثر من مبلغ وأكثر من عملة: لا نعرف أي مبلغ لأي عملة، فلا
+  /// يُعتمد المبلغ تلقائيًا ويختاره المستخدم (مع تحذير)
+  final bool moneyAmbiguous;
+
   const ReceiptExtraction({
     required this.lines,
     required this.nameTokensByLine,
@@ -75,6 +85,9 @@ class ReceiptExtraction {
     required this.amountFromSuspect,
     required this.currencyPos,
     required this.currencyKey,
+    this.currencyPositions = const [],
+    this.currencyNames = const [],
+    this.moneyAmbiguous = false,
   });
 
   NoiseMark? noiseAt(int li, int ti) =>
@@ -199,6 +212,11 @@ class ReceiptExtractor {
       amountFromSuspect: fromSuspect,
       currencyPos: cpos,
       currencyKey: currencyKey,
+      currencyPositions: List<Point<int>>.from(pass.currency.positions),
+      currencyNames: List<String>.from(pass.currency.currencyNames),
+      moneyAmbiguous:
+          pass.amount.candidateValues.length >= 2 &&
+          pass.currency.hasMultipleCurrencies,
     );
   }
 

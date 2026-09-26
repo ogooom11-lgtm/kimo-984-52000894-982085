@@ -57,6 +57,13 @@ class CurrencyDetectResult {
   /// النص المتبقي بعد حذف العملة أو نزعها من التوكن الملزوق
   final List<List<PreparedToken>> remainingTokensByLine;
 
+  /// مواقع كل كلمات العملة المختارة: «ليرة سورية» = موقعان يبدآن بـ [pos]
+  final List<Point<int>> positions;
+
+  /// كل العملات المختلفة الموجودة في النص بالترتيب، باسمها المعروض ومن دون
+  /// تكرار ($ و دولار عملة واحدة إن كان اسمهما في الإعدادات واحدًا)
+  final List<String> currencyNames;
+
   const CurrencyDetectResult({
     required this.pos,
     required this.detectedKey,
@@ -65,9 +72,14 @@ class CurrencyDetectResult {
     required this.suggestNames,
     required this.confidence,
     required this.remainingTokensByLine,
+    this.positions = const [],
+    this.currencyNames = const [],
   });
 
   bool get hasCurrency => detectedDisplayName != null && detectedDisplayName!.trim().isNotEmpty;
+
+  /// في النص أكثر من عملة مختلفة
+  bool get hasMultipleCurrencies => currencyNames.length >= 2;
 
   List<String> get remainingLines =>
       remainingTokensByLine.map((row) => row.map((e) => e.token).join(' ')).toList();
@@ -97,13 +109,12 @@ List<String> _tokensFromLine(String line) => line
     .where((w) => w.isNotEmpty)
     .toList();
 
-String _normExact(String s) =>
-    _normalizeArabic(s).replaceAll(RegExp(r'\s+'), ' ').trim();
+/// مفتاح مقارنة موحّد للعملات: بدون مسافات ولا رموز زائدة، حروف عربية موحّدة
+/// وحروف لاتينية كبيرة. «ليرة سورية» = «ليره سوريه» = «ليرةسورية».
+String _currencyKey(String s) => _cleanToken(s).toUpperCase();
 
-String _normNoSpace(String s) =>
-    _normExact(s).replaceAll(RegExp(r'\s+'), '');
-
-bool _sameNorm(String a, String b) => _normExact(a) == _normExact(b);
+/// أطول عملة نبحث عنها بعدد الكلمات («دولار امريكي صافي»)
+const int _maxPhraseWords = 3;
 
 bool _hasDigits(String s) => RegExp(r'[0-9\u0660-\u0669]').hasMatch(s);
 
@@ -135,20 +146,12 @@ const Map<String, String> _defaultFamilyDisplay = {
   'SYP': 'ليرة سورية',
 };
 
-String? _familyOf(String token) {
-  final noSpace = _normNoSpace(token);
-  final upperNoSpace = noSpace.toUpperCase();
+final Map<String, String> _familyByKey = {
+  for (final e in _currencyFamilies.entries)
+    for (final raw in e.value) _currencyKey(raw): e.key,
+};
 
-  for (final e in _currencyFamilies.entries) {
-    for (final raw in e.value) {
-      final familyTok = _normNoSpace(raw);
-      if (familyTok == noSpace || familyTok.toUpperCase() == upperNoSpace) {
-        return e.key;
-      }
-    }
-  }
-  return null;
-}
+String? _familyOf(String token) => _familyByKey[_currencyKey(token)];
 
 class _ResolvedCurrency {
   final String? key;
@@ -164,62 +167,65 @@ class _ResolvedCurrency {
   });
 }
 
-_ResolvedCurrency? _resolveCurrencyToken(
-    String token,
-    Map<String, String> currencyMap,
-    ) {
-  final cleaned = _cleanToken(token);
-  if (cleaned.isEmpty) return null;
+/// فهرس عملات الإعدادات: يُبنى مرة لكل عملية كشف، والمقارنة بمفتاح بدون
+/// مسافات، فالعملة المكتوبة بكلمتين («ليرة سورية») تطابق كلمتيها في الرسالة.
+class _CurrencyIndex {
+  final Map<String, MapEntry<String, String>> _byAlias = {};
+  final Map<String, MapEntry<String, String>> _byName = {};
+  final Map<String, MapEntry<String, String>> _byFamily = {};
 
-  // 1) تطابق exact مع aliases
-  for (final e in currencyMap.entries) {
-    if (_sameNorm(cleaned, e.key)) {
-      return _ResolvedCurrency(
-        key: e.key,
-        displayName: e.value,
-        family: _familyOf(e.key) ?? _familyOf(e.value),
-        score: 1.0,
-      );
-    }
-  }
-
-  // 2) تطابق exact مع display names
-  for (final e in currencyMap.entries) {
-    if (_sameNorm(cleaned, e.value)) {
-      return _ResolvedCurrency(
-        key: e.key,
-        displayName: e.value,
-        family: _familyOf(e.key) ?? _familyOf(e.value),
-        score: 0.99,
-      );
-    }
-  }
-
-  // 3) تطابق عبر family
-  final fam = _familyOf(cleaned);
-  if (fam != null) {
+  _CurrencyIndex(Map<String, String> currencyMap) {
     for (final e in currencyMap.entries) {
-      final entryFam = _familyOf(e.key) ?? _familyOf(e.value);
-      if (entryFam == fam) {
-        return _ResolvedCurrency(
-          key: e.key,
-          displayName: e.value,
-          family: fam,
-          score: 0.95,
-        );
-      }
+      final aliasKey = _currencyKey(e.key);
+      if (aliasKey.isNotEmpty) _byAlias.putIfAbsent(aliasKey, () => e);
+      final nameKey = _currencyKey(e.value);
+      if (nameKey.isNotEmpty) _byName.putIfAbsent(nameKey, () => e);
+      final fam = _familyOf(e.key) ?? _familyOf(e.value);
+      if (fam != null) _byFamily.putIfAbsent(fam, () => e);
     }
+  }
+
+  _ResolvedCurrency? resolve(String token) => resolveKey(_currencyKey(token));
+
+  /// [key] من [_currencyKey] (أو مفاتيح عدة كلمات ملصوقة ببعضها)
+  _ResolvedCurrency? resolveKey(String key) {
+    if (key.isEmpty) return null;
+
+    // 1) تطابق exact مع aliases
+    final alias = _byAlias[key];
+    if (alias != null) return _fromEntry(alias, 1.0);
+
+    // 2) تطابق exact مع display names
+    final name = _byName[key];
+    if (name != null) return _fromEntry(name, 0.99);
+
+    // 3) تطابق عبر family
+    final fam = _familyByKey[key];
+    if (fam == null) return null;
+    final entry = _byFamily[fam];
+    if (entry != null) return _fromEntry(entry, 0.95, family: fam);
 
     // لو لم نجد ضمن الإعدادات، نعيد اسمًا افتراضيًا للاقتراح
     return _ResolvedCurrency(
       key: fam,
-      displayName: _defaultFamilyDisplay[fam] ?? cleaned,
+      displayName: _defaultFamilyDisplay[fam] ?? key,
       family: fam,
       score: 0.75,
     );
   }
 
-  return null;
+  static _ResolvedCurrency _fromEntry(
+      MapEntry<String, String> e,
+      double score, {
+        String? family,
+      }) {
+    return _ResolvedCurrency(
+      key: e.key,
+      displayName: e.value,
+      family: family ?? _familyOf(e.key) ?? _familyOf(e.value),
+      score: score,
+    );
+  }
 }
 
 bool _looksLikeCurrencyToken(String token) {
@@ -243,9 +249,13 @@ class _StickyMatch {
   final _ResolvedCurrency resolved;
   final String numericPart;
 
+  /// عدد الكلمات بعد التوكن الملزوق التي تكمل اسم العملة («10000ليرة سورية»)
+  final int extraTokens;
+
   const _StickyMatch({
     required this.resolved,
     required this.numericPart,
+    this.extraTokens = 0,
   });
 }
 String _amountCorePattern() {
@@ -257,8 +267,9 @@ String _amountCorePattern() {
 }
 _StickyMatch? _splitStickyCurrencyToken(
     String token,
-    Map<String, String> currencyMap,
-    ) {
+    _CurrencyIndex index, {
+      String? nextKey,
+    }) {
   final t = _cleanToken(token);
   if (t.isEmpty) return null;
 
@@ -278,7 +289,7 @@ _StickyMatch? _splitStickyCurrencyToken(
   if (prefix != null) {
     final cur = prefix.group(1)!;
     final num = prefix.group(2)!;
-    final resolved = _resolveCurrencyToken(cur, currencyMap);
+    final resolved = index.resolve(cur);
     if (resolved != null) {
       return _StickyMatch(
         resolved: resolved,
@@ -302,7 +313,20 @@ _StickyMatch? _splitStickyCurrencyToken(
   if (suffix != null) {
     final num = suffix.group(1)!;
     final cur = suffix.group(2)!;
-    final resolved = _resolveCurrencyToken(cur, currencyMap);
+
+    // «10000ليرة» ثم «سورية»: العملة من كلمتين والرقم ملزوق بأولاهما
+    if (nextKey != null && nextKey.isNotEmpty) {
+      final joined = index.resolveKey(_currencyKey(cur) + nextKey);
+      if (joined != null) {
+        return _StickyMatch(
+          resolved: joined,
+          numericPart: num,
+          extraTokens: 1,
+        );
+      }
+    }
+
+    final resolved = index.resolve(cur);
     if (resolved != null) {
       return _StickyMatch(
         resolved: resolved,
@@ -408,10 +432,15 @@ class CurrencyDetector {
         .map(_cleanToken)
         .where((e) => e.isNotEmpty)
         .toSet();
+    final index = _CurrencyIndex(currencyMap);
 
     _CurrencyCandidate? best;
+    // كل العملات المختلفة بالترتيب: مفتاح الاسم المعروض ← الاسم المعروض
+    final found = <String, String>{};
 
     void registerCandidate(_CurrencyCandidate c) {
+      final display = c.resolved.displayName.trim();
+      found.putIfAbsent(_currencyKey(display), () => display);
       if (best == null || c.score > best!.score) {
         best = c;
       }
@@ -421,16 +450,43 @@ class CurrencyDetector {
       final row = preparedTokensByLine[li];
       if (row.isEmpty) continue;
 
+      // مفتاح كل كلمة مرة واحدة (فارغ = كلمة لا تدخل في العملة)
+      final keys = <String>[
+        for (final p in row) _scanKey(p.token, ignoredSet),
+      ];
+
       for (int ti = 0; ti < row.length; ti++) {
-        final tok = row[ti].token.trim();
-        if (tok.isEmpty) continue;
+        if (keys[ti].isEmpty) continue;
+        final cleanedTok = _cleanToken(row[ti].token.trim());
 
-        final cleanedTok = _cleanToken(tok);
-        if (cleanedTok.isEmpty) continue;
-        if (ignoredSet.contains(cleanedTok)) continue;
+        // 1) أطول عبارة أولًا: «ليرة سورية» عملة واحدة، ولا تُقرأ «ليرة» وحدها
+        //    (قد تكون «ليرة» وحدها معرّفة لعملة أخرى مثل الليرة التركية)
+        final phrase = _phraseAt(keys, ti, index);
+        if (phrase != null) {
+          final text = [
+            for (int k = ti; k < ti + phrase.words; k++) row[k].token.trim(),
+          ].join(' ');
+          final fam = phrase.resolved.family;
+          if (fam != null) sym.add(fam);
+          names.add(text);
 
-        // 1) exact token
-        final exact = _resolveCurrencyToken(cleanedTok, currencyMap);
+          registerCandidate(
+            _CurrencyCandidate(
+              originalPos: row[ti].originalPos,
+              lineIndex: li,
+              startTokenIndex: ti,
+              endTokenIndex: ti + phrase.words - 1,
+              replacementForStart: null,
+              resolved: phrase.resolved,
+              score: phrase.resolved.score,
+            ),
+          );
+          ti += phrase.words - 1;
+          continue;
+        }
+
+        // 2) exact token
+        final exact = index.resolveKey(keys[ti]);
         if (exact != null) {
           if (_isAsciiCurrencySymbol(cleanedTok)) {
             sym.add(cleanedTok.toUpperCase());
@@ -452,8 +508,12 @@ class CurrencyDetector {
           continue;
         }
 
-        // 2) sticky token مثل 2000$ أو 190000سوري أو $2000
-        final sticky = _splitStickyCurrencyToken(cleanedTok, currencyMap);
+        // 3) sticky token مثل 2000$ أو 190000سوري أو $2000 أو 10000ليرة سورية
+        final sticky = _splitStickyCurrencyToken(
+          cleanedTok,
+          index,
+          nextKey: ti + 1 < row.length ? keys[ti + 1] : null,
+        );
         if (sticky != null) {
           final fam = sticky.resolved.family;
           if (fam != null) {
@@ -469,40 +529,14 @@ class CurrencyDetector {
               originalPos: row[ti].originalPos,
               lineIndex: li,
               startTokenIndex: ti,
-              endTokenIndex: ti,
+              endTokenIndex: ti + sticky.extraTokens,
               replacementForStart: sticky.numericPart,
               resolved: sticky.resolved,
               score: sticky.resolved.score + 0.01,
             ),
           );
+          ti += sticky.extraTokens;
           continue;
-        }
-
-        // 3) عملة من كلمتين: "ليرة سورية" / "ريال قطري" / "ل س"
-        if (ti + 1 < row.length) {
-          final t1 = row[ti].token.trim();
-          final t2 = row[ti + 1].token.trim();
-          if (t1.isNotEmpty && t2.isNotEmpty) {
-            final fusedSpace = '$t1 $t2';
-            final resolved2 = _resolveCurrencyToken(fusedSpace, currencyMap);
-
-            if (resolved2 != null) {
-              names.add(fusedSpace);
-
-              registerCandidate(
-                _CurrencyCandidate(
-                  originalPos: row[ti].originalPos,
-                  lineIndex: li,
-                  startTokenIndex: ti,
-                  endTokenIndex: ti + 1,
-                  replacementForStart: null,
-                  resolved: resolved2,
-                  score: resolved2.score - 0.01,
-                ),
-              );
-              continue;
-            }
-          }
         }
 
         // 4) اقتراحات لو بدا التوكن كعملة لكنه غير مضاف بشكل واضح في الإعدادات
@@ -522,19 +556,111 @@ class CurrencyDetector {
       }
     }
 
-    final remaining = _applyCandidateRemoval(preparedTokensByLine, best);
-    final conf = best?.score ?? ((sym.isNotEmpty || names.isNotEmpty) ? 0.6 : 0.0);
+    final chosen = best;
+    final remaining = _applyCandidateRemoval(preparedTokensByLine, chosen);
+    final conf = chosen?.score ?? ((sym.isNotEmpty || names.isNotEmpty) ? 0.6 : 0.0);
+
+    final positions = <Point<int>>[];
+    if (chosen != null) {
+      final row = preparedTokensByLine[chosen.lineIndex];
+      for (int k = chosen.startTokenIndex;
+          k <= chosen.endTokenIndex && k < row.length;
+          k++) {
+        positions.add(row[k].originalPos);
+      }
+    }
 
     return CurrencyDetectResult(
-      pos: best?.originalPos,
-      detectedKey: best?.resolved.key,
-      detectedDisplayName: best?.resolved.displayName,
+      pos: chosen?.originalPos,
+      detectedKey: chosen?.resolved.key,
+      detectedDisplayName: chosen?.resolved.displayName,
       suggestSymbols: sym,
       suggestNames: names,
       confidence: conf,
       remainingTokensByLine: remaining,
+      positions: positions,
+      currencyNames: found.values.toList(),
     );
   }
+
+  /// عملة (من كلمة أو أكثر) تشمل الكلمة [index] في [tokens]، أو null.
+  /// تُستخدم عند الضغط على كلمة لاختيار العملة يدويًا، ولمعرفة إن كان السطر
+  /// ينتهي بعملة. الأطول أولًا: «ليرة سورية» قبل «ليرة».
+  static CurrencyPhraseMatch? phraseAt({
+    required List<String> tokens,
+    required int index,
+    required Map<String, String> currencyMap,
+    List<String> ignoredWords = const [],
+  }) {
+    if (index < 0 || index >= tokens.length) return null;
+    final ignoredSet = ignoredWords
+        .map(_cleanToken)
+        .where((e) => e.isNotEmpty)
+        .toSet();
+    final keys = [for (final t in tokens) _scanKey(t, ignoredSet)];
+    if (keys[index].isEmpty) return null;
+    final idx = _CurrencyIndex(currencyMap);
+
+    for (int len = _maxPhraseWords; len >= 1; len--) {
+      for (int start = index - len + 1; start <= index; start++) {
+        if (start < 0 || start + len > keys.length) continue;
+        final parts = keys.sublist(start, start + len);
+        if (parts.any((k) => k.isEmpty)) continue;
+        final r = idx.resolveKey(parts.join());
+        if (r == null) continue;
+        return CurrencyPhraseMatch(
+          start: start,
+          end: start + len - 1,
+          key: r.key,
+          displayName: r.displayName,
+          inSettings: r.score > 0.9,
+        );
+      }
+    }
+    return null;
+  }
+}
+
+/// نتيجة [CurrencyDetector.phraseAt]: كلمات العملة من [start] إلى [end]
+class CurrencyPhraseMatch {
+  final int start;
+  final int end;
+  final String? key;
+  final String displayName;
+
+  /// العملة معرّفة في الإعدادات (وليست من العائلات الافتراضية فقط)
+  final bool inSettings;
+
+  const CurrencyPhraseMatch({
+    required this.start,
+    required this.end,
+    required this.key,
+    required this.displayName,
+    required this.inSettings,
+  });
+}
+
+/// مفتاح كلمة لفحص العملات، أو '' إن كانت فارغة أو متجاهلة
+String _scanKey(String token, Set<String> ignoredSet) {
+  final c = _cleanToken(token.trim());
+  if (c.isEmpty || ignoredSet.contains(c)) return '';
+  return c.toUpperCase();
+}
+
+/// عملة من كلمتين أو أكثر تبدأ عند [start] (الأطول أولًا)، أو null
+({_ResolvedCurrency resolved, int words})? _phraseAt(
+    List<String> keys,
+    int start,
+    _CurrencyIndex index,
+    ) {
+  for (int len = _maxPhraseWords; len >= 2; len--) {
+    if (start + len > keys.length) continue;
+    final parts = keys.sublist(start, start + len);
+    if (parts.any((k) => k.isEmpty)) continue;
+    final r = index.resolveKey(parts.join());
+    if (r != null) return (resolved: r, words: len);
+  }
+  return null;
 }
 
 /// عائلة العملة (USD / EUR / SYP) لرمز أو اسم عملة، أو null إن لم تُعرف.

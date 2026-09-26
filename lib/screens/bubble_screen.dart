@@ -1,5 +1,6 @@
 // lib/screens/bubble_screen.dart — نسخة مُحسّنة تدعم عدّة ملفات وتراعي الإعدادات بالكامل
 import 'dart:async';
+import 'dart:math' show Point;
 
 import 'package:flutter/material.dart';
 import 'package:characters/characters.dart';
@@ -156,6 +157,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
   final Set<int> _amountConflict = {};
   final Map<int, double> _amountTextCandidate = {};
   final Map<int, List<double>> _amountCandidatesCache = {};
+
+  /// رسائل فيها أكثر من مبلغ وأكثر من عملة: لا يُعتمد المبلغ تلقائيًا
+  final Map<int, _MoneyAmbiguity> _moneyAmbiguity = {};
 
   // إدخال يدوي للاسم
   final Map<int, String> _nameOverride = {};
@@ -961,14 +965,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
   Set<String> _currencyHintsFromSettings() {
     final out = <String>{};
 
-    for (final k in _currencyMap.keys) {
-      final v = _cleanToken(k);
+    for (final raw in [..._currencyMap.keys, ..._currencyMap.values]) {
+      final v = _cleanToken(raw);
       if (v.isNotEmpty) out.add(v);
-    }
 
-    for (final v0 in _currencyMap.values) {
-      final v = _cleanToken(v0);
-      if (v.isNotEmpty) out.add(v);
+      // العملة من أكثر من كلمة («ليرة سورية»): كل كلمة منها تلميح عملة أيضًا
+      final words = raw.trim().split(RegExp(r'\s+'));
+      if (words.length < 2) continue;
+      for (final w in words) {
+        final c = _cleanToken(w);
+        if (c.length >= 2) out.add(c);
+      }
     }
 
     return out;
@@ -1110,8 +1117,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (sel.phoneLikeTokens.contains(pos)) continue;
         if (_isPhoneLike(tok)) continue;
         if (_isIgnoredWord(tok)) continue;
+        // باقي كلمات عملة من أكثر من كلمة («سورية» في «ليرة سورية»)
+        if (sel.currencyToken != pos && sel.isCurrencyAt(pos)) continue;
 
         if (sel.currencyToken == pos) {
+          // كلمة عملة بلا أرقام تُحذف كلها (ولو كانت أول كلمة من «ليرة سورية»)
+          if (!tt.tokenHasDigit(tok)) continue;
           tok = _stripDetectedCurrency(tok);
           tok = _cleanToken(tok);
           if (tok.isEmpty) continue;
@@ -1125,6 +1136,119 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     return rows;
+  }
+
+  /// موقع العملة المختارة داخل أسطر المبلغ بعد حذفها منها (رقمها = عدد الكلمات
+  /// المحفوظة قبلها): يمنع ضم «مليون» في السطر التالي لسطر انتهى بعملة.
+  ad.Position? _currencyAnchorIn(
+    List<_ForwardLine> rows,
+    _SegmentSelection sel,
+  ) {
+    final c = sel.currencyToken;
+    if (c == null || c.line < 0 || c.line >= rows.length) return null;
+    final before = rows[c.line].originals.where((o) => o.index < c.index);
+    return ad.Position(c.line, before.length);
+  }
+
+  /// أسطر الكشف بمواقع الكلمات الأصلية (لكاشف العملة)
+  List<List<cd.PreparedToken>> _preparedFromForward(
+    List<_ForwardLine> rows,
+  ) => [
+    for (final row in rows)
+      [
+        for (int k = 0; k < row.tokens.length; k++)
+          cd.PreparedToken(
+            token: row.tokens[k],
+            originalPos: Point(row.originals[k].line, row.originals[k].index),
+          ),
+      ],
+  ];
+
+  /// يعتمد العملة المكتشفة، مع باقي كلماتها إن كانت من أكثر من كلمة
+  void _setCurrencyFromDetect(
+    _SegmentSelection sel,
+    cd.CurrencyDetectResult res,
+  ) {
+    final p = res.pos;
+    if (p == null) return;
+    final start = _TokPos(p.x, p.y);
+    sel.currencyToken = start;
+    sel.currencyPhraseStart = start;
+    sel.currencyPhraseTokens
+      ..clear()
+      ..addAll([
+        for (final q in res.positions)
+          if (q != p) _TokPos(q.x, q.y),
+      ]);
+  }
+
+  /// العملة المكتوبة في سطر معيّن (بدون كلمات الاسم)، أو null
+  _LineCurrency? _currencyOnLine(
+    ParsedSegment seg,
+    _SegmentSelection sel,
+    int lineIndex,
+  ) {
+    if (lineIndex < 0 || lineIndex >= seg.lines.length) return null;
+    final toks = _tokensFromLine(seg.lines[lineIndex]);
+    final row = <cd.PreparedToken>[
+      for (int ti = 0; ti < toks.length; ti++)
+        if (!sel.nameTokens.contains(_TokPos(lineIndex, ti)) &&
+            !_isIgnoredWord(toks[ti]))
+          cd.PreparedToken(token: toks[ti], originalPos: Point(lineIndex, ti)),
+    ];
+    if (row.isEmpty) return null;
+    final res = cd.CurrencyDetector.detectPrepared(
+      preparedTokensByLine: [row],
+      currencyMap: _currencyMap,
+    );
+    final p = res.pos;
+    final name = res.detectedDisplayName?.trim() ?? '';
+    if (p == null || name.isEmpty) return null;
+    return _LineCurrency(
+      start: _TokPos(p.x, p.y),
+      extra: {
+        for (final q in res.positions)
+          if (q != p) _TokPos(q.x, q.y),
+      },
+      name: name,
+    );
+  }
+
+  void _applyLineCurrency(_SegmentSelection sel, _LineCurrency c) {
+    sel.currencyToken = c.start;
+    sel.currencyPhraseStart = c.start;
+    sel.currencyPhraseTokens
+      ..clear()
+      ..addAll(c.extra);
+    sel.currencyDetectedName = c.name;
+    sel.currencyFromMenu = null;
+  }
+
+  /// آخر كلمة فعلية في السطر عملة («10.000 سوري» أو «250$» أو «ليرة سورية»)
+  bool _lineEndsWithCurrency(
+    _SegmentSelection sel,
+    int lineIndex,
+    List<String> tokens,
+  ) {
+    for (int ti = tokens.length - 1; ti >= 0; ti--) {
+      final pos = _TokPos(lineIndex, ti);
+      final tok = tokens[ti];
+      if (sel.nameTokens.contains(pos) ||
+          sel.phoneLikeTokens.contains(pos) ||
+          _isPhoneLike(tok) ||
+          _isIgnoredWord(tok)) {
+        continue;
+      }
+      return sel.isCurrencyAt(pos) ||
+          tt.containsCurrencySymbol(tok) ||
+          cd.CurrencyDetector.phraseAt(
+                tokens: tokens,
+                index: ti,
+                currencyMap: _currencyMap,
+              ) !=
+              null;
+    }
+    return false;
   }
 
   void _refreshStageForSegment(int segIndex) {
@@ -1168,8 +1292,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (sel.phoneLikeTokens.contains(pos)) continue;
         if (_isPhoneLike(tok)) continue;
         if (_isIgnoredWord(tok)) continue;
+        if (sel.currencyToken != pos && sel.isCurrencyAt(pos)) continue;
 
         if (sel.currencyToken == pos) {
+          // كلمة عملة بلا أرقام تُحذف كلها (ولو كانت أول كلمة من «ليرة سورية»)
+          if (!tt.tokenHasDigit(tok)) continue;
           tok = _stripDetectedCurrency(tok);
           tok = _cleanToken(tok);
           if (tok.isEmpty) continue;
@@ -1180,9 +1307,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
     }
 
-    // كلمة مقدار في سطر بعده («250» ثم «الف»): تُحسب مع السطر المضغوط
+    // كلمة مقدار في سطر بعده («250» ثم «الف»): تُحسب مع السطر المضغوط، إلا إذا
+    // انتهى السطر بعملة («10.000 سوري») أو برقم كبير: «مليون» بعده مبلغ آخر
     final extraLines = <String>[];
-    if (keptTokens.isNotEmpty) {
+    if (keptTokens.isNotEmpty &&
+        !_lineEndsWithCurrency(sel, lineIndex, tokensThisLine) &&
+        ad.AmountDetector.canTakeMagnitudeLine(
+          keptTokens,
+          customWordValues: _amountWordValues,
+        )) {
       for (int li = lineIndex + 1; li < seg.lines.length; li++) {
         final toks = _tokensFromLine(seg.lines[li]);
         final next = <String>[];
@@ -1237,6 +1370,14 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
       if (amtRes.hasConflict) {
         _amountConflict.add(segIndex);
+      }
+
+      // رسالة بأكثر من عملة: عملة المبلغ المختار هي المكتوبة في سطره
+      if (_moneyAmbiguity.containsKey(segIndex) &&
+          sel.currencyFromMenu == null &&
+          _hasAmountFor(segIndex, sel)) {
+        final c = _currencyOnLine(seg, sel, lineIndex);
+        if (c != null) _applyLineCurrency(sel, c);
       }
 
       _refreshStageForSegment(segIndex);
@@ -1336,22 +1477,16 @@ class _BubbleScreenState extends State<BubbleScreen> {
       sel.stage = SelectionStage.done;
     }
 
-    // 4) العملة على النص المنظف
+    // 4) العملة على النص المنظف (بمواقع الكلمات الأصلية؛ والعملة قد تكون من
+    //    أكثر من كلمة مثل «ليرة سورية»)
     final currencyForward = _buildForwardLinesForCurrency(seg, sel);
 
-    final curRes = cd.CurrencyDetector.detect(
-      lines: currencyForward.map((e) => e.text).toList(),
+    final curRes = cd.CurrencyDetector.detectPrepared(
+      preparedTokensByLine: _preparedFromForward(currencyForward),
       currencyMap: _currencyMap,
     );
 
-    if (curRes.pos != null &&
-        curRes.pos!.x >= 0 &&
-        curRes.pos!.x < currencyForward.length) {
-      final row = currencyForward[curRes.pos!.x];
-      if (curRes.pos!.y >= 0 && curRes.pos!.y < row.originals.length) {
-        sel.currencyToken = row.originals[curRes.pos!.y];
-      }
-    }
+    _setCurrencyFromDetect(sel, curRes);
 
     sel.currencyDetectedName = curRes.detectedDisplayName;
 
@@ -1362,6 +1497,30 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     _suggestCurrencySymbols.addAll(curRes.suggestSymbols);
     _suggestCurrencyNames.addAll(curRes.suggestNames);
+
+    // 6) أكثر من مبلغ وأكثر من عملة: لا نعرف أي مبلغ لأي عملة، فلا نعتمد مبلغًا
+    //    ويختاره المستخدم (مع تحذير في الفقاعة). العملة تبقى المكتشفة.
+    _moneyAmbiguity.remove(segIndex);
+    if (amtRes.candidateValues.length >= 2 && curRes.hasMultipleCurrencies) {
+      _moneyAmbiguity[segIndex] = _MoneyAmbiguity(
+        currencies: List<String>.from(curRes.currencyNames),
+        options: [
+          for (int k = 0; k < amtRes.candidateValues.length; k++)
+            _AmountOption(
+              value: amtRes.candidateValues[k],
+              currency: k < amtRes.candidatePositions.length
+                  ? _currencyOnLine(seg, sel, amtRes.candidatePositions[k].x)
+                  : null,
+            ),
+        ],
+      );
+      sel.amount = null;
+      _amountOverride.remove(segIndex);
+      _amountTextCandidate.remove(segIndex);
+      _amountConflict.remove(segIndex);
+      _amountCandidatesCache.remove(segIndex);
+      if (_hasNameFor(segIndex, sel)) sel.stage = SelectionStage.amount;
+    }
 
     return sel;
   }
@@ -1499,7 +1658,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   ) {
     final isName = sel.nameTokens.contains(pos);
     final isAmt = (sel.amount == pos);
-    final isCur = (sel.currencyToken == pos);
+    final isCur = sel.isCurrencyAt(pos);
 
     if (current == SelectionStage.name && (isAmt || isCur))
       return isAmt ? 'مبلغ' : 'عملة';
@@ -1514,7 +1673,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   void _unselectToken(int segIndex, _TokPos pos) {
     final sel = _selections[segIndex];
     final isAmt = sel.amount == pos;
-    final isCur = sel.currencyToken == pos;
+    final isCur = sel.isCurrencyAt(pos);
     final isName = sel.nameTokens.contains(pos);
 
     if (isAmt && isCur) {
@@ -1578,7 +1737,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
       await _detectAmountFromTappedLine(segIndex, lineIndex, tokensThisLine);
 
-      if (_hasMultipleAmountCandidates(segIndex)) {
+      // في الرسالة متعددة العملات الضغط نفسه هو الاختيار (بدون نافذة ثانية)
+      if (!_moneyAmbiguity.containsKey(segIndex) &&
+          _hasMultipleAmountCandidates(segIndex)) {
         await _openMultiAmountPickerDialog(segIndex);
       }
       return;
@@ -1667,13 +1828,22 @@ class _BubbleScreenState extends State<BubbleScreen> {
       case SelectionStage.amount:
         await _detectAmountFromTappedLine(segIndex, lineIndex, tokensThisLine);
 
-        if (_hasMultipleAmountCandidates(segIndex)) {
+        if (!_moneyAmbiguity.containsKey(segIndex) &&
+            _hasMultipleAmountCandidates(segIndex)) {
           await _openMultiAmountPickerDialog(segIndex);
         }
         return;
 
       case SelectionStage.currency:
-        if (!_isKnownCurrencyToken(_getSettingsOrDefault(), tok)) {
+        // العملة قد تكون من أكثر من كلمة («ليرة سورية»): تؤخذ العبارة كاملة
+        final phrase = cd.CurrencyDetector.phraseAt(
+          tokens: tokensThisLine,
+          index: tokenIndex,
+          currencyMap: _currencyMap,
+        );
+        final match = (phrase != null && phrase.inSettings) ? phrase : null;
+        if (match == null &&
+            !_isKnownCurrencyToken(_getSettingsOrDefault(), tok)) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('العملة غير مُعرّفة في الإعدادات')),
           );
@@ -1681,8 +1851,23 @@ class _BubbleScreenState extends State<BubbleScreen> {
         }
 
         setState(() {
-          sel.currencyToken = pos;
-          sel.currencyFromMenu = null;
+          if (match != null) {
+            _applyLineCurrency(
+              sel,
+              _LineCurrency(
+                start: _TokPos(lineIndex, match.start),
+                extra: {
+                  for (int k = match.start + 1; k <= match.end; k++)
+                    _TokPos(lineIndex, k),
+                },
+                name: match.displayName,
+              ),
+            );
+          } else {
+            sel.currencyToken = pos;
+            sel.currencyDetectedName = null;
+            sel.currencyFromMenu = null;
+          }
           _refreshStageForSegment(segIndex);
         });
         return;
@@ -2990,7 +3175,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   bool _isCurrencyPos(int segIndex, int li, int ti) {
-    return _selections[segIndex].currencyToken == _TokPos(li, ti);
+    return _selections[segIndex].isCurrencyAt(_TokPos(li, ti));
   }
 
   bool _isDualAmountCurrencyPos(int segIndex, int li, int ti) {
@@ -3014,7 +3199,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final selected =
         sel.nameTokens.contains(pos) ||
         sel.amount == pos ||
-        sel.currencyToken == pos;
+        sel.isCurrencyAt(pos);
     final isLocked = _isLockedToken(segIndex, lineIndex, tokenIndex);
     final isForbidden = sel.forbiddenTokens.contains(pos);
 
@@ -3142,6 +3327,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       currencyHints: _currencyHintsFromSettings(),
       conflictThreshold: 0.35,
       customWordValues: _amountWordValues,
+      currencyAnchor: _currencyAnchorIn(forward, sel),
     );
 
     final values = <double>[];
@@ -3150,6 +3336,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _addUniqueAmount(values, res.textValue);
     _addUniqueAmount(values, _amountOverride[segIndex]);
     _addUniqueAmount(values, _amountTextCandidate[segIndex]);
+    for (final o in _moneyAmbiguity[segIndex]?.options ?? const []) {
+      _addUniqueAmount(values, o.value);
+    }
 
     values.sort();
     _amountCandidatesCache[segIndex] = values;
@@ -3199,17 +3388,37 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   void _applyChosenAmount(int segIndex, double amount) {
+    String? pairedCurrency;
     setState(() {
+      final sel = _selections[segIndex];
       _amountOverride[segIndex] = amount;
       _amountConflict.remove(segIndex);
       _amountCandidatesCache.remove(segIndex);
-      _selections[segIndex].amount = null;
+      sel.amount = null;
+      // رسالة بأكثر من عملة: المبلغ يأخذ العملة المكتوبة في سطره
+      final c = _moneyAmbiguity[segIndex]?.optionFor(amount)?.currency;
+      if (c != null && sel.currencyFromMenu == null) {
+        _applyLineCurrency(sel, c);
+        pairedCurrency = c.name;
+      }
       _refreshStageForSegment(segIndex);
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('تم اعتماد المبلغ: ${_fmtAmount(amount)}')),
+      SnackBar(
+        content: Text(
+          pairedCurrency == null
+              ? 'تم اعتماد المبلغ: ${_fmtAmount(amount)}'
+              : 'تم اعتماد المبلغ: ${_fmtAmount(amount)} $pairedCurrency',
+        ),
+      ),
     );
+  }
+
+  /// نص زر المبلغ في رسالة بأكثر من عملة: المبلغ مع عملة سطره إن عُرفت
+  String _amountOptionLabel(_MoneyAmbiguity amb, double value) {
+    final c = amb.optionFor(value)?.currency;
+    return c == null ? _fmtAmount(value) : '${_fmtAmount(value)} ${c.name}';
   }
 
   Future<void> _openMultiAmountPickerDialog(
@@ -3351,6 +3560,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _amountCandidatesCache
       ..clear()
       ..addAll(newAmountCandidatesCache);
+
+    final newMoneyAmbiguity = <int, _MoneyAmbiguity>{};
+    for (final e in _moneyAmbiguity.entries) {
+      if (e.key == deletedIndex) continue;
+      newMoneyAmbiguity[e.key > deletedIndex ? e.key - 1 : e.key] = e.value;
+    }
+    _moneyAmbiguity
+      ..clear()
+      ..addAll(newMoneyAmbiguity);
 
     final newNameOverride = <int, String>{};
     for (final e in _nameOverride.entries) {
@@ -6994,7 +7212,22 @@ class _BubbleScreenState extends State<BubbleScreen> {
     required String nameText,
     required List<double> amountCandidates,
   }) {
-    final base = wasSaved ? Colors.orange : Colors.amber;
+    // أكثر من مبلغ وأكثر من عملة: تحذير أوضح وأزرار اعتماد مباشرة
+    final amb = wasSaved ? null : _moneyAmbiguity[si];
+    final base = amb != null
+        ? Colors.deepOrange
+        : (wasSaved ? Colors.orange : Colors.amber);
+    final String message;
+    if (amb != null) {
+      final curs = amb.currencies.join(' ، ');
+      message = amountVal == null
+          ? 'تنبيه: الرسالة فيها أكثر من مبلغ وأكثر من عملة ($curs)، لذلك ما تم تحديد المبلغ تلقائيًا. اختر المبلغ الصحيح:'
+          : 'تنبيه: الرسالة فيها أكثر من مبلغ وأكثر من عملة ($curs). تأكد أن المبلغ والعملة صحيحين.';
+    } else {
+      message = wasSaved
+          ? 'تم حفظ الرسالة، لكن يوجد أكثر من مبلغ محتمل. يمكنك اختيار المبلغ الصحيح ونسخ الاسم أو أي مبلغ بشكل منفصل.'
+          : 'تم العثور على أكثر من مبلغ داخل الرسالة. اختر الآن أي مبلغ تريد حفظه.';
+    }
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(top: 8),
@@ -7007,16 +7240,49 @@ class _BubbleScreenState extends State<BubbleScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            wasSaved
-                ? 'تم حفظ الرسالة، لكن يوجد أكثر من مبلغ محتمل. يمكنك اختيار المبلغ الصحيح ونسخ الاسم أو أي مبلغ بشكل منفصل.'
-                : 'تم العثور على أكثر من مبلغ داخل الرسالة. اختر الآن أي مبلغ تريد حفظه.',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              color: _readable(context, base),
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (amb != null) ...[
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 20,
+                  color: _readable(context, base),
+                ),
+                const SizedBox(width: 6),
+              ],
+              Expanded(
+                child: Text(
+                  message,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: _readable(context, base),
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
+          if (amb != null) ...[
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final v in amountCandidates)
+                  FilledButton.tonalIcon(
+                    onPressed: () => _applyChosenAmount(si, v),
+                    icon: Icon(
+                      amountVal != null && (amountVal - v).abs() < 0.0001
+                          ? Icons.check_circle
+                          : Icons.touch_app_outlined,
+                      size: 18,
+                    ),
+                    label: Text(_amountOptionLabel(amb, v)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
           if (amountVal != null)
             Text(
               'المبلغ المعتمد حاليًا: ${_fmtAmount(amountVal)}',
@@ -7083,7 +7349,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final amountVal = _buildSelectedAmount(seg, sel, si);
     final currencyText = _buildSelectedCurrency(seg, sel);
     final wasSaved = _savedSegments.contains(si);
-    final amountCandidates = mode == BubbleActionMode.add
+    final amountCandidates =
+        (mode == BubbleActionMode.add ||
+            (mode == BubbleActionMode.edit && _moneyAmbiguity.containsKey(si)))
         ? _amountCandidatesForSegment(si)
         : const <double>[];
     final hasMultiAmount = amountCandidates.length >= 2;
@@ -7176,7 +7444,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                   _buildStageHint(context, si, sel, borderColor),
                   if (nameText.trim().isEmpty && sel.nameCandidates.isNotEmpty)
                     _buildNameSuggestions(context, si, sel),
-                  if (mode == BubbleActionMode.add && hasMultiAmount)
+                  if (mode != BubbleActionMode.cancel && hasMultiAmount)
                     _buildMultiAmountBox(
                       context,
                       si,
@@ -7479,6 +7747,11 @@ class _SegmentSelection {
   String? currencyFromMenu; // اسم عملة من القائمة
   String? currencyDetectedName; // اسم العملة المكتشفة من النص
 
+  // عملة من أكثر من كلمة («ليرة سورية»): باقي كلماتها بعد [currencyToken].
+  // تُحسب فقط ما دام [currencyToken] هو نفس بداية العبارة
+  _TokPos? currencyPhraseStart;
+  final Set<_TokPos> currencyPhraseTokens = {};
+
   final Set<_TokPos> phoneLikeTokens = {};
   final Set<_TokPos> amountTextLockedTokens = {};
 
@@ -7493,6 +7766,50 @@ class _SegmentSelection {
   final List<String> forbiddenPhrases = [];
 
   _SegmentSelection({required this.stage});
+
+  /// هل الكلمة جزء من العملة المختارة (أول كلمة أو باقي كلمات العبارة)؟
+  bool isCurrencyAt(_TokPos pos) {
+    final c = currencyToken;
+    if (c == null) return false;
+    if (c == pos) return true;
+    return currencyPhraseStart == c && currencyPhraseTokens.contains(pos);
+  }
+}
+
+/// عملة مكتوبة في سطر معيّن (قد تكون من أكثر من كلمة)
+class _LineCurrency {
+  final _TokPos start;
+  final Set<_TokPos> extra;
+  final String name;
+
+  const _LineCurrency({
+    required this.start,
+    required this.extra,
+    required this.name,
+  });
+}
+
+/// مبلغ مرشح في رسالة بأكثر من عملة، مع العملة المكتوبة في سطره (إن وُجدت)
+class _AmountOption {
+  final double value;
+  final _LineCurrency? currency;
+
+  const _AmountOption({required this.value, this.currency});
+}
+
+/// رسالة فيها أكثر من مبلغ وأكثر من عملة: لا يُعتمد المبلغ تلقائيًا
+class _MoneyAmbiguity {
+  final List<_AmountOption> options;
+  final List<String> currencies;
+
+  const _MoneyAmbiguity({required this.options, required this.currencies});
+
+  _AmountOption? optionFor(double value) {
+    for (final o in options) {
+      if ((o.value - value).abs() < 0.0001) return o;
+    }
+    return null;
+  }
 }
 
 class _SavedAddSummary {
