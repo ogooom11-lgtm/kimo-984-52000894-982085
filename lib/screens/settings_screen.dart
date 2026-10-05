@@ -19,7 +19,9 @@ import '../database_service.dart';
 import '../models.dart';
 import '../services/detection/text_tokens.dart' show normalizeArabic;
 import '../services/settings_words.dart';
+import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
+import 'trace_warnings_screen.dart';
 
 // =============================================================
 // الألوان المستخدمة لتمييز الأقسام
@@ -64,7 +66,12 @@ class _SettingsScreenState extends State<SettingsScreen>
     WidgetsBinding.instance.addObserver(this);
     _store = _SettingsStore()..attach();
     _accountsListenable = DatabaseService.accountsBox.listenable();
-    _listenable = Listenable.merge([_store, _accountsListenable]);
+    _listenable = Listenable.merge([
+      _store,
+      _accountsListenable,
+      TraceService.prefs,
+      TraceService.activeCount,
+    ]);
   }
 
   @override
@@ -110,6 +117,8 @@ class _SettingsScreenState extends State<SettingsScreen>
     final accounts = DatabaseService.accountsBox.values.toList();
     final accountWords = <String>[for (final a in accounts) ...a.keywords];
     final actions = s.bubbleQuickActions;
+    final tp = TraceService.prefs.value;
+    final warnCount = TraceService.activeCount.value;
 
     return [
       _HubGroup(
@@ -183,6 +192,36 @@ class _SettingsScreenState extends State<SettingsScreen>
             onTap: () => _open(_AccountKeywordsPage(store: _store)),
           ),
           wordTile(WordListKind.companyUser),
+        ],
+      ),
+      _HubGroup(
+        title: 'تتبّع مصدر الحركة',
+        icon: Icons.alt_route_rounded,
+        tiles: [
+          _HubTile(
+            icon: Icons.tune_rounded,
+            color: _kTeal,
+            title: 'إعدادات التتبّع',
+            subtitle:
+                'عادي ${tp.normalHoursSafe} س • أقصى ${tp.maxHoursSafe} س • '
+                '«${tp.unknown}»',
+            count: tp.mustReachWords.isEmpty ? null : tp.mustReachWords.length,
+            searchText:
+                'مصدر مسار شركة مكتب ربط وقت ساعات مجهول تحذير مرسلة لازم تروح',
+            contents: [tp.unknown, ...tp.mustReachWords],
+            onTap: () => _open(const _TracePrefsPage()),
+          ),
+          _HubTile(
+            icon: Icons.warning_amber_rounded,
+            color: _kOrange,
+            title: 'صفحة التحذيرات',
+            subtitle: warnCount == 0
+                ? 'ما في تحذيرات'
+                : '$warnCount تحذير بدو انتباهك',
+            count: warnCount == 0 ? null : warnCount,
+            searchText: 'تحذيرات تنبيه مصدر شركة مكتب اسم مبلغ ما راحت',
+            onTap: () => _open(const TraceWarningsScreen()),
+          ),
         ],
       ),
       _HubGroup(
@@ -2939,6 +2978,352 @@ Future<String?> _promptText(
       keyboardType: keyboardType,
     ),
   );
+}
+
+// =============================================================
+// تتبّع مصدر الحركة
+// =============================================================
+
+class _TracePrefsPage extends StatelessWidget {
+  const _TracePrefsPage();
+
+  static String _hoursText(int h) {
+    if (h == 1) return 'ساعة';
+    if (h == 2) return 'ساعتين';
+    if (h >= 3 && h <= 10) return '$h ساعات';
+    return '$h ساعة';
+  }
+
+  static String _daysText(int d) {
+    switch (d) {
+      case <= 0:
+        return 'كل الحركات';
+      case 7:
+        return 'أسبوع';
+      case 14:
+        return 'أسبوعين';
+      case 30:
+        return 'شهر';
+      case 60:
+        return 'شهرين';
+      case 90:
+        return '3 أشهر';
+      case 180:
+        return '6 أشهر';
+      case 365:
+        return 'سنة';
+    }
+    return '$d يوم';
+  }
+
+  /// موضع [d] بخيارات «التحذيرات لآخر» (أو أقرب خيار)
+  static int _warnIndex(int d) {
+    const choices = TracePrefs.warnDayChoices;
+    final i = choices.indexOf(d);
+    if (i >= 0) return i;
+    var best = 2;
+    var diff = 1 << 30;
+    for (var k = 0; k < choices.length; k++) {
+      if (choices[k] == 0) continue;
+      final dd = (choices[k] - d).abs();
+      if (dd < diff) {
+        diff = dd;
+        best = k;
+      }
+    }
+    return best;
+  }
+
+  void _set(TracePrefs p) => unawaited(TraceService.setPrefs(p));
+
+  Future<void> _editUnknown(BuildContext context, TracePrefs p) async {
+    final v = await _promptText(
+      context,
+      title: 'كلمة المصدر غير المعروف',
+      hint: 'مثلًا: مجهول',
+      initial: p.unknown,
+      icon: Icons.help_outline_rounded,
+    );
+    if (v == null || v.trim().isEmpty) return;
+    _set(p.copyWith(unknownLabel: v.trim()));
+  }
+
+  Future<void> _addWords(BuildContext context, TracePrefs p) async {
+    final v = await _promptText(
+      context,
+      title: 'كلمة جديدة',
+      hint: 'مثلًا: حلب (أكتر من كلمة؟ افصل بفاصلة)',
+      icon: Icons.add_rounded,
+      confirmLabel: 'إضافة',
+    );
+    if (v == null) return;
+    final list = [...p.mustReachWords];
+    var added = 0;
+    for (final raw in v.split(RegExp(r'[،,\n]'))) {
+      final w = raw.trim();
+      if (w.isEmpty || list.any((e) => _norm(e) == _norm(w))) continue;
+      list.add(w);
+      added++;
+    }
+    if (added == 0) {
+      if (context.mounted) _snack(context, 'الكلمة موجودة');
+      return;
+    }
+    _set(p.copyWith(mustReachWords: list));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = _pageBg(context);
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Scaffold(
+        backgroundColor: bg,
+        appBar: AppBar(
+          backgroundColor: bg,
+          surfaceTintColor: Colors.transparent,
+          scrolledUnderElevation: 0,
+          centerTitle: false,
+          title: const Text(
+            'تتبّع مصدر الحركة',
+            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 19),
+          ),
+        ),
+        body: ValueListenableBuilder<TracePrefs>(
+          valueListenable: TraceService.prefs,
+          builder: (context, p, _) {
+            final normal = p.normalHoursSafe;
+            final max = p.maxHoursSafe;
+            final words = p.mustReachWords;
+            return ListView(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                6,
+                16,
+                32 + MediaQuery.paddingOf(context).bottom,
+              ),
+              children: [
+                const _IntroCard(
+                  icon: Icons.alt_route_rounded,
+                  color: _kTeal,
+                  text:
+                      'كل حركة بحساب مكتب إلها مصدر: حركة «استقبال» بحساب شركة '
+                      '(شركة ABC ← مكتب X) أو «مجهول». البرنامج بيربطها لحاله إذا '
+                      'الاسم مطابق تمامًا والمبلغ والعملة نفسهم والوقت مناسب، '
+                      'وغير هيك بيعطيك تحذير وأنت بتختار. المسار بيبين بتفاصيل '
+                      'الحركة.',
+                ),
+                const SizedBox(height: 18),
+                const _SectionTitle(
+                  text: 'الوقت بين رسالة الشركة وحركة المكتب',
+                ),
+                _Card(
+                  padding: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      _SliderRow(
+                        icon: Icons.schedule_rounded,
+                        title: 'الوقت العادي',
+                        subtitle: 'لحد هالوقت الربط بيصير بدون تحذير',
+                        valueText: _hoursText(normal),
+                        value: normal.toDouble(),
+                        min: 1,
+                        max: 72,
+                        divisions: 71,
+                        onChanged: (v) {
+                          final n = v.round();
+                          _set(
+                            p.copyWith(
+                              normalHours: n,
+                              maxHours: max < n ? n : max,
+                            ),
+                          );
+                        },
+                      ),
+                      const _ListDivider(),
+                      _SliderRow(
+                        icon: Icons.hourglass_bottom_rounded,
+                        title: 'أقصى وقت ممكن',
+                        subtitle:
+                            'بعد الوقت العادي ولحد هون: ممكن بس مع تحذير. '
+                            'بعده: مستحيل، وما بيطلع ربط ولا تحذير',
+                        valueText: _hoursText(max),
+                        value: max.toDouble(),
+                        min: normal.toDouble(),
+                        max: 168,
+                        divisions: 168 - normal > 0 ? 168 - normal : null,
+                        onChanged: (v) => _set(p.copyWith(maxHours: v.round())),
+                      ),
+                      const _ListDivider(),
+                      _SliderRow(
+                        icon: Icons.history_toggle_off_rounded,
+                        title: 'سماحية إذا حركة المكتب قبل الرسالة',
+                        subtitle:
+                            'أحيانًا بتنسجل حركة المكتب قبل ما توصل رسالة الشركة '
+                            'بشوي',
+                        valueText: '${p.earlyMinutes.clamp(0, 120)} دقيقة',
+                        value: p.earlyMinutes.clamp(0, 120).toDouble(),
+                        min: 0,
+                        max: 120,
+                        divisions: 24,
+                        onChanged: (v) =>
+                            _set(p.copyWith(earlyMinutes: v.round())),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const _SectionTitle(text: 'المصدر غير المعروف'),
+                _Card(
+                  padding: EdgeInsets.zero,
+                  child: ListTile(
+                    leading: Icon(
+                      Icons.help_outline_rounded,
+                      color: _muted(context),
+                    ),
+                    title: const Text(
+                      'الكلمة يلي بتظهر',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    subtitle: Text(
+                      '«${p.unknown}» — بتظهر بالتفاصيل بدل اسم الشركة',
+                    ),
+                    trailing: const Icon(Icons.edit_rounded),
+                    onTap: () => _editUnknown(context, p),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                _SectionTitle(
+                  text: 'حركات لازم تروح لمكتب',
+                  trailing: words.isEmpty
+                      ? null
+                      : _ValuePill(text: '${words.length}', color: _kOrange),
+                ),
+                _Card(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'إذا حركة استقبال بحساب الشركة فيها وحدة من هالكلمات '
+                        '(بالاسم أو الملاحظات أو نص الرسالة) وما راحت لمكتب، '
+                        'بيطلعلك تحذير «ما راحت لمكتب».',
+                        style: TextStyle(
+                          color: _muted(context),
+                          fontSize: 12.5,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final w in words)
+                            _WordChip(
+                              text: w,
+                              color: _kOrange,
+                              onDelete: () => _set(
+                                p.copyWith(
+                                  mustReachWords: [...words]..remove(w),
+                                ),
+                              ),
+                            ),
+                          _AddChip(
+                            label: 'إضافة كلمة',
+                            onPressed: () => _addWords(context, p),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _Card(
+                  padding: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      _SliderRow(
+                        icon: Icons.notifications_active_rounded,
+                        title: 'التنبيه بعد',
+                        subtitle: 'إذا ما انربطت بحركة مكتب خلال هالوقت',
+                        valueText: p.alertAfterHours <= 0
+                            ? 'فورًا'
+                            : _hoursText(p.alertAfterHours.clamp(1, 48)),
+                        value: p.alertAfterHours.clamp(0, 48).toDouble(),
+                        min: 0,
+                        max: 48,
+                        divisions: 48,
+                        onChanged: (v) =>
+                            _set(p.copyWith(alertAfterHours: v.round())),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const _SectionTitle(text: 'صفحة التحذيرات'),
+                _Card(
+                  padding: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      _SliderRow(
+                        icon: Icons.date_range_rounded,
+                        title: 'التحذيرات لحركات آخر',
+                        subtitle:
+                            'الحركات الأقدم ما بتطلع بالتحذيرات (مسارها بيضل '
+                            'ظاهر بالتفاصيل)',
+                        valueText: _daysText(p.warnDays),
+                        value: _warnIndex(p.warnDays).toDouble(),
+                        min: 0,
+                        max: (TracePrefs.warnDayChoices.length - 1).toDouble(),
+                        divisions: TracePrefs.warnDayChoices.length - 1,
+                        onChanged: (v) => _set(
+                          p.copyWith(
+                            warnDays: TracePrefs.warnDayChoices[v.round()],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const _SectionTitle(text: 'أنواع حركات الشركة'),
+                _Card(
+                  padding: EdgeInsets.zero,
+                  child: _SwitchRow(
+                    icon: Icons.call_made_rounded,
+                    title: 'احسب الحركات المرسلة كمان',
+                    subtitle:
+                        'عادةً المصدر حركة «استقبال» بحساب الشركة. فعّلها إذا '
+                        'حركات «مرسلة» كمان بتروح لمكاتب.',
+                    value: p.includeSent,
+                    onChanged: (v) => _set(p.copyWith(includeSent: v)),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                const _TipText(
+                  'قراراتك اليدوية (تأكيد، تغيير، «مجهول»، «مو هي») ما بتتغير لما '
+                  'تغيّر هالإعدادات.',
+                ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const TraceWarningsScreen(),
+                    ),
+                  ),
+                  icon: const Icon(Icons.warning_amber_rounded),
+                  label: const Text('فتح صفحة التحذيرات'),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
 }
 
 class _TextPromptDialog extends StatefulWidget {

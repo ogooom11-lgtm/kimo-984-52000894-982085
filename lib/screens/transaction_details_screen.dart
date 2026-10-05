@@ -16,6 +16,7 @@ import '../models.dart';
 import 'transaction_history_screen.dart';
 import '../utils/web_saver.dart' as web_saver;
 import '../utils/amount_format.dart';
+import '../widgets/trace_widgets.dart';
 
 class TransactionDetailsScreen extends StatefulWidget {
   final Account account;
@@ -937,7 +938,15 @@ class _TransactionDetailsScreenState extends State<TransactionDetailsScreen> {
                       constraints: const BoxConstraints(
                         maxWidth: _maxExportWidth,
                       ),
-                      child: _buildExportCard(context, tx),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _buildExportCard(context, tx),
+                          // مسار الحركة (شركة ← مكتب) خارج الصورة المشاركة
+                          const SizedBox(height: 14),
+                          TracePathCard(tx: tx),
+                        ],
+                      ),
                     ),
                   ),
                 ),

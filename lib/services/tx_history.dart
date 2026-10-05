@@ -46,7 +46,8 @@ extension TxFieldInfo on TxField {
   }
 }
 
-enum TxHistoryKind { edit, deleted, restored }
+/// [link]: حدث بـ«مسار الحركة» (تحديد/تغيير مصدر الحركة أو وجهتها يدويًا).
+enum TxHistoryKind { edit, deleted, restored, link }
 
 TxHistoryKind _kindFrom(Object? raw) {
   for (final k in TxHistoryKind.values) {
@@ -151,7 +152,22 @@ class TxHistoryEntry {
 
   /// يمس الحالة: تسليم/إلغاء/إرجاع/نوع حركة الشركة/حذف/استعادة
   bool get touchesStatus =>
-      kind != TxHistoryKind.edit || changes.any((c) => c.field.isStatusField);
+      kind == TxHistoryKind.deleted ||
+      kind == TxHistoryKind.restored ||
+      (kind == TxHistoryKind.edit && changes.any((c) => c.field.isStatusField));
+
+  /// حدث بمسار الحركة (المصدر/الوجهة)
+  bool get touchesLink => kind == TxHistoryKind.link;
+
+  /// يعدّل الاسم أو المبلغ أو العملة (يستخدمه تتبّع المصدر)
+  bool get isKeyEdit =>
+      kind == TxHistoryKind.edit &&
+      changes.any(
+        (c) =>
+            c.field == TxField.beneficiary ||
+            c.field == TxField.amount ||
+            c.field == TxField.currency,
+      );
 
   /// يمس بيانات الحركة: الاسم/المبالغ/العملات/الملاحظات/التاريخ/الحساب
   bool get touchesData =>
@@ -367,6 +383,7 @@ enum TxRowKind {
   notes,
   deleted,
   restored,
+  link,
 }
 
 /// طابع الإدخال (لاختيار اللون والأيقونة في الواجهة)
@@ -379,6 +396,7 @@ enum TxEntryTone {
   movement,
   deleted,
   restored,
+  link,
 }
 
 /// سطر عرض واحد: «تم تعديل المبلغ» من «100 دولار» إلى «150 دولار».
@@ -537,6 +555,19 @@ class TxHistoryFormatter {
       case TxHistoryKind.restored:
         return const [
           TxChangeRow(kind: TxRowKind.restored, label: 'تمت استعادة الحركة'),
+        ];
+      case TxHistoryKind.link:
+        final from = _text(e.ctx['from']);
+        final to = _text(e.ctx['to']);
+        final note = _text(e.ctx['note']);
+        return [
+          TxChangeRow(
+            kind: TxRowKind.link,
+            label: _textOr(e.ctx['label'], 'مسار الحركة'),
+            from: from.isEmpty ? null : from,
+            to: to.isEmpty ? null : to,
+            extra: note.isEmpty ? null : note,
+          ),
         ];
       case TxHistoryKind.edit:
         break;
@@ -748,6 +779,8 @@ class TxHistoryFormatter {
         return 'حذف الحركة';
       case TxHistoryKind.restored:
         return 'استعادة الحركة';
+      case TxHistoryKind.link:
+        return _textOr(e.ctx['title'], 'مسار الحركة');
       case TxHistoryKind.edit:
         break;
     }
@@ -793,6 +826,8 @@ class TxHistoryFormatter {
         return TxEntryTone.deleted;
       case TxHistoryKind.restored:
         return TxEntryTone.restored;
+      case TxHistoryKind.link:
+        return TxEntryTone.link;
       case TxHistoryKind.edit:
         break;
     }

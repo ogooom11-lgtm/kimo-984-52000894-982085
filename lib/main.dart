@@ -16,6 +16,7 @@ import 'theme/app_theme.dart';
 import 'screens/timeline_analytics_screen.dart';
 import 'screens/transaction_watch_screen.dart';
 import 'services/share_import/share_import_controller.dart';
+import 'services/trace/trace_service.dart';
 import 'services/tx_history_service.dart';
 
 void main() async {
@@ -40,6 +41,13 @@ void main() async {
       TxHistoryService.start();
     } catch (e) {
       debugPrint('TxHistory start error: $e');
+    }
+
+    // تتبّع مصدر الحركة (شركة ← مكتب): يحسب بالخلفية ويتحدث مع كل تغيير
+    try {
+      TraceService.start();
+    } catch (e) {
+      debugPrint('Trace start error: $e');
     }
 
     runApp(const MyApp());

@@ -9,6 +9,7 @@ import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/operation_log_service.dart';
+import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
 import '../services/settings_words.dart';
 import '../utils/amount_format.dart';
@@ -5142,6 +5143,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
       ),
     );
 
+    // نص رسائل حركات الشركات (لكلمات «لازم تروح لمكتب» بتتبّع المصدر)
+    final traceMessages = <int, String>{};
     try {
       final existingIds = DatabaseService.transactionsBox.values
           .map((t) => t.id)
@@ -5162,6 +5165,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
         );
 
         await DatabaseService.addTransaction(tx);
+        if (_isCompanyAccount) {
+          traceMessages[tx.id] = _segments[d.segIndex].lines.join('\n');
+        }
         _allTransactions.add(tx);
         _invalidateSearchIndex();
         if (!_knownBeneficiaryNames.contains(tx.beneficiary)) {
@@ -5196,6 +5202,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (done % 20 == 0) await yieldToUi();
       }
 
+      if (traceMessages.isNotEmpty) {
+        unawaited(TraceService.rememberMessages(traceMessages));
+      }
       if (saved > 0) {
         for (var i = 0; i < _selections.length; i++) {
           if (_needsTarget(i)) {

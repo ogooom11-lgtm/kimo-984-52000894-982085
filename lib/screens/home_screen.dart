@@ -7,11 +7,13 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/period_stats.dart';
+import '../services/trace/trace_service.dart';
 import '../utils/amount_format.dart';
 import 'add_account_screen.dart';
 import 'account_screen.dart';
 import 'add_edit_transaction_screen.dart';
 import 'operations_log_screen.dart';
+import 'trace_warnings_screen.dart';
 import 'transaction_history_screen.dart';
 
 enum _QuickStatusFilter { all, added, received, cancelled }
@@ -1283,6 +1285,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           onPressed: _toggleFloatingNotes,
                         ),
                         const SizedBox(width: 8),
+                        const _TraceWarningsButton(),
+                        const SizedBox(width: 8),
                         _HeaderIconButton(
                           icon: Icons.history_rounded,
                           tooltip: 'سجل العمليات',
@@ -2109,6 +2113,43 @@ class _NotesHeaderButton extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// زر «التحذيرات» (تتبّع مصدر الحركة) مع عدد التحذيرات الفعّالة
+class _TraceWarningsButton extends StatelessWidget {
+  const _TraceWarningsButton();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    const warn = Color(0xFFEA580C);
+    return ValueListenableBuilder<int>(
+      valueListenable: TraceService.activeCount,
+      builder: (context, n, _) => IconButton(
+        tooltip: n > 0 ? 'التحذيرات ($n)' : 'التحذيرات',
+        onPressed: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const TraceWarningsScreen()),
+        ),
+        style: IconButton.styleFrom(
+          backgroundColor: n > 0
+              ? warn.withValues(alpha: dark ? .18 : .10)
+              : _cardBg(context),
+          foregroundColor: n > 0 ? warn : cs.onSurface,
+          side: BorderSide(
+            color: n > 0 ? warn.withValues(alpha: .40) : _outline(context),
+          ),
+        ),
+        icon: Badge(
+          isLabelVisible: n > 0,
+          backgroundColor: warn,
+          label: Text(n > 99 ? '99+' : '$n'),
+          child: const Icon(Icons.warning_amber_rounded),
         ),
       ),
     );

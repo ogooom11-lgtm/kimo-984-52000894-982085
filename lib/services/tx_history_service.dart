@@ -75,6 +75,17 @@ class TxHistoryService {
   /// يزداد مع كل تغيير في السجل (لتحديث صفحة السجل مباشرة)
   static final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
+  /// تعديلات الاسم/المبلغ/العملة لكل حركة (الأحدث أولًا)، تُحمَّل مرة وحدة
+  /// ثم تتحدث مع كل تسجيل. null = لم تُحمَّل بعد.
+  static Map<int, List<TxHistoryEntry>>? _keyEdits;
+
+  /// ما يُسجَّل أثناء التحميل (حتى لا يضيع)
+  static Map<int, List<TxHistoryEntry>>? _keyEditsLive;
+  static Future<void>? _keyEditsLoad;
+
+  /// يزداد عند تحميل تعديلات الاسم/المبلغ/العملة أو تغيّرها
+  static final ValueNotifier<int> keyEditsRevision = ValueNotifier<int>(0);
+
   static bool get _historyOpen =>
       Hive.isBoxOpen(DatabaseService.txHistoryBoxName);
 
@@ -286,12 +297,130 @@ class TxHistoryService {
     (_pending[_keyOf(txId)] ??= <Map<String, dynamic>>[]).add(e.toMap());
     _pendingCount++;
     revision.value++;
+    if (e.isKeyEdit) {
+      final loaded = _keyEdits;
+      final target = loaded ?? _keyEditsLive;
+      if (target != null) {
+        (target[txId] ??= <TxHistoryEntry>[]).insert(0, e);
+        if (loaded != null) keyEditsRevision.value++;
+      }
+    }
     if (_pendingCount >= _flushThreshold) {
       unawaited(flush());
     } else {
       _flushTimer?.cancel();
       _flushTimer = Timer(_flushDelay, () => unawaited(flush()));
     }
+  }
+
+  /// يسجّل حدثًا بـ«مسار الحركة» (تحديد المصدر/الوجهة يدويًا) في سجل الحركة.
+  static void recordLink(
+    int txId, {
+    required String title,
+    String label = 'المصدر',
+    String? from,
+    String? to,
+    String? note,
+  }) {
+    if (!_historyOpen) return;
+    _record(
+      txId,
+      TxHistoryEntry(
+        at: DateTime.now(),
+        kind: TxHistoryKind.link,
+        ctx: {
+          'title': title,
+          'label': label,
+          if (from != null && from.trim().isNotEmpty) 'from': from,
+          if (to != null && to.trim().isNotEmpty) 'to': to,
+          if (note != null && note.trim().isNotEmpty) 'note': note,
+        },
+      ),
+    );
+  }
+
+  // ===========================
+  // تعديلات الاسم/المبلغ/العملة (لتتبّع مصدر الحركة)
+  // ===========================
+
+  /// هل حُمّلت تعديلات كل الحركات؟
+  static bool get keyEditsLoaded => _keyEdits != null;
+
+  /// تعديلات الاسم/المبلغ/العملة لكل حركة (الأحدث أولًا). فارغة قبل التحميل.
+  static Map<int, List<TxHistoryEntry>> get keyEdits => _keyEdits ?? const {};
+
+  /// يحمّل تعديلات كل الحركات مرة وحدة (قراءة من القرص بالخلفية)
+  static Future<void> ensureKeyEdits() => _keyEditsLoad ??= _loadKeyEdits();
+
+  static String _entrySig(TxHistoryEntry e) =>
+      '${e.at.millisecondsSinceEpoch}|${e.kind.name}|${e.changes.join(',')}';
+
+  static Future<void> _loadKeyEdits() async {
+    final live = <int, List<TxHistoryEntry>>{};
+    _keyEditsLive = live;
+    final out = <int, List<TxHistoryEntry>>{};
+    try {
+      if (_historyOpen) {
+        for (final key in _box.keys.toList()) {
+          if (_isMetaKey(key)) continue;
+          final id = int.tryParse('$key');
+          if (id == null) continue;
+          Object? raw;
+          try {
+            raw = await _box.get(key);
+          } catch (_) {
+            continue;
+          }
+          if (raw is! List) continue;
+          final list = <TxHistoryEntry>[];
+          for (final m in raw.reversed) {
+            if (m is! Map) continue;
+            try {
+              final e = TxHistoryEntry.fromMap(m);
+              if (e.isKeyEdit) list.add(e);
+            } catch (_) {}
+          }
+          if (list.isNotEmpty) out[id] = list;
+        }
+        // غير المحفوظ بعد (الأحدث)
+        for (final src in [_inFlight, _pending]) {
+          src.forEach((k, v) {
+            final id = int.tryParse(k);
+            if (id == null) return;
+            for (final m in v) {
+              try {
+                final e = TxHistoryEntry.fromMap(m);
+                if (!e.isKeyEdit) continue;
+                final list = out[id] ??= <TxHistoryEntry>[];
+                final sig = _entrySig(e);
+                if (list.any((x) => _entrySig(x) == sig)) continue;
+                list.insert(0, e);
+              } catch (_) {}
+            }
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('TxHistory key edits error: $e');
+    }
+    // ما سُجّل أثناء التحميل
+    live.forEach((id, entries) {
+      final list = out[id] ??= <TxHistoryEntry>[];
+      for (final e in entries.reversed) {
+        final sig = _entrySig(e);
+        if (list.any((x) => _entrySig(x) == sig)) continue;
+        list.insert(0, e);
+      }
+    });
+    _keyEdits = out;
+    _keyEditsLive = null;
+    keyEditsRevision.value++;
+  }
+
+  static void _resetKeyEdits() {
+    _keyEdits = null;
+    _keyEditsLive = null;
+    _keyEditsLoad = null;
   }
 
   /// اكتب الإدخالات المعلّقة الآن
@@ -349,7 +478,7 @@ class TxHistoryService {
     final out = <TxHistoryEntry>[];
     for (final m in raw.reversed) {
       if (m is! Map) continue;
-      if (!seen.add('${m['at']}|${m['k']}|${m['ch']}')) continue;
+      if (!seen.add('${m['at']}|${m['k']}|${m['ch']}|${m['ctx']}')) continue;
       try {
         out.add(TxHistoryEntry.fromMap(m));
       } catch (_) {}
@@ -385,6 +514,7 @@ class TxHistoryService {
   static Future<void> importAll(Object? raw) async {
     if (!_historyOpen) return;
     await flush();
+    _resetKeyEdits();
     await _box.clear();
     // بداية التسجيل = بداية سجل النسخة، أو الآن إن لم يكن فيها سجل
     final since = raw is Map
@@ -392,7 +522,10 @@ class TxHistoryService {
         : null;
     _since = since ?? DateTime.now();
     await _box.put(_sinceKey, _since!.toIso8601String());
-    if (raw is! Map) return;
+    if (raw is! Map) {
+      unawaited(ensureKeyEdits());
+      return;
+    }
     final updates = <String, dynamic>{};
     raw.forEach((k, v) {
       if (_isMetaKey(k) || v is! List) return;
@@ -406,6 +539,7 @@ class TxHistoryService {
           : list;
     });
     if (updates.isNotEmpty) await _box.putAll(updates);
+    unawaited(ensureKeyEdits());
   }
 
   // ===========================

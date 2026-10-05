@@ -12,6 +12,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/tx_history_service.dart';
+import '../widgets/trace_widgets.dart';
 
 /// افتح صفحة سجل تعديلات الحركة
 Future<void> openTransactionHistory(BuildContext context, TransactionModel tx) {
@@ -22,7 +23,7 @@ Future<void> openTransactionHistory(BuildContext context, TransactionModel tx) {
   );
 }
 
-enum _HistoryFilter { all, data, status }
+enum _HistoryFilter { all, data, status, link }
 
 class _DayLabel {
   final String text;
@@ -140,6 +141,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         return e.touchesData;
       case _HistoryFilter.status:
         return e.touchesStatus;
+      case _HistoryFilter.link:
+        return e.touchesLink;
     }
   }
 
@@ -205,6 +208,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         return const Color(0xFFB91C1C);
       case TxEntryTone.restored:
         return const Color(0xFF0D9488);
+      case TxEntryTone.link:
+        return const Color(0xFF0F766E);
     }
   }
 
@@ -226,6 +231,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         return Icons.delete_outline_rounded;
       case TxEntryTone.restored:
         return Icons.restore_rounded;
+      case TxEntryTone.link:
+        return Icons.alt_route_rounded;
     }
   }
 
@@ -255,6 +262,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         return Icons.delete_outline_rounded;
       case TxRowKind.restored:
         return Icons.restore_rounded;
+      case TxRowKind.link:
+        return Icons.alt_route_rounded;
     }
   }
 
@@ -415,6 +424,14 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
               ),
             ),
           ),
+          // مسار الحركة (شركة ← مكتب) مختصر
+          if (tx != null && live != null)
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              sliver: SliverToBoxAdapter(
+                child: TracePathCard(tx: tx, compact: true),
+              ),
+            ),
           if (entries.isNotEmpty)
             SliverToBoxAdapter(child: _buildFilterBar(context, entries)),
           if (!loaded)
@@ -764,6 +781,7 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
   Widget _buildFilterBar(BuildContext context, List<TxHistoryEntry> entries) {
     final data = entries.where((e) => e.touchesData).length;
     final status = entries.where((e) => e.touchesStatus).length;
+    final link = entries.where((e) => e.touchesLink).length;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
       child: SingleChildScrollView(
@@ -775,6 +793,10 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
             _filterChip(context, 'البيانات', data, _HistoryFilter.data),
             const SizedBox(width: 8),
             _filterChip(context, 'الحالة', status, _HistoryFilter.status),
+            if (link > 0 || _filter == _HistoryFilter.link) ...[
+              const SizedBox(width: 8),
+              _filterChip(context, 'المسار', link, _HistoryFilter.link),
+            ],
           ],
         ),
       ),
@@ -1015,6 +1037,9 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         break;
       case TxRowKind.account:
         toColor = const Color(0xFF7C3AED);
+        break;
+      case TxRowKind.link:
+        toColor = const Color(0xFF0F766E);
         break;
       default:
         strike = true;

@@ -19,6 +19,10 @@ class DatabaseService {
   /// تفضيلات عرض بسيطة (خرائط بدون Adapter) — مثل خيارات صورة المشاركة
   static const String uiPrefsBoxName = "ui_prefs";
 
+  /// تتبّع مصدر الحركة: قرارات الربط اليدوية وإعداداته (خرائط بدون Adapter)
+  /// — راجع TraceService
+  static const String txLinksBoxName = "tx_links";
+
   // ===========================
   // 🚀 التهيئة
   // ===========================
@@ -32,6 +36,7 @@ class DatabaseService {
     // صندوق كسول: السجل قد يكبر كثيرًا، فلا نحمّله كله في الذاكرة
     await _openLogBox(txHistoryBoxName, lazy: true);
     await _openLogBox(uiPrefsBoxName);
+    await _openLogBox(txLinksBoxName);
 
     // ✅ اختيارية: ترحيل مفاتيح int قديمة (لو كنت سابقًا تستخدم put(id))
     // await migrateTransactionsIntKeysToString(); // فعّله مرة لو احتجت

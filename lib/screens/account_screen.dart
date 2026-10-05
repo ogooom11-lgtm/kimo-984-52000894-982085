@@ -79,11 +79,15 @@ class AccountScreen extends StatefulWidget {
   /// عنوان يوضح مصدر التحديد (مثل عنوان العملية في السجل)
   final String? selectionTitle;
 
+  /// عنوان شريط التحديد (افتراضيًا: «حركات من سجل العمليات»)
+  final String? focusLabel;
+
   const AccountScreen({
     super.key,
     required this.account,
     this.initialSelectedTxIds,
     this.selectionTitle,
+    this.focusLabel,
   });
 
   @override
@@ -1459,8 +1463,11 @@ class _AccountScreenState extends State<AccountScreen> {
               children: [
                 Text(
                   focusActive
-                      ? 'حركات من سجل العمليات (${_focusTxIds.length})'
-                      : 'تم تحديد حركات العملية ضمن كل الحركات',
+                      ? '${widget.focusLabel ?? 'حركات من سجل العمليات'} '
+                            '(${_focusTxIds.length})'
+                      : (widget.focusLabel == null
+                            ? 'تم تحديد حركات العملية ضمن كل الحركات'
+                            : 'تم تحديد ${widget.focusLabel} ضمن كل الحركات'),
                   style: TextStyle(
                     fontWeight: FontWeight.w900,
                     color: cs.onPrimaryContainer,

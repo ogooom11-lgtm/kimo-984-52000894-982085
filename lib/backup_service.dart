@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 
 import 'database_service.dart';
 import 'models.dart';
+import 'services/trace/trace_service.dart';
 import 'services/tx_history_service.dart';
 
 class BackupStats {
@@ -105,6 +106,8 @@ class BackupService {
       'parses': parses.map(_parsedTextToMap).toList(),
       // سجل تعديلات الحركات (مفتاح = معرّف الحركة)
       'txEditHistory': txEditHistory,
+      // تتبّع مصدر الحركة: قرارات الربط اليدوية والإعدادات ونص رسائل الشركات
+      'txLinks': TraceService.exportAll(),
     };
 
     final jsonString = const JsonEncoder.withIndent('  ').convert(payload);
@@ -198,6 +201,7 @@ class BackupService {
       }
 
       await TxHistoryService.importAll(payload['txEditHistory']);
+      await TraceService.importAll(payload['txLinks']);
     } finally {
       await TxHistoryService.resume();
     }
