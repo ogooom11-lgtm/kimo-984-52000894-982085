@@ -67,6 +67,14 @@ class AmountDetectResult {
   /// موقع أقوى مرشح لكل قيمة في [candidateValues] (بنفس الترتيب)
   final List<Position> candidatePositions;
 
+  /// المبالغ المختلفة التي عليها دليل مبلغ (عملة، مقدار، كلمة مبلغ، أو مكتوبة
+  /// بالحروف). مبلغان مختلفان هنا = تعارض في الرسالة
+  final List<double> strongValues;
+
+  /// المبلغ المكتوب بالحروف لا يساوي المبلغ المكتوب بالأرقام
+  /// («58100 ثمانية وخمسون الف»): القيمتان للتحذير
+  final ({double digits, double words})? wordsDigitsMismatch;
+
   const AmountDetectResult({
     required this.numericPos,
     required this.numericValue,
@@ -76,7 +84,13 @@ class AmountDetectResult {
     required this.candidateValues,
     this.fromText = false,
     this.candidatePositions = const <Position>[],
+    this.strongValues = const <double>[],
+    this.wordsDigitsMismatch,
   });
+
+  /// أكثر من مبلغ مختلف عليه دليل مبلغ، أو المبلغ بالحروف لا يطابق الأرقام
+  bool get hasConflictingAmounts =>
+      strongValues.length >= 2 || wordsDigitsMismatch != null;
 
   @override
   String toString() {
@@ -97,11 +111,20 @@ class _AmountCandidate {
   final int score;
   final bool fromText;
 
+  /// دليل مباشر أنه مبلغ (عملة أو مقدار أو كلمة مبلغ بجانبه، أو مبلغ مكتوب
+  /// بالحروف)
+  final bool strong;
+
+  /// مبلغ مكتوب بالحروف فقط (بدون أرقام)
+  final bool wordsOnly;
+
   const _AmountCandidate({
     required this.pos,
     required this.value,
     required this.score,
     required this.fromText,
+    this.strong = false,
+    this.wordsOnly = false,
   });
 
   /// أفضلية: النقاط أولًا، ثم الرقمي على النصي، ثم القيمة الأكبر
@@ -222,6 +245,26 @@ class AmountDetector {
     'حبة',
     'قطعة',
     'قطعه',
+  };
+
+  /// وحدات زمن/مسافة: الرقم قبلها ليس مبلغًا («25 سنة»)
+  static const Set<String> _unitsAfterNumber = {
+    'سنة',
+    'سنه',
+    'سنين',
+    'سنوات',
+    'عام',
+    'اعوام',
+    'اشهر',
+    'شهور',
+    'ايام',
+    'ساعة',
+    'ساعه',
+    'ساعات',
+    'دقيقة',
+    'دقيقه',
+    'دقائق',
+    'متر',
   };
 
   static const Set<String> _moneyMagnitudeWords = {
@@ -489,6 +532,9 @@ class AmountDetector {
 
   static final Expando<Map<String, bool>> _numberWordCaches =
       Expando<Map<String, bool>>('numberWords');
+
+  static final Expando<Map<String, NumberWordKind>> _numberKindCaches =
+      Expando<Map<String, NumberWordKind>>('numberKinds');
 
   /// كلمة عددية بدون أرقام يفهمها محلل المبالغ النصية (خمس، مية، الف، ونص...)
   static bool _isNumberWord(
@@ -816,6 +862,11 @@ class AmountDetector {
     // ذاكرة «هل هذه كلمة عددية؟» تُشارك بين الرسائل ما دامت قيم الكلمات نفسها
     final numberWordCache = _numberWordCaches[customWordValues] ??=
         <String, bool>{};
+    final numberKindCache = _numberKindCaches[customWordValues] ??=
+        <String, NumberWordKind>{};
+
+    // رقم ثم نفس المبلغ مكتوبًا بالحروف (أو العكس) بجانبه
+    final restatements = <({double digits, double words})>[];
 
     int keywordBonus(List<String> tokens, int start, int end) {
       var bonus = 0;
@@ -887,37 +938,108 @@ class AmountDetector {
 
       // ---------- 1) التعابير اللفظية/المركّبة (خمسمية، 2 مليون و500 الف) ----------
       final coveredByText = <int>{};
-      var i = 0;
-      while (i < tokens.length) {
-        bool spanable(int k) {
-          final t = tokens[k];
-          if (t.isEmpty || _isIgnoredExact(t, ignoredSet)) return false;
-          if (_phoneWords.contains(_normalizeArabic(t))) return false;
-          if (isMoneyDigitToken(t)) return true;
-          return _isNumberWord(t, customWordValues, numberWordCache);
-        }
 
-        if (!spanable(i)) {
-          i++;
-          continue;
-        }
-        final start = i;
-        while (i < tokens.length) {
-          if (spanable(i)) {
-            i++;
-            continue;
-          }
-          // «و» وحدها تربط جزأين من نفس المبلغ
-          if (_normalizeArabic(tokens[i]) == 'و' &&
-              i + 1 < tokens.length &&
-              spanable(i + 1)) {
-            i++;
-            continue;
-          }
-          break;
-        }
-        final end = i - 1;
+      // رقم كُتب بعده نفس المبلغ بالحروف («58100 ثمانية وخمسون الف»): الرقم
+      // يأخذ نقاط سياق المبلغ المكتوب (+1) حتى يُفضَّل عليه
+      final digitScoreFloor = <int, int>{};
 
+      bool spanable(int k) {
+        final t = tokens[k];
+        if (t.isEmpty || _isIgnoredExact(t, ignoredSet)) return false;
+        if (_phoneWords.contains(_normalizeArabic(t))) return false;
+        if (isMoneyDigitToken(t)) return true;
+        return _isNumberWord(t, customWordValues, numberWordCache);
+      }
+
+      bool isWaw(String t) => _normalizeArabic(t) == 'و';
+
+      NumberWordKind kindOf(String t) => (numberKindCache[t] ??=
+          AmountTextParser.wordKind(t, customWordValues: customWordValues));
+
+      double? digitValue(String t) =>
+          parseAmountToken(_normalizeInlineAmountToken(t));
+
+      // حد بين رقم ومبلغ مكتوب بالحروف بدون واو بينهما: «58100 ثمانية...»،
+      // «14000 اربعة عشر الف»، «...خمسون الف 58100». أما «3 مية» و«50 الف»
+      // و«مليون 220» و«مية و50» فهي مبلغ واحد.
+      bool isRestatementCut(int k) {
+        final a = tokens[k];
+        final b = tokens[k + 1];
+        if (isWaw(a) || isWaw(b) || AmountTextParser.startsWithWaw(b)) {
+          return false;
+        }
+        final aDigit = _hasDigits(a);
+        final bDigit = _hasDigits(b);
+        if (aDigit == bDigit) return false;
+        if (aDigit) {
+          if (_extractEmbeddedMoneyMagnitude(_normalizeInlineAmountToken(a)) !=
+              null) {
+            return kindOf(b) == NumberWordKind.small ||
+                kindOf(b) == NumberWordKind.hundred;
+          }
+          switch (kindOf(b)) {
+            case NumberWordKind.small:
+              return true;
+            case NumberWordKind.hundred:
+              final v = digitValue(a);
+              return !(AmountTextParser.isPlainHundredWord(b) &&
+                  v != null &&
+                  v < 10);
+            case NumberWordKind.magnitude:
+            case NumberWordKind.half:
+            case NumberWordKind.none:
+              return false;
+          }
+        }
+        switch (kindOf(a)) {
+          case NumberWordKind.small:
+          case NumberWordKind.hundred:
+            return true;
+          case NumberWordKind.magnitude:
+            final v = digitValue(b);
+            return v != null && v >= _magnitudeUnitValue(a);
+          case NumberWordKind.half:
+          case NumberWordKind.none:
+            return false;
+        }
+      }
+
+      // قيمة جزء من التعبير: رقم (مع مقداره إن وُجد) أو مبلغ مكتوب بالحروف
+      double? partValue(int start, int end) {
+        final digits = <int>[];
+        var words = 0;
+        for (int k = start; k <= end; k++) {
+          if (_hasDigits(tokens[k])) {
+            digits.add(k);
+          } else if (!isWaw(tokens[k])) {
+            words++;
+          }
+        }
+        if (digits.length == 1 &&
+            (words == 0 ||
+                (words == 1 &&
+                    end == digits.first + 1 &&
+                    _isMoneyMagnitudeToken(tokens[end])))) {
+          final t = _normalizeInlineAmountToken(tokens[digits.first]);
+          var v = parseAmountToken(t);
+          if (v == null) return null;
+          final emb = _extractEmbeddedMoneyMagnitude(t);
+          if (emb != null) {
+            v = _applyMagnitudeSmart(v, emb);
+          } else if (end == digits.first + 1) {
+            v = _applyMagnitudeSmart(v, tokens[end]);
+          }
+          return v;
+        }
+        final parsed = AmountTextParser.parse(
+          tokens.sublist(start, end + 1).join(' '),
+          customWordValues: customWordValues,
+        );
+        return parsed.matched ? parsed.value : null;
+      }
+
+      // تعبير واحد (بعد التقسيم): يُرجع المرشح النصي إن أُضيف
+      _AmountCandidate? processSpan(int start, int end) {
         final digitIdx = <int>[];
         final magnitudeIdx = <int>[];
         final quantityIdx = <int>[];
@@ -938,7 +1060,7 @@ class AmountDetector {
                 (magnitudeIdx.length == 1 &&
                     digitIdx.length == 1 &&
                     magnitudeIdx.first == digitIdx.first + 1))) {
-          continue;
+          return null;
         }
 
         final spanText = tokens.sublist(start, end + 1).join(' ');
@@ -947,7 +1069,7 @@ class AmountDetector {
           customWordValues: customWordValues,
         );
         final value = parsed.matched ? parsed.value : null;
-        if (value == null || value <= 0 || value.abs() < 10) continue;
+        if (value == null || value <= 0 || value.abs() < 10) return null;
 
         // كلمة مقدار وحدها (مثل «ألف شكر») تعبير ضعيف
         final weak = quantityIdx.isEmpty && digitIdx.isEmpty;
@@ -973,9 +1095,10 @@ class AmountDetector {
         score += kb;
         if (lineHasCurrency) score += 1;
         if (lineHasKeyword) score += 1;
-        score += anchorBonus(row[start].originalPos);
+        final ab = anchorBonus(row[start].originalPos);
+        score += ab;
 
-        if (weak && !hasContext) continue;
+        if (weak && !hasContext) return null;
 
         // أجزاء التعبير المركّب لا تُعرض كمبالغ مستقلة
         if (!weak && digitIdx.isNotEmpty) {
@@ -991,14 +1114,78 @@ class AmountDetector {
           }
         }
 
-        candidates.add(
-          _AmountCandidate(
-            pos: row[start].originalPos,
-            value: value,
-            score: score,
-            fromText: true,
-          ),
+        final candidate = _AmountCandidate(
+          pos: row[start].originalPos,
+          value: value,
+          score: score,
+          fromText: true,
+          strong: hasContext || magnitudeIdx.isNotEmpty || ab >= 5,
+          wordsOnly: digitIdx.isEmpty && !weak,
         );
+        candidates.add(candidate);
+        return candidate;
+      }
+
+      var i = 0;
+      while (i < tokens.length) {
+        if (!spanable(i)) {
+          i++;
+          continue;
+        }
+        final start = i;
+        while (i < tokens.length) {
+          if (spanable(i)) {
+            i++;
+            continue;
+          }
+          // «و» وحدها تربط جزأين من نفس المبلغ
+          if (isWaw(tokens[i]) && i + 1 < tokens.length && spanable(i + 1)) {
+            i++;
+            continue;
+          }
+          break;
+        }
+        final end = i - 1;
+
+        // تقسيم التعبير عند الحد بين رقم ومبلغ مكتوب بالحروف
+        final parts = <(int, int)>[];
+        var partStart = start;
+        for (int k = start; k < end; k++) {
+          if (isRestatementCut(k)) {
+            parts.add((partStart, k));
+            partStart = k + 1;
+          }
+        }
+        parts.add((partStart, end));
+
+        final results = <_AmountCandidate?>[
+          for (final p in parts) processSpan(p.$1, p.$2),
+        ];
+
+        for (int p = 0; p + 1 < parts.length; p++) {
+          final left = parts[p];
+          final right = parts[p + 1];
+          final leftIsDigits = _hasDigits(tokens[left.$2]);
+          final digitsPart = leftIsDigits ? left : right;
+          final wordsPart = leftIsDigits ? right : left;
+          final wordsCandidate = leftIsDigits ? results[p + 1] : results[p];
+          final dv = partValue(digitsPart.$1, digitsPart.$2);
+          final wv = partValue(wordsPart.$1, wordsPart.$2);
+          if (dv == null || wv == null || dv.abs() < 10 || wv.abs() < 10) {
+            continue;
+          }
+          restatements.add((digits: dv, words: wv));
+          if (wordsCandidate != null) {
+            for (int k = digitsPart.$1; k <= digitsPart.$2; k++) {
+              if (_hasDigits(tokens[k])) {
+                final floor = wordsCandidate.score + 1;
+                if ((digitScoreFloor[k] ?? 0) < floor) {
+                  digitScoreFloor[k] = floor;
+                }
+              }
+            }
+          }
+        }
       }
 
       // ---------- 2) المرشحات الرقمية ----------
@@ -1042,6 +1229,14 @@ class AmountDetector {
 
         if (prev != null && _isNonMoneyUnitToken(prev)) continue;
         if (_isNonMoneyUnitToken(t)) continue;
+        // «25 سنة» ، «5 كيلو»: الوحدة بعد الرقم
+        if (next != null &&
+            (_isNonMoneyUnitToken(next) ||
+                _unitsAfterNumber.contains(
+                  _normalizeArabic(_cleanToken(next)),
+                ))) {
+          continue;
+        }
 
         final tokenForParsing = _normalizeInlineAmountToken(t);
 
@@ -1064,33 +1259,53 @@ class AmountDetector {
         if (v.abs() < 10) continue;
 
         int score = 1;
+        // دليل مباشر أن الرقم مبلغ (عملة/مقدار/كلمة مبلغ/العملة بجانبه)
+        var strong = false;
 
-        if (_containsCurrencyHint(tokenForParsing, currencyHints)) score += 4;
+        if (_containsCurrencyHint(tokenForParsing, currencyHints)) {
+          score += 4;
+          strong = true;
+        }
         if (prev != null && _containsCurrencyHint(prev, currencyHints)) {
           score += 4;
+          strong = true;
         }
         if (next != null && _containsCurrencyHint(next, currencyHints)) {
           score += 4;
+          strong = true;
         }
 
         if (lineHasCurrency) score += 1;
 
         if (embeddedMagnitude != null) {
           score += 4;
+          strong = true;
         } else if (next != null && _isMoneyMagnitudeToken(next)) {
           score += 4;
+          strong = true;
         }
         if (prev != null && _isMoneyMagnitudeToken(prev)) score += 2;
 
         // دعم كلمات المبلغ exact فقط
-        score += keywordBonus(tokens, ti, ti);
+        final kb = keywordBonus(tokens, ti, ti);
+        if (kb > 0) strong = true;
+        score += kb;
 
         if (lineHasKeyword) score += 1;
 
-        score += anchorBonus(row[ti].originalPos);
+        final ab = anchorBonus(row[ti].originalPos);
+        if (ab >= 5) strong = true;
+        score += ab;
 
         // رقم يشبه هاتفًا محليًا بدون مفتاح: يبقى مرشحًا بنقاط أقل
         if (_isSuspectPhoneDigits(t)) score -= 2;
+
+        // نفس المبلغ مكتوب بعده بالحروف: الرقم أدق فيُفضَّل
+        final floor = digitScoreFloor[ti];
+        if (floor != null) {
+          strong = true;
+          if (score < floor) score = floor;
+        }
 
         candidates.add(
           _AmountCandidate(
@@ -1098,6 +1313,7 @@ class AmountDetector {
             value: v,
             score: score,
             fromText: false,
+            strong: strong,
           ),
         );
       }
@@ -1144,6 +1360,42 @@ class AmountDetector {
 
     final hasMultipleCandidates = candidateValues.length >= 2;
 
+    // المبالغ «الأكيدة» المختلفة (عليها دليل مبلغ): مبلغان مختلفان = تعارض
+    final strongValues = <double>[];
+    for (final c in candidates) {
+      if (c.strong) _addUniqueAmount(strongValues, c.value);
+    }
+    strongValues.sort();
+
+    // المبلغ المكتوب بالحروف لا يطابق المبلغ بالأرقام
+    ({double digits, double words})? mismatch;
+    for (final r in restatements) {
+      if (!_sameAmount(r.digits, r.words)) {
+        mismatch = r;
+        break;
+      }
+    }
+    if (mismatch == null) {
+      // مبلغ بالحروف في مكان آخر من الرسالة لا يساوي أي رقم فيها
+      final digitValues = [
+        for (final c in candidates)
+          if (!c.fromText && c.strong) c.value,
+      ];
+      if (digitValues.isNotEmpty) {
+        for (final c in candidates) {
+          if (!c.wordsOnly) continue;
+          if (digitValues.any((d) => _sameAmount(d, c.value))) continue;
+          final d = bestNumeric?.value ?? digitValues.first;
+          mismatch = (digits: d, words: c.value);
+          break;
+        }
+      }
+    }
+    // الأرقام أدق من الكتابة بالحروف: عند الاختلاف يُرجَّح الرقم
+    if (mismatch != null && bestNumeric != null && bestNumeric.strong) {
+      best = bestNumeric;
+    }
+
     return AmountDetectResult(
       numericPos: best?.pos,
       numericValue: best?.value,
@@ -1153,6 +1405,8 @@ class AmountDetector {
       candidateValues: candidateValues,
       fromText: best?.fromText ?? false,
       candidatePositions: candidatePositions,
+      strongValues: strongValues,
+      wordsDigitsMismatch: mismatch,
     );
   }
 }

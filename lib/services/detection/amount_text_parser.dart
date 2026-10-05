@@ -47,7 +47,72 @@ class _SegmentParseResult {
   });
 }
 
+/// نوع كلمة عددية واحدة
+enum NumberWordKind {
+  none,
+
+  /// من 1 إلى 99 (خمسة، عشر، خمسون...)
+  small,
+
+  /// مئة، مية، خمسمية...
+  hundred,
+
+  /// ألف، مليون، مليار، طن
+  magnitude,
+
+  /// نص / نصف
+  half,
+}
+
 class AmountTextParser {
+  /// نوع كلمة عددية واحدة بدون أرقام (للتفريق بين «3 مية» = 300 وبين
+  /// «58100 ثمانية وخمسون الف» = رقم ثم نفس المبلغ مكتوبًا بالحروف).
+  static NumberWordKind wordKind(
+    String token, {
+    Map<String, double> customWordValues = const {},
+  }) {
+    final normalized = _normalizeInput(token);
+    if (normalized.isEmpty || RegExp(r'[0-9]').hasMatch(normalized)) {
+      // «الفين/مليونين» (تصبح «2 الف») مبلغ كامل وليست مقدارًا يُضرب به
+      if (RegExp(r'^2 (مليون|مليار|الف)$').hasMatch(normalized)) {
+        return NumberWordKind.small;
+      }
+      return NumberWordKind.none;
+    }
+    final parts = normalized
+        .split(RegExp(r'\s+'))
+        .map(_normalizeToken)
+        .where((e) => e.isNotEmpty && e != 'و')
+        .toList();
+    if (parts.isEmpty) return NumberWordKind.none;
+    final t = parts.last;
+    if (_magnitudeUnitValue(t) != null) return NumberWordKind.magnitude;
+    if (_isHalfToken(t)) return NumberWordKind.half;
+    if (_directHundreds.containsKey(t) || _isHundredWord(t)) {
+      return NumberWordKind.hundred;
+    }
+    if (_directNumberWords.containsKey(t)) return NumberWordKind.small;
+    final custom = _normalizeCustomWordValues(customWordValues)[t];
+    if (custom != null) {
+      if (custom >= 1000) return NumberWordKind.magnitude;
+      if (custom >= 100) return NumberWordKind.hundred;
+      return NumberWordKind.small;
+    }
+    return NumberWordKind.none;
+  }
+
+  /// «مية» وحدها (بدون عدد قبلها مثل خمسمية): «3 مية» = 300
+  static bool isPlainHundredWord(String token) {
+    final t = _normalizeToken(_normalizeInput(token));
+    return _isHundredWord(t);
+  }
+
+  /// كلمة تبدأ بواو العطف («وخمسون»، «والف»، «و500»)
+  static bool startsWithWaw(String token) {
+    final t = _normalizeArabic(token.trim());
+    return t.length > 1 && t.startsWith('و') && t != 'واحد' && t != 'واحده';
+  }
+
   // ====== واجهة الاستخدام ======
   static AmountTextParseResult parse(
     String text, {
@@ -87,11 +152,31 @@ class AmountTextParser {
     }
     if (normalized.isEmpty) return AmountTextParseResult.empty;
 
-    final segments = normalized
+    final rawSegments = normalized
         .split(RegExp(r'\s+و\s+'))
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
+
+    // «ثمانية و خمسون الف» = 58 ألف: جزء بدون مقدار (ألف/مليون/مليار) يُضم
+    // للجزء الذي بعده، فالمقدار يُطبّق على العدد كاملًا. أما بعد المقدار فالواو
+    // تفصل مجموعتين: «مليون و 500 الف» ، «الف و خمسمية».
+    final segments = <String>[];
+    var pending = '';
+    for (var k = 0; k < rawSegments.length; k++) {
+      final seg = pending.isEmpty
+          ? rawSegments[k]
+          : '$pending ${rawSegments[k]}';
+      final isLast = k == rawSegments.length - 1;
+      if (!isLast &&
+          !_hasLargeMagnitude(seg) &&
+          !_isHalfSegment(rawSegments[k + 1])) {
+        pending = seg;
+        continue;
+      }
+      pending = '';
+      segments.add(seg);
+    }
 
     if (segments.isEmpty) return AmountTextParseResult.empty;
 
@@ -153,6 +238,26 @@ class AmountTextParser {
   }
 
   // ====== التحليل الداخلي ======
+
+  /// جزء فيه كلمة مقدار (ألف/مليون/مليار)؟
+  static bool _hasLargeMagnitude(String seg) {
+    for (final raw in seg.split(RegExp(r'\s+'))) {
+      final t = _normalizeToken(raw);
+      if (t.isNotEmpty && _magnitudeUnitValue(t) != null) return true;
+    }
+    return false;
+  }
+
+  /// جزء هو «نصف» فقط («5 مليون و نص»)
+  static bool _isHalfSegment(String seg) {
+    final tokens = seg
+        .split(RegExp(r'\s+'))
+        .map(_normalizeToken)
+        .where((e) => e.isNotEmpty && e != 'و')
+        .toList();
+    return tokens.length == 1 && _isHalfToken(tokens.first);
+  }
+
   static _SegmentParseResult _parseSegment(
     String seg,
     Map<String, double> customWordValues,
@@ -532,6 +637,20 @@ class AmountTextParser {
     'تسعةعشر': 19,
     'تسعهعشر': 19,
     'عشرين': 20,
+    'عشرون': 20,
+    'ثلاثون': 30,
+    'تلاتون': 30,
+    'اربعون': 40,
+    'خمسون': 50,
+    'ستون': 60,
+    'سبعون': 70,
+    'ثمانون': 80,
+    'تمانون': 80,
+    'تسعون': 90,
+    'اثنا': 2,
+    'اثني': 2,
+    'احد': 1,
+    'احدي': 1,
     'ثلاثين': 30,
     'تلاتين': 30,
     'تلاثين': 30,

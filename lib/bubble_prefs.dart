@@ -33,6 +33,11 @@ class BubbleUiPrefs {
   /// طلب تأكيد قبل الحفظ إذا احتوت رسالة على جملة ممنوعة.
   final bool confirmForbiddenPhrase;
 
+  /// رسالة فيها أكثر من مبلغ (أو أكثر من عملة، أو المبلغ بالحروف غير المبلغ
+  /// بالأرقام): مفعّل = تنبيه ويختار المستخدم المبلغ بنفسه (تأكيد)،
+  /// غير مفعّل = يُعتمد المبلغ الأرجح تلقائيًا مع تنبيه صغير.
+  final bool confirmMultiAmount;
+
   /// عدد الأيام التي يُبحث فيها عن حركات بنفس الاسم + المبلغ + العملة.
   final int duplicateDays;
 
@@ -50,6 +55,7 @@ class BubbleUiPrefs {
     this.incompleteFirst = true,
     this.autoExtendName = true,
     this.confirmForbiddenPhrase = true,
+    this.confirmMultiAmount = true,
     this.duplicateDays = 30,
     this.nameColor = defaultNameColor,
     this.amountColor = defaultAmountColor,
@@ -126,6 +132,10 @@ class BubbleUiPrefs {
         map['confirmForbiddenPhrase'],
         d.confirmForbiddenPhrase,
       ),
+      confirmMultiAmount: _toBool(
+        map['confirmMultiAmount'],
+        d.confirmMultiAmount,
+      ),
       duplicateDays: _toInt(
         map['duplicateDays'],
         d.duplicateDays,
@@ -148,6 +158,7 @@ class BubbleUiPrefs {
     'incompleteFirst': incompleteFirst,
     'autoExtendName': autoExtendName,
     'confirmForbiddenPhrase': confirmForbiddenPhrase,
+    'confirmMultiAmount': confirmMultiAmount,
     'duplicateDays': duplicateDays,
     'nameColor': nameColor,
     'amountColor': amountColor,
@@ -163,6 +174,7 @@ class BubbleUiPrefs {
     bool? incompleteFirst,
     bool? autoExtendName,
     bool? confirmForbiddenPhrase,
+    bool? confirmMultiAmount,
     int? duplicateDays,
     int? nameColor,
     int? amountColor,
@@ -178,6 +190,7 @@ class BubbleUiPrefs {
       autoExtendName: autoExtendName ?? this.autoExtendName,
       confirmForbiddenPhrase:
           confirmForbiddenPhrase ?? this.confirmForbiddenPhrase,
+      confirmMultiAmount: confirmMultiAmount ?? this.confirmMultiAmount,
       duplicateDays: duplicateDays ?? this.duplicateDays,
       nameColor: nameColor ?? this.nameColor,
       amountColor: amountColor ?? this.amountColor,

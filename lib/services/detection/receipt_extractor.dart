@@ -65,9 +65,22 @@ class ReceiptExtraction {
   /// كل العملات المختلفة في الرسالة (بالاسم المعروض)
   final List<String> currencyNames;
 
-  /// في الرسالة أكثر من مبلغ وأكثر من عملة: لا نعرف أي مبلغ لأي عملة، فلا
-  /// يُعتمد المبلغ تلقائيًا ويختاره المستخدم (مع تحذير)
-  final bool moneyAmbiguous;
+  /// في الرسالة أكثر من مبلغ وأكثر من عملة: لا نعرف أي مبلغ لأي عملة
+  final bool multiCurrencyAmbiguous;
+
+  /// المبالغ المختلفة التي عليها دليل مبلغ (عملة/مقدار/كلمة مبلغ/بالحروف)
+  final List<double> amountStrongValues;
+
+  /// المبلغ المكتوب بالحروف لا يطابق المبلغ بالأرقام
+  final ({double digits, double words})? amountWordsMismatch;
+
+  /// تعارض في المبلغ: أكثر من مبلغ وأكثر من عملة، أو مبلغان مختلفان أكيدان،
+  /// أو المبلغ بالحروف غير المبلغ بالأرقام. الشاشة تقرر (حسب الإعدادات) هل
+  /// يختار المستخدم المبلغ بنفسه أم يُعتمد الأرجح مع تنبيه
+  bool get moneyAmbiguous =>
+      multiCurrencyAmbiguous ||
+      amountWordsMismatch != null ||
+      amountStrongValues.length >= 2;
 
   const ReceiptExtraction({
     required this.lines,
@@ -87,7 +100,9 @@ class ReceiptExtraction {
     required this.currencyKey,
     this.currencyPositions = const [],
     this.currencyNames = const [],
-    this.moneyAmbiguous = false,
+    this.multiCurrencyAmbiguous = false,
+    this.amountStrongValues = const [],
+    this.amountWordsMismatch,
   });
 
   NoiseMark? noiseAt(int li, int ti) =>
@@ -214,9 +229,11 @@ class ReceiptExtractor {
       currencyKey: currencyKey,
       currencyPositions: List<Point<int>>.from(pass.currency.positions),
       currencyNames: List<String>.from(pass.currency.currencyNames),
-      moneyAmbiguous:
+      multiCurrencyAmbiguous:
           pass.amount.candidateValues.length >= 2 &&
           pass.currency.hasMultipleCurrencies,
+      amountStrongValues: List<double>.from(pass.amount.strongValues),
+      amountWordsMismatch: pass.amount.wordsDigitsMismatch,
     );
   }
 

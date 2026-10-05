@@ -44,6 +44,16 @@ class TableFileData {
   /// أسماء الأعمدة (فريدة وغير فارغة)
   final List<String> headers;
 
+  /// حرف كل عمود في الملف الأصلي (A, B, ...) بترتيب [headers]
+  final List<String> columnLetters;
+
+  /// نص خلية العنوان لكل عمود كما في الملف (فارغ إذا لم يكن للعمود عنوان أو
+  /// لم يكن في الملف صف عناوين)
+  final List<String> headerTitles;
+
+  /// في الملف صف عناوين؟ (لا: كل الصفوف بيانات والأعمدة تُسمّى بحروفها)
+  final bool hasHeaderRow;
+
   /// صفوف البيانات بعد صف الأعمدة — نص كل خلية بترتيب [headers]
   final List<List<String>> rows;
 
@@ -67,6 +77,9 @@ class TableFileData {
     required this.fileName,
     required this.kind,
     this.headers = const [],
+    this.columnLetters = const [],
+    this.headerTitles = const [],
+    this.hasHeaderRow = true,
     this.rows = const [],
     this.rowNumbers = const [],
     this.lines = const [],
@@ -79,6 +92,9 @@ class TableFileData {
   const TableFileData.failure(this.fileName, String this.error)
     : kind = TableFileKind.text,
       headers = const [],
+      columnLetters = const [],
+      headerTitles = const [],
+      hasHeaderRow = true,
       rows = const [],
       rowNumbers = const [],
       lines = const [],
@@ -121,6 +137,9 @@ class TableFileData {
     fileName: fileName,
     kind: kind,
     headers: headers,
+    columnLetters: columnLetters,
+    headerTitles: headerTitles,
+    hasHeaderRow: hasHeaderRow,
     rows: rows,
     rowNumbers: rowNumbers,
     lines: lines,
@@ -324,8 +343,16 @@ class TableFileReader {
           : '$headerIndex أسطر عنوان';
       notes.add('تم تجاوز $what قبل صف الأعمدة');
     }
+    // ملف بدون صف عناوين (أول صف فيه أرقام/تواريخ = بيانات): لا نخسر أول
+    // صف، والأعمدة تُسمّى بحروفها
+    final hasHeaderRow = !rows[headerIndex].cells.any(
+      (c) => !c.isEmpty && _isValueCell(c),
+    );
     final headerRow = rows[headerIndex];
-    final data = rows.sublist(headerIndex + 1);
+    final data = rows.sublist(hasHeaderRow ? headerIndex + 1 : headerIndex);
+    if (!hasHeaderRow) {
+      notes.add('لا يوجد صف عناوين — الأعمدة باسم حروفها (A، B، ...)');
+    }
 
     // الأعمدة: كل عمود له عنوان أو فيه بيانات
     var width = 0;
@@ -334,19 +361,21 @@ class TableFileReader {
     }
     final columns = <int>[];
     final headers = <String>[];
+    final letters = <String>[];
+    final titles = <String>[];
     final used = <String>{};
     for (var c = 0; c < width; c++) {
-      final title = _collapse(headerRow.cellAt(c).text);
+      final title = hasHeaderRow ? _collapse(headerRow.cellAt(c).text) : '';
       if (title.isEmpty && !data.any((r) => !r.cellAt(c).isEmpty)) continue;
-      final base = title.isNotEmpty
-          ? title
-          : 'عمود ${kind == TableFileKind.excel ? _columnLetter(c) : '${c + 1}'}';
+      final base = title.isNotEmpty ? title : 'عمود ${_columnLetter(c)}';
       var name = base;
       for (var n = 2; !used.add(name.toLowerCase()); n++) {
         name = '$base ($n)';
       }
       columns.add(c);
       headers.add(name);
+      letters.add(_columnLetter(c));
+      titles.add(title);
     }
 
     final outRows = <List<String>>[];
@@ -374,6 +403,9 @@ class TableFileReader {
       fileName: fileName,
       kind: kind,
       headers: headers,
+      columnLetters: letters,
+      headerTitles: titles,
+      hasHeaderRow: hasHeaderRow,
       rows: outRows,
       rowNumbers: numbers,
       lines:

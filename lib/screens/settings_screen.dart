@@ -2063,6 +2063,16 @@ class _BubbleAppearancePage extends StatelessWidget {
                   onChanged: (v) => set(p.copyWith(confirmForbiddenPhrase: v)),
                 ),
                 const _ListDivider(),
+                _SwitchRow(
+                  icon: Icons.rule_rounded,
+                  title: 'تأكيد عند وجود مبلغين أو عملتين',
+                  subtitle: p.confirmMultiAmount
+                      ? 'مفعّل: إذا وُجد في الرسالة مبلغان وعملتان، أو مبلغان مختلفان، أو المبلغ بالحروف غير المبلغ بالأرقام، تظهر رسالة تنبيه وتؤكد بنفسك: تعتمد المبلغين معًا (المبلغ + المبلغ الثاني) أو تختار مبلغًا واحدًا'
+                      : 'متوقف: يُختار بدون تأكيد — مبلغان بعملتين يُعتمدان معًا (المبلغ + المبلغ الثاني)، وغير ذلك المبلغ الأرجح، مع تنبيه صغير يمكنك منه التغيير',
+                  value: p.confirmMultiAmount,
+                  onChanged: (v) => set(p.copyWith(confirmMultiAmount: v)),
+                ),
+                const _ListDivider(),
                 _SliderRow(
                   icon: Icons.content_copy_rounded,
                   title: 'فحص التكرار',

@@ -131,39 +131,45 @@ class _ParseTextScreenState extends State<ParseTextScreen>
     if (!value) _setProgress(null);
   }
 
-  Color _accountBaseColor(Account? account) {
-    if (account == null) return const Color(0xFF2E7DFF);
-    if (account.type.isCompany) return const Color(0xFF6D42C1);
-
-    final hash = account.name.trim().hashCode.abs();
-    final hue = (hash % 360).toDouble();
-
-    return HSVColor.fromAHSV(1, hue, 0.62, 0.92).toColor();
+  /// لونا الحساب (الأساسي والثاني للتدرج). الشركات: بنفسجي ← وردي زاهي
+  /// (بدل اللون الباهت السابق)، والمكاتب: لون من اسم الحساب مع درجة قريبة.
+  (Color, Color) _palette(Account? account) {
+    if (account == null) {
+      return (const Color(0xFF2563EB), const Color(0xFF0D9488));
+    }
+    if (account.type.isCompany) {
+      return (const Color(0xFF7C3AED), const Color(0xFFDB2777));
+    }
+    final hue = (account.name.trim().hashCode.abs() % 360).toDouble();
+    return (
+      HSVColor.fromAHSV(1, hue, 0.70, 0.86).toColor(),
+      HSVColor.fromAHSV(1, (hue + 38) % 360, 0.62, 0.84).toColor(),
+    );
   }
 
-  List<Color> _buildGradient(Account? account, Brightness brightness) {
-    final base = _accountBaseColor(account);
+  Color _accountBaseColor(Account? account) => _palette(account).$1;
 
+  List<Color> _buildGradient(Account? account, Brightness brightness) {
+    final (a, b) = _palette(account);
     if (brightness == Brightness.dark) {
       return [
-        Color.lerp(base, Colors.black, 0.55)!,
-        Color.lerp(base, const Color(0xFF0F172A), 0.72)!,
-        const Color(0xFF020617),
+        Color.lerp(a, Colors.black, 0.62)!,
+        const Color(0xFF0B1020),
+        Color.lerp(b, Colors.black, 0.70)!,
       ];
     }
-
     return [
-      Color.lerp(base, Colors.white, 0.82)!,
-      Color.lerp(base, Colors.white, 0.60)!,
-      Color.lerp(base, const Color(0xFFF8FAFC), 0.20)!,
+      Color.lerp(a, Colors.white, 0.84)!,
+      Color.lerp(b, Colors.white, 0.90)!,
+      const Color(0xFFF8FAFC),
     ];
   }
 
   Color _cardColorFor(Account? account, Brightness brightness) {
     final base = _accountBaseColor(account);
     return brightness == Brightness.dark
-        ? Color.lerp(base, const Color(0xFF111827), 0.82)!
-        : Color.lerp(base, Colors.white, 0.90)!;
+        ? Color.lerp(base, const Color(0xFF111827), 0.86)!
+        : Colors.white.withValues(alpha: 0.92);
   }
 
   Future<void> _paste() async {
@@ -545,10 +551,10 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                             top: Radius.circular(28),
                           ),
                           gradient: LinearGradient(
-                            colors: _buildGradient(
-                              _selectedAccount,
-                              brightness,
-                            ),
+                            colors: [
+                              _palette(_selectedAccount).$1,
+                              _palette(_selectedAccount).$2,
+                            ],
                             begin: Alignment.topRight,
                             end: Alignment.bottomLeft,
                           ),
@@ -810,7 +816,8 @@ class _ParseTextScreenState extends State<ParseTextScreen>
   }
 
   Widget _buildHeaderCard(Brightness brightness) {
-    final selectedColor = _accountBaseColor(_selectedAccount);
+    final (selectedColor, secondColor) = _palette(_selectedAccount);
+    final isCompany = _selectedAccount?.type.isCompany ?? false;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 380),
@@ -818,18 +825,15 @@ class _ParseTextScreenState extends State<ParseTextScreen>
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [
-            selectedColor,
-            Color.lerp(selectedColor, Colors.white, 0.32)!,
-          ],
+          colors: [selectedColor, secondColor],
           begin: Alignment.topRight,
           end: Alignment.bottomLeft,
         ),
         borderRadius: BorderRadius.circular(28),
         boxShadow: [
           BoxShadow(
-            color: selectedColor.withOpacity(0.25),
-            blurRadius: 24,
+            color: selectedColor.withValues(alpha: 0.32),
+            blurRadius: 26,
             offset: const Offset(0, 14),
           ),
         ],
@@ -845,8 +849,8 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                 color: Colors.white.withOpacity(0.16),
                 borderRadius: BorderRadius.circular(18),
               ),
-              child: const Icon(
-                Icons.auto_awesome_rounded,
+              child: Icon(
+                isCompany ? Icons.business_rounded : Icons.auto_awesome_rounded,
                 color: Colors.white,
                 size: 30,
               ),
@@ -857,9 +861,13 @@ class _ParseTextScreenState extends State<ParseTextScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  "تحليل النص واختيار الحساب",
-                  style: TextStyle(
+                Text(
+                  _selectedAccount == null
+                      ? "تحليل النص واختيار الحساب"
+                      : _selectedAccount!.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w900,
                     fontSize: 20,
@@ -868,9 +876,9 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                 const SizedBox(height: 6),
                 Text(
                   _selectedAccount == null
-                      ? "اختر الحساب، ثم ألصق النص، وبعدها تابع العملية بسهولة"
-                      : "الحساب الحالي: ${_selectedAccount!.name}",
-                  style: const TextStyle(color: Colors.white70, height: 1.4),
+                      ? "اختر الحساب، ثم ألصق النص أو استعرض ملفًا، وبعدها اضغط إضافة أو تسليم"
+                      : "${_selectedAccount!.type.label} • ألصق النص أو استعرض ملفًا ثم اختر إضافة أو تسليم",
+                  style: const TextStyle(color: Colors.white, height: 1.4),
                 ),
               ],
             ),
@@ -887,7 +895,7 @@ class _ParseTextScreenState extends State<ParseTextScreen>
           width: 38,
           height: 38,
           decoration: BoxDecoration(
-            color: color.withOpacity(0.12),
+            color: color.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(14),
           ),
           child: Icon(icon, color: color),
@@ -901,17 +909,149 @@ class _ParseTextScreenState extends State<ParseTextScreen>
     );
   }
 
-  Widget _buildBottomProgress() {
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
+  int get _lineCount =>
+      _text.text.split('\n').where((l) => l.trim().isNotEmpty).length;
+
+  void _clearText() {
+    if (_text.text.isEmpty) return;
+    final previous = _text.text;
+    final previousSummary = _importSummary;
+    setState(() {
+      _text.clear();
+      _importSummary = null;
+    });
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: const Text('تم مسح النص'),
+          action: SnackBarAction(
+            label: 'تراجع',
+            onPressed: () {
+              if (!mounted) return;
+              setState(() {
+                _text.text = previous;
+                _importSummary = previousSummary;
+              });
+            },
+          ),
+        ),
+      );
+  }
+
+  /// بطاقة بخلفية شفافة أنيقة
+  Widget _glassCard({
+    required Widget child,
+    required Color color,
+    required Brightness brightness,
+    EdgeInsetsGeometry padding = const EdgeInsets.all(16),
+  }) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 380),
+      curve: Curves.easeOutCubic,
+      padding: padding,
+      decoration: BoxDecoration(
+        color: _cardColorFor(_selectedAccount, brightness),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: color.withValues(alpha: 0.14)),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(
+              alpha: brightness == Brightness.dark ? 0.10 : 0.10,
+            ),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+
+  InputDecoration _fieldDecoration({
+    required Color color,
+    required Brightness brightness,
+    String? label,
+    String? hint,
+    Widget? prefixIcon,
+    double radius = 18,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: prefixIcon,
+      filled: true,
+      fillColor: brightness == Brightness.dark
+          ? Colors.white.withValues(alpha: 0.05)
+          : Color.lerp(color, Colors.white, 0.95),
+      alignLabelWithHint: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(radius),
+        borderSide: BorderSide.none,
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(radius),
+        borderSide: BorderSide(color: color.withValues(alpha: 0.16)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(radius),
+        borderSide: BorderSide(color: color, width: 1.5),
+      ),
+    );
+  }
+
+  /// زرا «إضافة» و«تسليم» ثابتان أسفل الشاشة (مع شريط التقدم فوقهما)
+  Widget _buildBottomBar(Brightness brightness) {
+    final (a, b) = _palette(_selectedAccount);
+    final dark = brightness == Brightness.dark;
+    return Container(
+      decoration: BoxDecoration(
+        color: dark ? const Color(0xFF0F172A) : Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: dark ? 0.35 : 0.08),
+            blurRadius: 18,
+            offset: const Offset(0, -4),
+          ),
+        ],
+      ),
       child: SafeArea(
         top: false,
-        child: OperationProgressBar(
-          progress: _progress,
-          color: _accountBaseColor(_selectedAccount),
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              OperationProgressBar(
+                progress: _progress,
+                color: a,
+                padding: const EdgeInsets.only(bottom: 10),
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: _GradientActionButton(
+                      label: 'إضافة',
+                      icon: Icons.add_task_rounded,
+                      colors: [a, Color.lerp(a, b, 0.35)!],
+                      onPressed: _isBusy ? null : _goBubble,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _GradientActionButton(
+                      label: 'تسليم',
+                      icon: Icons.send_rounded,
+                      colors: [Color.lerp(a, b, 0.65)!, b],
+                      onPressed: _isBusy ? null : _goVerifyReceive,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -928,7 +1068,9 @@ class _ParseTextScreenState extends State<ParseTextScreen>
         final accounts = box.values.toList();
         final selectedColor = _accountBaseColor(_selectedAccount);
         final pageGradient = _buildGradient(_selectedAccount, brightness);
-        final cardColor = _cardColorFor(_selectedAccount, brightness);
+        final onPage = brightness == Brightness.dark
+            ? Colors.white
+            : const Color(0xFF0F172A);
 
         return Directionality(
           textDirection: TextDirection.rtl,
@@ -936,12 +1078,38 @@ class _ParseTextScreenState extends State<ParseTextScreen>
             extendBodyBehindAppBar: true,
             backgroundColor: Colors.transparent,
             appBar: AppBar(
-              title: const Text("تحليل النص"),
+              title: const Text(
+                'تحليل النص',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
               centerTitle: true,
+              foregroundColor: onPage,
               backgroundColor: Colors.transparent,
               elevation: 0,
               scrolledUnderElevation: 0,
+              actions: [
+                // استعراض ملف: زر أعلى الصفحة (بدل مكانه تحت زر اللصق)
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(end: 10),
+                  child: FilledButton.tonalIcon(
+                    onPressed: _isBusy ? null : _importFile,
+                    icon: const Icon(Icons.folder_open_rounded, size: 19),
+                    label: const Text('استعراض ملف'),
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      backgroundColor: selectedColor.withValues(alpha: 0.14),
+                      foregroundColor: brightness == Brightness.dark
+                          ? Colors.white
+                          : Color.lerp(selectedColor, Colors.black, 0.25),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
+            bottomNavigationBar: _buildBottomBar(brightness),
             body: Stack(
               children: [
                 AnimatedContainer(
@@ -956,42 +1124,26 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                   ),
                 ),
                 SafeArea(
+                  bottom: false,
                   child: FadeTransition(
                     opacity: _fadeAnimation,
                     child: ListView(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                       children: [
                         _buildHeaderCard(brightness),
-                        const SizedBox(height: 18),
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 380),
-                          curve: Curves.easeOutCubic,
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: cardColor,
-                            borderRadius: BorderRadius.circular(28),
-                            border: Border.all(
-                              color: selectedColor.withOpacity(0.10),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(
-                                  brightness == Brightness.dark ? 0.18 : 0.06,
-                                ),
-                                blurRadius: 20,
-                                offset: const Offset(0, 10),
-                              ),
-                            ],
-                          ),
+                        const SizedBox(height: 16),
+                        _glassCard(
+                          color: selectedColor,
+                          brightness: brightness,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               _buildSectionTitle(
-                                "الحساب",
+                                'الحساب',
                                 Icons.account_balance_wallet_rounded,
                                 selectedColor,
                               ),
-                              const SizedBox(height: 14),
+                              const SizedBox(height: 12),
                               DropdownButtonFormField<Account>(
                                 value: _selectedAccount,
                                 isExpanded: true,
@@ -1011,7 +1163,12 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                                               height: 14,
                                               decoration: BoxDecoration(
                                                 shape: BoxShape.circle,
-                                                color: _accountBaseColor(a),
+                                                gradient: LinearGradient(
+                                                  colors: [
+                                                    _palette(a).$1,
+                                                    _palette(a).$2,
+                                                  ],
+                                                ),
                                               ),
                                             ),
                                             const SizedBox(width: 10),
@@ -1029,223 +1186,188 @@ class _ParseTextScreenState extends State<ParseTextScreen>
                                 onChanged: (v) {
                                   setState(() => _selectedAccount = v);
                                 },
-                                decoration: InputDecoration(
-                                  filled: true,
-                                  fillColor: brightness == Brightness.dark
-                                      ? Colors.white.withOpacity(0.04)
-                                      : Colors.white.withOpacity(0.72),
-                                  labelText: "اختر الحساب",
+                                decoration: _fieldDecoration(
+                                  color: selectedColor,
+                                  brightness: brightness,
+                                  label: 'اختر الحساب',
                                   prefixIcon: Icon(
                                     Icons.wallet_rounded,
                                     color: selectedColor,
                                   ),
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 18,
-                                  ),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(20),
-                                    borderSide: BorderSide.none,
-                                  ),
-                                  enabledBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(20),
-                                    borderSide: BorderSide(
-                                      color: selectedColor.withOpacity(0.12),
-                                    ),
-                                  ),
-                                  focusedBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(20),
-                                    borderSide: BorderSide(
-                                      color: selectedColor,
-                                      width: 1.4,
-                                    ),
-                                  ),
                                 ),
                               ),
                             ],
                           ),
                         ),
-                        const SizedBox(height: 16),
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 380),
-                          curve: Curves.easeOutCubic,
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: cardColor,
-                            borderRadius: BorderRadius.circular(28),
-                            border: Border.all(
-                              color: selectedColor.withOpacity(0.10),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(
-                                  brightness == Brightness.dark ? 0.18 : 0.06,
-                                ),
-                                blurRadius: 20,
-                                offset: const Offset(0, 10),
-                              ),
-                            ],
-                          ),
+                        const SizedBox(height: 14),
+                        _glassCard(
+                          color: selectedColor,
+                          brightness: brightness,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              _buildSectionTitle(
-                                "النص المراد تحليله",
-                                Icons.text_snippet_rounded,
-                                selectedColor,
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: _buildSectionTitle(
+                                      'النص المراد تحليله',
+                                      Icons.text_snippet_rounded,
+                                      selectedColor,
+                                    ),
+                                  ),
+                                  if (_text.text.trim().isNotEmpty)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 5,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: selectedColor.withValues(
+                                          alpha: 0.10,
+                                        ),
+                                        borderRadius: BorderRadius.circular(
+                                          999,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        '$_lineCount سطر',
+                                        style: TextStyle(
+                                          color: selectedColor,
+                                          fontWeight: FontWeight.w800,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ),
+                                  if (_text.text.isNotEmpty)
+                                    IconButton(
+                                      tooltip: 'مسح النص',
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: _isBusy ? null : _clearText,
+                                      icon: Icon(
+                                        Icons.delete_sweep_rounded,
+                                        color: selectedColor,
+                                      ),
+                                    ),
+                                ],
                               ),
-                              const SizedBox(height: 14),
+                              const SizedBox(height: 12),
                               if (_importSummary != null)
                                 _buildImportCard(selectedColor, brightness),
                               TextField(
                                 controller: _text,
-                                maxLines: 10,
+                                maxLines: 14,
                                 minLines: 8,
+                                onChanged: (_) => setState(() {}),
                                 style: const TextStyle(height: 1.55),
-                                decoration: InputDecoration(
-                                  hintText:
-                                      "✏️ ألصق هنا الرسائل أو النص المراد تحليله...",
-                                  filled: true,
-                                  fillColor: brightness == Brightness.dark
-                                      ? Colors.white.withOpacity(0.04)
-                                      : Colors.white.withOpacity(0.72),
-                                  alignLabelWithHint: true,
-                                  contentPadding: const EdgeInsets.all(18),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(24),
-                                    borderSide: BorderSide.none,
-                                  ),
-                                  enabledBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(24),
-                                    borderSide: BorderSide(
-                                      color: selectedColor.withOpacity(0.12),
-                                    ),
-                                  ),
-                                  focusedBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(24),
-                                    borderSide: BorderSide(
-                                      color: selectedColor,
-                                      width: 1.4,
-                                    ),
-                                  ),
+                                decoration: _fieldDecoration(
+                                  color: selectedColor,
+                                  brightness: brightness,
+                                  hint:
+                                      '✏️ ألصق هنا الرسائل أو النص المراد تحليله...',
+                                  radius: 22,
                                 ),
                               ),
-                              const SizedBox(height: 14),
-                              SizedBox(
-                                width: double.infinity,
-                                child: ElevatedButton.icon(
-                                  onPressed: _isBusy ? null : _paste,
-                                  icon: const Icon(Icons.paste_rounded),
-                                  label: const Text(
-                                    "لصق وتحليل الحساب تلقائيًا",
-                                  ),
-                                  style: ElevatedButton.styleFrom(
-                                    elevation: 0,
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 16,
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(20),
-                                    ),
-                                    backgroundColor: selectedColor,
-                                    foregroundColor: Colors.white,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              SizedBox(
-                                width: double.infinity,
-                                child: OutlinedButton.icon(
-                                  onPressed: _isBusy ? null : _importFile,
-                                  icon: const Icon(Icons.upload_file_rounded),
-                                  label: const Text(
-                                    "استيراد ملف (Excel / CSV / نص)",
-                                  ),
-                                  style: OutlinedButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 14,
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(20),
-                                    ),
-                                    foregroundColor: selectedColor,
-                                    side: BorderSide(
-                                      color: selectedColor.withValues(
-                                        alpha: 0.55,
-                                      ),
-                                    ),
-                                  ),
-                                ),
+                              const SizedBox(height: 12),
+                              _GradientActionButton(
+                                label: 'لصق وتحليل الحساب تلقائيًا',
+                                icon: Icons.content_paste_go_rounded,
+                                colors: [
+                                  selectedColor,
+                                  Color.lerp(
+                                    selectedColor,
+                                    _palette(_selectedAccount).$2,
+                                    0.5,
+                                  )!,
+                                ],
+                                height: 50,
+                                onPressed: _isBusy ? null : _paste,
                               ),
                             ],
                           ),
-                        ),
-                        const SizedBox(height: 16),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TweenAnimationBuilder<double>(
-                                tween: Tween(begin: 0.98, end: 1),
-                                duration: const Duration(milliseconds: 260),
-                                builder: (_, scale, child) {
-                                  return Transform.scale(
-                                    scale: scale,
-                                    child: child,
-                                  );
-                                },
-                                child: ElevatedButton.icon(
-                                  onPressed: _isBusy ? null : _goBubble,
-                                  icon: const Icon(Icons.add_task_rounded),
-                                  label: const Text("إضافة"),
-                                  style: ElevatedButton.styleFrom(
-                                    elevation: 0,
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 18,
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(22),
-                                    ),
-                                    backgroundColor: selectedColor,
-                                    foregroundColor: Colors.white,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: FilledButton.icon(
-                                onPressed: _isBusy ? null : _goVerifyReceive,
-                                icon: const Icon(Icons.send_rounded),
-                                label: const Text("تسليم"),
-                                style: FilledButton.styleFrom(
-                                  elevation: 0,
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 18,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(22),
-                                  ),
-                                  backgroundColor: Color.lerp(
-                                    selectedColor,
-                                    Colors.black,
-                                    brightness == Brightness.dark ? 0.12 : 0.05,
-                                  ),
-                                  foregroundColor: Colors.white,
-                                ),
-                              ),
-                            ),
-                          ],
                         ),
                       ],
                     ),
                   ),
                 ),
-                _buildBottomProgress(),
               ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// زر بتدرج لوني (إضافة / تسليم / لصق)
+class _GradientActionButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final List<Color> colors;
+  final VoidCallback? onPressed;
+  final double height;
+
+  const _GradientActionButton({
+    required this.label,
+    required this.icon,
+    required this.colors,
+    required this.onPressed,
+    this.height = 56,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 200),
+      opacity: enabled ? 1 : 0.55,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: colors,
+            begin: Alignment.topRight,
+            end: Alignment.bottomLeft,
+          ),
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: enabled
+              ? [
+                  BoxShadow(
+                    color: colors.first.withValues(alpha: 0.32),
+                    blurRadius: 14,
+                    offset: const Offset(0, 6),
+                  ),
+                ]
+              : null,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: onPressed,
+            child: SizedBox(
+              height: height,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 16,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

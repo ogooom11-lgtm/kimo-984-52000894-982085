@@ -7,6 +7,7 @@ import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
 
@@ -42,6 +43,10 @@ class VerifyReceiveScreen extends StatefulWidget {
 class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
   // الإعدادات
   late Settings _settings;
+
+  /// الإعدادات: تأكيد المبلغ عند وجود مبلغين/عملتين (وإلا يُعتمد الأرجح)
+  bool get _confirmMultiAmount =>
+      BubbleUiPrefs.fromSettings(_settings).confirmMultiAmount;
   late List<String> _nameKeywords;
   late List<String> _amountKeywords;
   late Map<String, String> _currencyMap;
@@ -385,12 +390,23 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
     st.currencyKey = ex.currencyKey;
     st.currencyNames = List<String>.from(ex.currencyNames);
 
-    // أكثر من مبلغ وأكثر من عملة: لا يُعتمد المبلغ تلقائيًا، يختاره المستخدم
-    // (مع تحذير). العملة تبقى المكتشفة.
-    st.moneyAmbiguous = ex.moneyAmbiguous;
-    st.detectedAmount = ex.moneyAmbiguous ? null : ex.amount;
+    // تعارض في المبلغ (أكثر من مبلغ وأكثر من عملة، أو مبلغان مختلفان، أو
+    // المبلغ بالحروف غير المبلغ بالأرقام): حسب الإعدادات لا يُعتمد المبلغ
+    // تلقائيًا ويختاره المستخدم (مع تحذير)، أو يُعتمد الأرجح مع تنبيه.
+    // العملة تبقى المكتشفة.
+    st.amountConflictKind = ex.amountWordsMismatch != null
+        ? _AmountConflictKind.wordsMismatch
+        : ex.multiCurrencyAmbiguous
+        ? _AmountConflictKind.multiCurrency
+        : (ex.amountStrongValues.length >= 2
+              ? _AmountConflictKind.twoAmounts
+              : null);
+    st.wordsMismatch = ex.amountWordsMismatch;
+    st.strongAmountValues = List<double>.from(ex.amountStrongValues);
+    st.moneyAmbiguous = ex.moneyAmbiguous && _confirmMultiAmount;
+    st.detectedAmount = st.moneyAmbiguous ? null : ex.amount;
     st.amount = st.detectedAmount;
-    st.detectedAmountTokens = ex.moneyAmbiguous
+    st.detectedAmountTokens = st.moneyAmbiguous
         ? <_TokPos>{}
         : {for (final p in ex.amountTokens) _TokPos(p.x, p.y)};
     st.amountHasConflict = ex.amountHasConflict;
@@ -856,14 +872,34 @@ class _VerifyReceiveScreenState extends State<VerifyReceiveScreen> {
 
     final manualAmount = st.manualAmount != null;
 
-    if (st.moneyAmbiguous) {
-      final vals = _formatAmountList(st.amountCandidateValues);
-      final curs = st.currencyNames.join(' ، ');
-      st.warningTexts.add(
-        manualAmount
-            ? 'الرسالة فيها أكثر من مبلغ ($vals) وأكثر من عملة ($curs): تأكد أن المبلغ المختار هو الصحيح.'
-            : 'الرسالة فيها أكثر من مبلغ ($vals) وأكثر من عملة ($curs)، لذلك ما تم تحديد المبلغ تلقائيًا. اختر المبلغ الصحيح من الأرقام تحت أو اضغط عليه في الرسالة.',
-      );
+    final conflict = st.amountConflictKind;
+    if (conflict != null) {
+      final String head;
+      switch (conflict) {
+        case _AmountConflictKind.wordsMismatch:
+          final mm = st.wordsMismatch!;
+          head =
+              'المبلغ بالأرقام (${_formatAmount(mm.digits)}) لا يطابق المبلغ المكتوب بالحروف (${_formatAmount(mm.words)})';
+        case _AmountConflictKind.multiCurrency:
+          head =
+              'الرسالة فيها أكثر من مبلغ (${_formatAmountList(st.amountCandidateValues)}) وأكثر من عملة (${st.currencyNames.join(' ، ')})';
+        case _AmountConflictKind.twoAmounts:
+          head =
+              'الرسالة فيها مبلغين مختلفين (${_formatAmountList(st.strongAmountValues)})';
+      }
+      if (manualAmount) {
+        st.warningTexts.add('$head: تأكد أن المبلغ المختار هو الصحيح.');
+      } else if (st.moneyAmbiguous) {
+        st.warningTexts.add(
+          '$head، لذلك ما تم تحديد المبلغ تلقائيًا. اختر المبلغ الصحيح من الأرقام تحت أو اضغط عليه في الرسالة.',
+        );
+      } else if (st.amount != null) {
+        st.warningTexts.add(
+          st.amountChosenByMatch
+              ? '$head — تم اعتماد ${_formatAmount(st.amount!)} لأنه يطابق حركة مضافة. غيّره إذا لزم.'
+              : '$head — تم اعتماد ${_formatAmount(st.amount!)} تلقائيًا (حسب الإعدادات). غيّره إذا لزم.',
+        );
+      }
     } else if (st.amountChosenByMatch && st.amount != null) {
       st.warningTexts.add(
         'الرسالة فيها أكثر من رقم، وتم اعتماد المبلغ ${_formatAmount(st.amount!)} لأنه يطابق حركة مضافة.',
@@ -4164,8 +4200,17 @@ class _BubbleState {
   /// كل العملات المختلفة في الرسالة
   List<String> currencyNames = [];
 
-  /// أكثر من مبلغ وأكثر من عملة: المبلغ لا يُحدد تلقائيًا
+  /// تعارض في المبلغ والإعدادات تطلب التأكيد: المبلغ لا يُحدد تلقائيًا
   bool moneyAmbiguous = false;
+
+  /// نوع التعارض في المبلغ (للتحذير) — null = لا تعارض
+  _AmountConflictKind? amountConflictKind;
+
+  /// المبلغ بالأرقام والمبلغ المكتوب بالحروف عند اختلافهما
+  ({double digits, double words})? wordsMismatch;
+
+  /// المبالغ المختلفة الأكيدة في الرسالة
+  List<double> strongAmountValues = const [];
 
   final List<_Candidate> candidates = [];
   final Set<int> selectedTxIds = {};
@@ -4201,6 +4246,18 @@ class _BubbleState {
 
 /// دور التوكن في نص الرسالة (للتلوين)
 enum _TokRole { plain, name, amount, currency, noise, context }
+
+/// نوع التعارض في مبلغ الرسالة
+enum _AmountConflictKind {
+  /// المبلغ بالحروف غير المبلغ بالأرقام
+  wordsMismatch,
+
+  /// أكثر من مبلغ وأكثر من عملة
+  multiCurrency,
+
+  /// مبلغان مختلفان أكيدان
+  twoAmounts,
+}
 
 /// مصدر اختيار الفقاعة
 enum _SelectionMode {

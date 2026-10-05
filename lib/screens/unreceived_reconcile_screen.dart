@@ -73,6 +73,18 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   List<String> _appCurrencies = const [];
   Map<String, String> _appCurrencyMap = const {};
 
+  /// حرف كل عمود في الملف (A, B, ...) ونص خلية عنوانه إن وُجد
+  final Map<String, String> _columnLetters = {};
+  final Map<String, String> _headerTitles = {};
+
+  /// اسم الملف المقروء — يبقى محفوظًا (حتى لو خرجت من الصفحة) إلى أن تضغط
+  /// «إنهاء»
+  String _loadedFileName = '';
+
+  /// اختيارات الأعمدة المحفوظة حسب حرف العمود (أعمدة الاسم والمبالغ وعملة كل
+  /// عمود) — تُطبَّق تلقائيًا على الملف التالي
+  Map<String, dynamic> _savedColumns = const {};
+
   final ValueNotifier<OperationProgress?> _progress =
       ValueNotifier<OperationProgress?>(null);
 
@@ -96,13 +108,18 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       end: now,
     );
 
+    _savedColumns = _loadSavedColumns();
+
     // ملف تمت مشاركته مع التطبيق: نفتحه مباشرة (قبل ربط مستمع البحث)
     final initial = widget.initialTable;
     if (initial != null) {
       String? error;
       try {
         _applyTable(initial);
+        _applySavedColumns();
         _currentStep = _isDashFormat ? 2 : 1;
+        _saveSessionFile();
+        _saveSessionState();
       } catch (e) {
         _resetParsedData();
         error = _errorText(e);
@@ -114,6 +131,18 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         } else {
           _showLoadedSnack(initial);
         }
+      });
+    } else if (_restoreSession()) {
+      // الملف المقروء سابقًا ما زال مفتوحًا (لم يُضغط «إنهاء»)
+      final rerun = _currentStep == 3;
+      if (rerun) _currentStep = 2;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showSnack(
+          'الملف «$_loadedFileName» ما زال مفتوحًا — اضغط «إنهاء» لإغلاقه',
+        );
+        // النتائج تُعاد حسابها على الحركات الحالية
+        if (rerun) _runReconcile();
       });
     }
 
@@ -153,10 +182,13 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       );
       if (!mounted) return;
       _applyTable(data);
+      _applySavedColumns();
       setState(() {
         // صيغة «الاسم - المبلغ - العملة» تُحدَّد أعمدتها تلقائيًا
         _currentStep = _isDashFormat ? 2 : 1;
       });
+      _saveSessionFile();
+      _saveSessionState();
       _showLoadedSnack(data);
     } catch (e) {
       if (mounted) _resetParsedData();
@@ -173,6 +205,9 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   void _resetParsedData() {
     _headers.clear();
     _rows.clear();
+    _columnLetters.clear();
+    _headerTitles.clear();
+    _loadedFileName = '';
     _selectedNameCols.clear();
     _selectedAmountCols.clear();
     _amountColCurrency.clear();
@@ -261,6 +296,16 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     _headers
       ..clear()
       ..addAll([_dashNameHeader, _dashAmountHeader, _dashCurrencyHeader]);
+    _columnLetters
+      ..clear()
+      ..addAll({
+        _dashNameHeader: 'A',
+        _dashAmountHeader: 'B',
+        _dashCurrencyHeader: 'C',
+      });
+    _headerTitles
+      ..clear()
+      ..addAll({for (final h in _headers) h: h});
     _rows.clear();
     for (final r in parsed) {
       _rows.add({
@@ -346,7 +391,10 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       );
       return;
     }
+    _loadedFileName = 'قائمة ملصوقة';
     setState(() => _currentStep = 2);
+    _saveSessionFile();
+    _saveSessionState();
     _showSnack('تم التعرف على ${_rows.length} سطر بصيغة الاسم - المبلغ - العملة');
   }
 
@@ -354,6 +402,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   /// يرمي FormatException برسالة مفهومة إذا لم يمكن استخدام الملف.
   void _applyTable(TableFileData data) {
     _resetParsedData();
+    _loadedFileName = data.fileName;
     final error = data.error;
     if (error != null) throw FormatException(error);
 
@@ -391,6 +440,16 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     _headers
       ..clear()
       ..addAll(data.headers);
+    _loadedFileName = data.fileName;
+    _columnLetters.clear();
+    _headerTitles.clear();
+    for (int c = 0; c < _headers.length; c++) {
+      _columnLetters[_headers[c]] = c < data.columnLetters.length
+          ? data.columnLetters[c]
+          : _letterForIndex(c);
+      _headerTitles[_headers[c]] =
+          c < data.headerTitles.length ? data.headerTitles[c] : _headers[c];
+    }
     _rows.clear();
     for (int i = 0; i < data.rows.length; i++) {
       final cells = data.rows[i];
@@ -594,6 +653,8 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         _currentStep = 3;
         _isManualMode = false;
       });
+      _saveColumnChoices();
+      _saveSessionState();
     } catch (e) {
       if (mounted) {
         setState(() => _loading = false);
@@ -1211,28 +1272,16 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         title: Text(_isManualMode ? 'مطابقة يدوية' : 'المطابقة الذكية'),
         centerTitle: true,
         actions: [
-          if (_currentStep == 3 && !_isManualMode)
-            IconButton(
-              tooltip: 'إعادة البدء',
-              icon: const Icon(Icons.restart_alt_rounded),
-              onPressed: () {
-                setState(() {
-                  _currentStep = 0;
-                  _headers.clear();
-                  _rows.clear();
-                  _results.clear();
-                  _manualExcelItems.clear();
-                  _manualSysItems.clear();
-                  _excelDupNotes.clear();
-                  _sysDupNotes.clear();
-                  _resultsSearchCtrl.clear();
-                  _selectedAmountCols.clear();
-                  _selectedNameCols.clear();
-                  _amountColCurrency.clear();
-                  _currencyColumn = null;
-                  _filter = _ResultFilter.all;
-                });
-              },
+          // «إنهاء»: يغلق الملف المقروء — بدونه يبقى الملف محفوظًا مهما خرجت
+          // من الصفحة ورجعت
+          if (_currentStep > 0 || _rows.isNotEmpty)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: 8),
+              child: TextButton.icon(
+                onPressed: _loading ? null : _confirmFinish,
+                icon: const Icon(Icons.task_alt_rounded),
+                label: const Text('إنهاء'),
+              ),
             ),
         ],
         leading: (_currentStep > 0 || _isManualMode)
@@ -1243,6 +1292,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
               setState(() => _isManualMode = false);
             } else {
               setState(() => _currentStep--);
+              _saveSessionState();
             }
           },
         )
@@ -1258,6 +1308,8 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         child: Column(
           children: [
             if (_loading) const LinearProgressIndicator(minHeight: 2),
+            if (_loadedFileName.isNotEmpty && _currentStep > 0)
+              _buildOpenFileStrip(),
             Expanded(
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 280),
@@ -1421,10 +1473,13 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   }
 
   Widget _buildStepNameMapping() {
+    // الأعمدة التي فيها نص فقط (ولو لم يكن النص في أول صف)
+    final items = _headers.where(_columnHasText).toList();
     return _buildSelectionStep(
       title: 'تحديد أعمدة الاسم',
-      subtitle: 'اختر عمودًا واحدًا أو أكثر لتكوين اسم المستفيد.',
-      items: _headers,
+      subtitle:
+          'كل عمود بحرفه في الملف وتحته أول كلمة فيه. اختر عمودًا أو أكثر لتكوين اسم المستفيد.',
+      items: items.isEmpty ? _headers : items,
       selected: _selectedNameCols,
       onToggle: (h) {
         setState(() {
@@ -1434,9 +1489,14 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
             _selectedNameCols.add(h);
           }
         });
+        _saveColumnChoices();
+        _saveSessionState();
       },
       onNext: _selectedNameCols.isNotEmpty
-          ? () => setState(() => _currentStep = 2)
+          ? () {
+              setState(() => _currentStep = 2);
+              _saveSessionState();
+            }
           : null,
     );
   }
@@ -1526,7 +1586,9 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
             separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (ctx, i) {
               final h = _headers[i];
-              if (_selectedNameCols.contains(h) || h == _currencyColumn) {
+              if (_selectedNameCols.contains(h) ||
+                  h == _currencyColumn ||
+                  !_columnHasNumber(h)) {
                 return const SizedBox.shrink();
               }
               final isSelected = _selectedAmountCols.contains(h);
@@ -1540,8 +1602,13 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                       _amountColCurrency.remove(h);
                     } else {
                       _selectedAmountCols.add(h);
+                      // العملة التي اخترتها سابقًا لهذا العمود تُختار تلقائيًا
+                      final saved = _savedCurrencyFor(h);
+                      if (saved != null) _amountColCurrency[h] = saved;
                     }
                   });
+                  _saveColumnChoices();
+                  _saveSessionState();
                 },
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180),
@@ -1559,24 +1626,15 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                   ),
                   child: Row(
                     children: [
-                      CircleAvatar(
-                        radius: 18,
-                        backgroundColor: isSelected
-                            ? Colors.green.withOpacity(.15)
-                            : cs.surfaceContainerHighest,
-                        child: Icon(
-                          Icons.payments_rounded,
-                          size: 18,
-                          color: isSelected ? Colors.green : cs.onSurfaceVariant,
-                        ),
-                      ),
+                      _columnBadge(h, cs, selected: isSelected,
+                          color: Colors.green),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              h,
+                              _firstWordOf(h),
                               style:
                               const TextStyle(fontWeight: FontWeight.w800),
                             ),
@@ -1668,7 +1726,11 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
           icon: const Icon(Icons.currency_exchange_rounded, size: 18),
           hint: const Text('اختر العملة'),
           items: items,
-          onChanged: (v) => setState(() => _amountColCurrency[h] = v),
+          onChanged: (v) {
+            setState(() => _amountColCurrency[h] = v);
+            _saveColumnChoices();
+            _saveSessionState();
+          },
         ),
       ),
     );
@@ -1727,11 +1789,15 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                     }.map(
                       (h) => DropdownMenuItem<String?>(
                         value: h,
-                        child: Text(h),
+                        child: Text('${_letterOf(h)} • ${_firstWordOf(h)}'),
                       ),
                     ),
                   ],
-                  onChanged: (v) => setState(() => _currencyColumn = v),
+                  onChanged: (v) {
+                    setState(() => _currencyColumn = v);
+                    _saveColumnChoices();
+                    _saveSessionState();
+                  },
                 ),
               ],
             ),
@@ -2319,36 +2385,27 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                   ),
                   child: Row(
                     children: [
-                      CircleAvatar(
-                        radius: 18,
-                        backgroundColor:
-                        isSel ? cs.primary : cs.surfaceContainerHighest,
-                        child: Text(
-                          String.fromCharCode(65 + index),
-                          style: TextStyle(
-                            color: isSel ? cs.onPrimary : cs.onSurface,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
+                      _columnBadge(item, cs, selected: isSel,
+                          color: cs.primary),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              item,
+                              _firstWordOf(item),
                               style:
                               const TextStyle(fontWeight: FontWeight.w800),
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              _getSampleData(item),
+                              _samplesOf(item),
                               style: TextStyle(
                                 fontSize: 11.5,
                                 color: cs.onSurfaceVariant,
                               ),
                               maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ],
                         ),
@@ -2726,6 +2783,410 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         ],
       ),
     );
+  }
+
+  // ====== الأعمدة: حرف العمود وأول كلمة فيه ======
+
+  static final RegExp _letterRe = RegExp(r'[A-Za-z\u0621-\u064A]');
+
+  static String _letterForIndex(int col) {
+    var n = col + 1;
+    var out = '';
+    while (n > 0) {
+      final r = (n - 1) % 26;
+      out = String.fromCharCode(65 + r) + out;
+      n = (n - 1) ~/ 26;
+    }
+    return out;
+  }
+
+  String _letterOf(String h) {
+    final l = _columnLetters[h];
+    if (l != null && l.isNotEmpty) return l;
+    final i = _headers.indexOf(h);
+    return i < 0 ? '?' : _letterForIndex(i);
+  }
+
+  /// كل نصوص العمود من الأعلى للأسفل (العنوان أولًا إن وُجد)
+  Iterable<String> _columnTexts(String h) sync* {
+    final title = (_headerTitles[h] ?? '').trim();
+    if (title.isNotEmpty) yield title;
+    for (final r in _rows) {
+      final v = r[h]?.toString().trim() ?? '';
+      if (v.isNotEmpty) yield v;
+    }
+  }
+
+  /// العمود فيه نص (حروف) في أي صف من البيانات — ولو لم يكن في أول صف
+  bool _columnHasText(String h) {
+    for (final r in _rows) {
+      final v = r[h]?.toString() ?? '';
+      if (_letterRe.hasMatch(v)) return true;
+    }
+    return false;
+  }
+
+  /// العمود فيه رقم في أي صف (أعمدة المبالغ)
+  bool _columnHasNumber(String h) {
+    for (final r in _rows) {
+      final v = r[h]?.toString() ?? '';
+      if (_hasDigitRe.hasMatch(v) && _parseAmount(v) != null) return true;
+    }
+    return false;
+  }
+
+  /// أول كلمة في العمود (من أول خلية فيها شيء، وليس شرطًا أن تكون أول صف)
+  String _firstWordOf(String h) {
+    for (final v in _columnTexts(h)) {
+      final word = v.split(RegExp(r'\s+')).firstWhere(
+            (w) => w.trim().isNotEmpty,
+            orElse: () => '',
+          );
+      if (word.isNotEmpty) return word;
+    }
+    return 'فارغ';
+  }
+
+  /// أمثلة من بيانات العمود
+  String _samplesOf(String h, {int max = 3}) {
+    final out = <String>[];
+    for (final r in _rows) {
+      final v = r[h]?.toString().trim() ?? '';
+      if (v.isEmpty || out.contains(v)) continue;
+      out.add(v);
+      if (out.length >= max) break;
+    }
+    return out.isEmpty ? 'فارغ' : out.join(' • ');
+  }
+
+  /// حرف العمود في دائرة (مثل Excel)
+  Widget _columnBadge(
+    String h,
+    ColorScheme cs, {
+    required bool selected,
+    required Color color,
+  }) {
+    return Container(
+      width: 44,
+      height: 44,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: selected ? color : cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: selected ? 1 : .25)),
+      ),
+      child: Text(
+        _letterOf(h),
+        style: TextStyle(
+          color: selected ? Colors.white : cs.onSurface,
+          fontWeight: FontWeight.w900,
+          fontSize: 18,
+        ),
+      ),
+    );
+  }
+
+  /// شريط الملف المفتوح (يبقى حتى «إنهاء»)
+  Widget _buildOpenFileStrip() {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withValues(alpha: .45),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.primary.withValues(alpha: .25)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.description_rounded, color: cs.primary, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '«$_loadedFileName» • ${_rows.length} صف — يبقى مفتوحًا حتى تضغط «إنهاء»',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ====== حفظ اختيارات الأعمدة (حسب حرف العمود) ======
+
+  String get _storageSuffix => widget.account?.id.toString() ?? 'all';
+
+  String get _columnsKey => 'reconcile_columns_$_storageSuffix';
+
+  Map<String, dynamic> _loadSavedColumns() {
+    try {
+      final raw = DatabaseService.uiPrefsBoxOrNull?.get(_columnsKey);
+      if (raw is Map) return Map<String, dynamic>.from(raw);
+    } catch (_) {}
+    return const {};
+  }
+
+  List<String> _savedLetters(String key) {
+    final v = _savedColumns[key];
+    return v is List ? v.map((e) => e.toString()).toList() : const [];
+  }
+
+  /// العملة المحفوظة لعمود (حسب حرفه)
+  String? _savedCurrencyFor(String h) {
+    final m = _savedColumns['currencies'];
+    if (m is! Map) return null;
+    final c = m[_letterOf(h)]?.toString();
+    return (c != null && _appCurrencies.contains(c)) ? c : null;
+  }
+
+  String? _headerForLetter(String letter) {
+    for (final h in _headers) {
+      if (_letterOf(h) == letter) return h;
+    }
+    return null;
+  }
+
+  /// يطبّق اختياراتك السابقة على الملف الجديد (نفس حروف الأعمدة)
+  void _applySavedColumns() {
+    if (_isDashFormat || _savedColumns.isEmpty) return;
+    var applied = false;
+    if (_selectedNameCols.isEmpty) {
+      for (final l in _savedLetters('name')) {
+        final h = _headerForLetter(l);
+        if (h != null && _columnHasText(h) && !_selectedNameCols.contains(h)) {
+          _selectedNameCols.add(h);
+          applied = true;
+        }
+      }
+    }
+    if (_selectedAmountCols.isEmpty) {
+      for (final l in _savedLetters('amount')) {
+        final h = _headerForLetter(l);
+        if (h != null &&
+            !_selectedNameCols.contains(h) &&
+            _columnHasNumber(h) &&
+            !_selectedAmountCols.contains(h)) {
+          _selectedAmountCols.add(h);
+          applied = true;
+        }
+      }
+    }
+    for (final h in _selectedAmountCols) {
+      final c = _savedCurrencyFor(h);
+      if (c != null) _amountColCurrency[h] = c;
+    }
+    final curLetter = _savedColumns['currencyCol']?.toString();
+    if (_currencyColumn == null && curLetter != null) {
+      final h = _headerForLetter(curLetter);
+      if (h != null &&
+          !_selectedNameCols.contains(h) &&
+          !_selectedAmountCols.contains(h)) {
+        _currencyColumn = h;
+      }
+    }
+    if (applied) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showSnack('تم اختيار الأعمدة كما اخترتها في المرة السابقة');
+      });
+    }
+  }
+
+  /// يحفظ ما اخترته (أعمدة الاسم والمبالغ وعملة كل عمود) حسب حروف الأعمدة
+  void _saveColumnChoices() {
+    if (_isDashFormat || _headers.isEmpty) return;
+    final currencies = <String, String>{};
+    final old = _savedColumns['currencies'];
+    if (old is Map) {
+      old.forEach((k, v) => currencies['$k'] = '$v');
+    }
+    _amountColCurrency.forEach((h, c) {
+      final l = _letterOf(h);
+      if (c == null || c.isEmpty) {
+        currencies.remove(l);
+      } else {
+        currencies[l] = c;
+      }
+    });
+    // قائمة فارغة (لم تُختر بعد في هذه الخطوة) لا تمسح الاختيار المحفوظ
+    final names = [for (final h in _selectedNameCols) _letterOf(h)];
+    final amounts = [for (final h in _selectedAmountCols) _letterOf(h)];
+    _savedColumns = <String, dynamic>{
+      'name': names.isNotEmpty ? names : _savedLetters('name'),
+      'amount': amounts.isNotEmpty ? amounts : _savedLetters('amount'),
+      'currencies': currencies,
+      if (_currencyColumn != null) 'currencyCol': _letterOf(_currencyColumn!),
+    };
+    try {
+      DatabaseService.uiPrefsBoxOrNull?.put(_columnsKey, _savedColumns);
+    } catch (_) {}
+  }
+
+  // ====== جلسة التشييك: الملف المقروء يبقى حتى «إنهاء» ======
+
+  String get _sessionFileKey => 'reconcile_file_$_storageSuffix';
+
+  String get _sessionStateKey => 'reconcile_state_$_storageSuffix';
+
+  void _saveSessionFile() {
+    if (_headers.isEmpty) return;
+    try {
+      DatabaseService.uiPrefsBoxOrNull?.put(_sessionFileKey, <String, dynamic>{
+        'file': _loadedFileName,
+        'headers': List<String>.from(_headers),
+        'letters': [for (final h in _headers) _letterOf(h)],
+        'titles': [for (final h in _headers) _headerTitles[h] ?? ''],
+        'rows': [
+          for (final r in _rows)
+            [for (final h in _headers) r[h]?.toString() ?? ''],
+        ],
+        'numbers': [for (final r in _rows) r[_rowNumberKey]],
+        'savedAt': DateTime.now().toIso8601String(),
+      });
+    } catch (_) {}
+  }
+
+  void _saveSessionState() {
+    if (_headers.isEmpty) return;
+    try {
+      DatabaseService.uiPrefsBoxOrNull?.put(_sessionStateKey, <String, dynamic>{
+        'step': _currentStep,
+        'name': List<String>.from(_selectedNameCols),
+        'amount': List<String>.from(_selectedAmountCols),
+        'currencyCol': _currencyColumn,
+        'colCurrency': {
+          for (final e in _amountColCurrency.entries)
+            if (e.value != null) e.key: e.value,
+        },
+        if (_selectedDateRange != null) ...{
+          'from': _selectedDateRange!.start.millisecondsSinceEpoch,
+          'to': _selectedDateRange!.end.millisecondsSinceEpoch,
+        },
+      });
+    } catch (_) {}
+  }
+
+  /// يعيد الملف المقروء سابقًا (إن لم يُضغط «إنهاء»)
+  bool _restoreSession() {
+    final box = DatabaseService.uiPrefsBoxOrNull;
+    if (box == null) return false;
+    try {
+      final file = box.get(_sessionFileKey);
+      if (file is! Map) return false;
+      final headers = (file['headers'] as List?)?.map((e) => '$e').toList();
+      final rows = file['rows'] as List?;
+      if (headers == null || headers.isEmpty || rows == null) return false;
+      final letters = (file['letters'] as List?)?.map((e) => '$e').toList();
+      final titles = (file['titles'] as List?)?.map((e) => '$e').toList();
+      final numbers = file['numbers'] as List?;
+      _resetParsedData();
+      _headers.addAll(headers);
+      for (int c = 0; c < headers.length; c++) {
+        _columnLetters[headers[c]] = letters != null && c < letters.length
+            ? letters[c]
+            : _letterForIndex(c);
+        _headerTitles[headers[c]] =
+            titles != null && c < titles.length ? titles[c] : headers[c];
+      }
+      for (int i = 0; i < rows.length; i++) {
+        final cells = rows[i];
+        if (cells is! List) continue;
+        final number = numbers != null && i < numbers.length
+            ? numbers[i]
+            : null;
+        final row = <String, dynamic>{
+          if (number is int) _rowNumberKey: number,
+        };
+        for (int c = 0; c < headers.length; c++) {
+          final v = c < cells.length ? '${cells[c]}'.trim() : '';
+          row[headers[c]] = v.isEmpty ? null : v;
+        }
+        _rows.add(row);
+      }
+      _loadedFileName = '${file['file'] ?? ''}';
+      if (_loadedFileName.isEmpty) _loadedFileName = 'ملف';
+
+      final state = box.get(_sessionStateKey);
+      if (state is Map) {
+        List<String> cols(Object? v) => v is List
+            ? v.map((e) => '$e').where(_headers.contains).toList()
+            : <String>[];
+        _selectedNameCols.addAll(cols(state['name']));
+        _selectedAmountCols.addAll(cols(state['amount']));
+        final cc = state['currencyCol']?.toString();
+        _currencyColumn = cc != null && _headers.contains(cc) ? cc : null;
+        final colCurrency = state['colCurrency'];
+        if (colCurrency is Map) {
+          colCurrency.forEach((k, v) {
+            if (_headers.contains('$k')) _amountColCurrency['$k'] = '$v';
+          });
+        }
+        final from = state['from'], to = state['to'];
+        if (from is int && to is int) {
+          _selectedDateRange = DateTimeRange(
+            start: DateTime.fromMillisecondsSinceEpoch(from),
+            end: DateTime.fromMillisecondsSinceEpoch(to),
+          );
+        }
+        final step = state['step'];
+        _currentStep = step is int ? step.clamp(1, 3) : 1;
+      } else {
+        _currentStep = _isDashFormat ? 2 : 1;
+      }
+      if (_currentStep >= 2 && _selectedNameCols.isEmpty) _currentStep = 1;
+      if (_currentStep == 3 && _selectedAmountCols.isEmpty) _currentStep = 2;
+      return true;
+    } catch (_) {
+      _resetParsedData();
+      return false;
+    }
+  }
+
+  /// «إنهاء»: يغلق الملف وينسى الجلسة (اختيارات الأعمدة تبقى محفوظة)
+  Future<void> _confirmFinish() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: const Text('إنهاء التشييك؟'),
+          content: Text(
+            _loadedFileName.isEmpty
+                ? 'سيتم إغلاق الملف المقروء.'
+                : 'سيتم إغلاق الملف «$_loadedFileName» ولن يبقى محفوظًا. اختيارات الأعمدة والعملات تبقى محفوظة للمرة القادمة.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('رجوع'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.task_alt_rounded),
+              label: const Text('إنهاء'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      final box = DatabaseService.uiPrefsBoxOrNull;
+      await box?.delete(_sessionFileKey);
+      await box?.delete(_sessionStateKey);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _resetParsedData();
+      _currentStep = 0;
+      _isManualMode = false;
+    });
+    _showSnack('تم إنهاء التشييك وإغلاق الملف');
   }
 
   String _getSampleData(String header, {bool isNum = false}) {

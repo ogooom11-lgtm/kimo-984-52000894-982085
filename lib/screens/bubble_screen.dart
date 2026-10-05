@@ -28,7 +28,7 @@ import '../services/detection/text_tokens.dart' as tt;
 import '../services/detection/edit_message.dart' as em;
 
 /// مراحل التحديد
-enum SelectionStage { name, amount, currency, done }
+enum SelectionStage { name, amount, currency, done, newName }
 
 enum BubbleActionMode { add, edit, cancel }
 
@@ -94,6 +94,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   static const _chipGreen = Color(0xFF43A047); // green 600
   static const _chipEdit = Color(0xFFE08600); // amber — رسائل التعديل
   static const _forbiddenColor = Color(0xFFD84315); // deep orange 800
+  static const _newNameColor = Color(0xFF00897B); // teal — الاسم الجديد
 
   // ألوان الأدوار (قابلة للتخصيص من الإعدادات)
   Color get _nameColor => _prefs.nameColorValue;
@@ -152,6 +153,21 @@ class _BubbleScreenState extends State<BubbleScreen> {
   final Set<int> _editPickerOpen = {};
   final Map<int, _EditedSummary> _editedSummaries = {};
 
+  /// التعديل: الاسم الجديد المكتوب/الملصوق يدويًا (وإلا الكلمات المحددة له)
+  final Map<int, String> _editNewNameOverride = {};
+
+  /// نتائج البحث عن الحركة (إلغاء/تعديل) مع طريقة المطابقة لكل حركة
+  final Map<int, List<_TargetHit>> _targetHits = {};
+
+  /// فهرس أسماء حركات الحساب (الحالية + السابقة من سجل التعديل) للبحث السريع
+  _TargetSearchIndex? _searchIndex;
+  Future<_TargetSearchIndex>? _searchIndexBuilding;
+  int _searchIndexGeneration = 0;
+
+  /// الأسماء السابقة لحركات الحساب من سجل التعديل (تُقرأ مرة واحدة)
+  Map<int, List<String>>? _pastNamesByTx;
+  bool _pastNamesLoading = false;
+
   // تعارض/اختيارات المبلغ
   final Map<int, double> _amountOverride = {};
   final Set<int> _amountConflict = {};
@@ -160,6 +176,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
   /// رسائل فيها أكثر من مبلغ وأكثر من عملة: لا يُعتمد المبلغ تلقائيًا
   final Map<int, _MoneyAmbiguity> _moneyAmbiguity = {};
+
+  /// المبلغ الثاني للحركة (اختياري) وعملته — رسالة فيها مبلغان بعملتين
+  final Map<int, double> _secondAmount = {};
+  final Map<int, String> _secondCurrency = {};
 
   // إدخال يدوي للاسم
   final Map<int, String> _nameOverride = {};
@@ -420,6 +440,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
           _amountConflict.remove(i);
           _amountTextCandidate.remove(i);
           _amountCandidatesCache.remove(i);
+          _secondAmount.remove(i);
+          _secondCurrency.remove(i);
           // الاسم اليدوي (_nameOverride) يبقى كما هو
           _selections[i] = _autoDetect(_segments[i], i);
           _refreshStageForSegment(i);
@@ -532,104 +554,280 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _editFields.remove(segIndex);
     _editSearchQueries.remove(segIndex);
     _editPickerOpen.remove(segIndex);
+    _editNewNameOverride.remove(segIndex);
+    if (segIndex < _selections.length) {
+      _selections[segIndex].newNameTokens.clear();
+    }
+  }
+
+  // ====== التعديل: اسم البحث + الاسم الجديد ======
+
+  /// نص كلمات محددة من الرسالة (بترتيبها)
+  String _textOfTokens(ParsedSegment seg, Set<_TokPos> tokens) {
+    final sorted = tokens.toList()
+      ..sort(
+        (a, b) =>
+            a.line != b.line ? a.line.compareTo(b.line) : a.index - b.index,
+      );
+    final parts = <String>[];
+    for (final p in sorted) {
+      if (p.line < 0 || p.line >= seg.lines.length) continue;
+      final toks = _tokensFromLine(seg.lines[p.line]);
+      if (p.index < 0 || p.index >= toks.length) continue;
+      if (!_isIgnoredWord(toks[p.index])) parts.add(toks[p.index]);
+    }
+    return parts.join(' ');
+  }
+
+  /// الاسم الجديد في رسالة التعديل (المكتوب يدويًا أولًا ثم الكلمات المحددة)
+  String _editNewName(int segIndex) {
+    final manual = (_editNewNameOverride[segIndex] ?? '').trim();
+    if (manual.isNotEmpty) return manual;
+    if (segIndex >= _selections.length) return '';
+    final sel = _selections[segIndex];
+    if (sel.newNameTokens.isEmpty) return '';
+    return _textOfTokens(_segments[segIndex], sel.newNameTokens).trim();
+  }
+
+  /// الاسم الجديد مختلف عن اسم الحركة المختارة: يُختار «تعديل الاسم» تلقائيًا
+  void _syncEditNameField(int segIndex) {
+    final tx = _selectedEditTx(segIndex);
+    if (tx == null) return;
+    final chosen = _editFields.putIfAbsent(segIndex, () => <em.EditField>{});
+    final p = _editProposalsFor(
+      segIndex,
+      tx,
+    ).firstWhere((p) => p.field == em.EditField.name);
+    if (p.available) {
+      chosen.add(em.EditField.name);
+    } else {
+      chosen.remove(em.EditField.name);
+    }
+  }
+
+  void _setEditNewName(int segIndex, String? value) {
+    final v = value?.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+    setState(() {
+      _selections[segIndex].newNameTokens.clear();
+      if (v.isEmpty) {
+        _editNewNameOverride.remove(segIndex);
+      } else {
+        _editNewNameOverride[segIndex] = v;
+      }
+      _syncEditNameField(segIndex);
+    });
+  }
+
+  Future<void> _openEditNewNameDialog(int segIndex) async {
+    final result = await _editTextDialog(
+      title: 'الاسم الجديد',
+      initial: _editNewName(segIndex),
+      hint: 'الاسم الذي سيصبح اسم الحركة بعد التعديل',
+    );
+    if (!mounted || result == null || segIndex >= _selections.length) return;
+    _setEditNewName(segIndex, result);
+  }
+
+  /// نص الحافظة كسطر واحد (للصق الاسم مكان الاسم الحالي)
+  Future<String?> _clipboardName() async {
+    var text = '';
+    try {
+      final data = await Clipboard.getData('text/plain');
+      text = data?.text ?? '';
+    } catch (_) {
+      text = '';
+    }
+    text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) {
+      _snack('📋 الحافظة فارغة');
+      return null;
+    }
+    if (text.length > 120) text = text.substring(0, 120).trim();
+    return text;
+  }
+
+  /// زر اللصق بجانب فقاعة الاسم: نص الحافظة يصبح الاسم (في التعديل: اسم البحث)
+  Future<void> _pasteName(int segIndex) async {
+    final text = await _clipboardName();
+    if (text == null || !mounted || segIndex >= _selections.length) return;
+    if (_modeOf(segIndex) == BubbleActionMode.edit) {
+      _setEditSearch(segIndex, text);
+      _snack('تم لصق اسم البحث: $text');
+      return;
+    }
+    setState(() {
+      _nameOverride[segIndex] = text;
+      _selections[segIndex].nameTokens.clear();
+      _invalidateCancelCandidates(segIndex);
+      _refreshStageForSegment(segIndex);
+    });
+    if (_needsTarget(segIndex)) _requestCancelCandidates(segIndex);
+    _snack('تم لصق الاسم: $text');
+  }
+
+  Future<void> _pasteEditNewName(int segIndex) async {
+    final text = await _clipboardName();
+    if (text == null || !mounted || segIndex >= _selections.length) return;
+    _setEditNewName(segIndex, text);
+    _snack('تم لصق الاسم الجديد: $text');
   }
 
   List<String> _nameWords(String value) => _normalizeForSearch(
     value,
   ).split(' ').where((word) => word.trim().isNotEmpty).toList();
 
-  int _levenshtein(String a, String b) {
-    if (a == b) return 0;
-    if (a.isEmpty) return b.length;
-    if (b.isEmpty) return a.length;
-    var prev = List<int>.generate(b.length + 1, (i) => i);
-    for (var i = 0; i < a.length; i++) {
-      final curr = List<int>.filled(b.length + 1, 0);
-      curr[0] = i + 1;
-      for (var j = 0; j < b.length; j++) {
-        final cost = a.codeUnitAt(i) == b.codeUnitAt(j) ? 0 : 1;
-        curr[j + 1] = [
-          curr[j] + 1,
-          prev[j + 1] + 1,
-          prev[j] + cost,
-        ].reduce((x, y) => x < y ? x : y);
-      }
-      prev = curr;
-    }
-    return prev.last;
-  }
-
-  bool _similarNameWord(String a, String b) {
-    if (a == b) return true;
-    final minLen = a.length < b.length ? a.length : b.length;
-    if (minLen < 3) return false;
-    final maxDistance = minLen >= 7 ? 2 : 1;
-    return _levenshtein(a, b) <= maxDistance;
-  }
-
   /// اسم الحركة المطبّع (مع كاش لكل كائن حتى لا يُعاد التطبيع في كل مقارنة)
   String _txNormName(TransactionModel tx) =>
       _txNormNames[tx] ??= _normalizeForSearch(tx.beneficiary);
 
-  double _cancelNameScore(TransactionModel tx, String name) {
-    final wanted = _normalizeForSearch(name);
-    final candidate = _txNormName(tx);
-    if (wanted.isEmpty || candidate.isEmpty) return -1;
-    if (wanted == candidate) return 1;
+  // ====== البحث عن الحركة لرسائل الإلغاء والتعديل ======
 
-    final wantedWords = _nameWords(wanted);
-    final candidateWords = _nameWords(candidate);
-    if (wantedWords.isEmpty || candidateWords.isEmpty) return -1;
-    if (candidateWords.length < (wantedWords.length >= 3 ? 2 : 1)) return -1;
-    if ((candidateWords.length - wantedWords.length).abs() > 1) return -1;
-
-    final used = <int>{};
-    var matches = 0;
-    for (final wantedWord in wantedWords) {
-      for (var i = 0; i < candidateWords.length; i++) {
-        if (used.contains(i)) continue;
-        if (_similarNameWord(wantedWord, candidateWords[i])) {
-          used.add(i);
-          matches++;
-          break;
-        }
-      }
+  /// نتيجة البحث لهذه الحركة في هذه الفقاعة (مطابقة تامة؟ باسم سابق؟)
+  _TargetHit? _hitFor(int segIndex, TransactionModel tx) {
+    for (final h in _targetHits[segIndex] ?? const <_TargetHit>[]) {
+      if (identical(h.tx, tx) || h.tx.id == tx.id) return h;
     }
-
-    final requiredMatches = wantedWords.length <= 2
-        ? wantedWords.length
-        : wantedWords.length - 1;
-    if (matches < requiredMatches) return -1;
-    return matches / wantedWords.length;
+    return null;
   }
 
-  bool _isExactCancelMatch(TransactionModel tx, String name) =>
-      _normalizeForSearch(tx.beneficiary) == _normalizeForSearch(name);
+  bool _isExactHit(int segIndex, TransactionModel tx) =>
+      _hitFor(segIndex, tx)?.exact ?? false;
 
-  /// نتائج البحث بالاسم داخل هذا الحساب. للإلغاء: الحركات القابلة للإلغاء في
-  /// حسابات الشركات؛ للتعديل: كل حركات الحساب.
-  Future<List<TransactionModel>> _computeCancelCandidates(
-    String name, {
-    bool forEdit = false,
-  }) async {
-    final pool = <TransactionModel>[
+  /// الحركة «مضافة» (قابلة للإلغاء/التعديل كحركة جارية)
+  bool _isActiveTx(TransactionModel tx) => _isCompanyAccount
+      ? tx.companyMovementType != null && !tx.companyMovementType!.isCancelled
+      : tx.status == TransactionStatus.added;
+
+  /// إبطال فهرس الأسماء (بعد إضافة/تعديل/تراجع)
+  void _invalidateSearchIndex() {
+    _searchIndex = null;
+    _searchIndexBuilding = null;
+    _searchIndexGeneration++;
+  }
+
+  /// فهرس أسماء حركات هذا الحساب (يُبنى مرة واحدة على دفعات)
+  Future<_TargetSearchIndex> _ensureSearchIndex() {
+    final ready = _searchIndex;
+    if (ready != null) return Future<_TargetSearchIndex>.value(ready);
+    return _searchIndexBuilding ??= _buildSearchIndex();
+  }
+
+  Future<_TargetSearchIndex> _buildSearchIndex() async {
+    final gen = _searchIndexGeneration;
+    final accountTxs = [
       for (final tx in _allTransactions)
-        if (tx.accountId == widget.account.id &&
-            (forEdit ||
-                !_isCompanyAccount ||
-                (tx.companyMovementType != null &&
-                    !tx.companyMovementType!.isCancelled)))
-          tx,
+        if (tx.accountId == widget.account.id) tx,
     ];
-    final scored = <({TransactionModel tx, double score})>[];
+    final past = _pastNamesByTx ?? const <int, List<String>>{};
+    final entries = <_NameEntry>[];
     await runTimeSliced(
-      total: pool.length,
+      total: accountTxs.length,
       isCancelled: () => !mounted,
+      budget: const Duration(milliseconds: 16),
       work: (i) {
-        final score = _cancelNameScore(pool[i], name);
-        if (score >= 0) scored.add((tx: pool[i], score: score));
+        final tx = accountTxs[i];
+        final norm = _txNormName(tx);
+        if (norm.isNotEmpty) {
+          entries.add(_NameEntry(tx, norm, _nameWords(norm), null));
+        }
+        for (final old in past[tx.id] ?? const <String>[]) {
+          final n = _normalizeForSearch(old);
+          if (n.isEmpty || n == norm) continue;
+          entries.add(_NameEntry(tx, n, _nameWords(n), old));
+        }
       },
     );
+    final index = _TargetSearchIndex(entries);
+    if (gen == _searchIndexGeneration) {
+      _searchIndex = index;
+      _searchIndexBuilding = null;
+    }
+    return index;
+  }
+
+  /// الأسماء السابقة لحركات الحساب من سجل التعديل: رسالة الإلغاء/التعديل قد
+  /// تكون بالاسم القديم. تُقرأ مرة واحدة ثم يُعاد البحث في الفقاعات.
+  Future<void> _ensurePastNames() async {
+    if (_pastNamesByTx != null || _pastNamesLoading) return;
+    _pastNamesLoading = true;
+    final out = <int, List<String>>{};
+    try {
+      final edited = [
+        for (final tx in _allTransactions)
+          if (tx.accountId == widget.account.id &&
+              TxHistoryService.hasHistory(tx.id))
+            tx,
+      ];
+      for (final tx in edited) {
+        try {
+          final states = txPastStates(
+            await TxHistoryService.entriesFor(tx.id),
+            name: tx.beneficiary,
+            amount: tx.amount,
+            currency: tx.currency,
+          );
+          final names = <String>{
+            for (final s in states)
+              if (s.name.trim().isNotEmpty) s.name.trim(),
+          };
+          if (names.isNotEmpty) out[tx.id] = names.toList();
+        } catch (e) {
+          debugPrint('BubbleScreen history error: $e');
+        }
+        if (!mounted) return;
+      }
+    } finally {
+      _pastNamesLoading = false;
+    }
+    if (!mounted) return;
+    _pastNamesByTx = out;
+    if (out.isEmpty) return;
+    setState(() {
+      _invalidateSearchIndex();
+      for (var i = 0; i < _selections.length; i++) {
+        if (_needsTarget(i)) {
+          _cancelCandidateQueries.remove(i);
+          _cancelCandidatesCache.remove(i);
+          _cancelCandidatesLoading.remove(i);
+        }
+      }
+    });
+    for (var i = 0; i < _selections.length; i++) {
+      if (_needsTarget(i)) _requestCancelCandidates(i);
+    }
+  }
+
+  /// نتائج البحث بالاسم داخل هذا الحساب (بالاسم الحالي أو السابق للحركة).
+  /// للإلغاء: الحركات القابلة للإلغاء في حسابات الشركات؛ للتعديل: كل حركات
+  /// الحساب. الحركات المضافة بعد وقت الرسالة تُتجاهل (لا يمكن أن تكون المقصودة).
+  Future<List<_TargetHit>> _computeCancelCandidates(
+    String name, {
+    bool forEdit = false,
+    DateTime? before,
+  }) async {
+    final index = await _ensureSearchIndex();
+    if (!mounted) return const [];
+    final wanted = _normalizeForSearch(name);
+    final words = _nameWords(wanted);
+    // أوقات الرسائل بالدقيقة: كل ما أضيف خلال دقيقة الرسالة يبقى
+    final limit = before == null
+        ? null
+        : DateTime(
+            before.year,
+            before.month,
+            before.day,
+            before.hour,
+            before.minute,
+          ).add(const Duration(minutes: 1));
+    final hits = <_TargetHit>[
+      for (final h in index.search(wanted, words))
+        if ((forEdit ||
+                !_isCompanyAccount ||
+                (h.tx.companyMovementType != null &&
+                    !h.tx.companyMovementType!.isCancelled)) &&
+            (limit == null || h.tx.date.isBefore(limit)))
+          h,
+    ];
 
     int statusRank(TransactionStatus status) {
       switch (status) {
@@ -642,17 +840,24 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
     }
 
-    scored.sort((a, b) {
+    hits.sort((a, b) {
       final scoreCompare = b.score.compareTo(a.score);
       if (scoreCompare != 0) return scoreCompare;
+      // الاسم الحالي قبل الاسم السابق
+      final pastCompare = (a.pastName == null ? 0 : 1).compareTo(
+        b.pastName == null ? 0 : 1,
+      );
+      if (pastCompare != 0) return pastCompare;
       final statusCompare = statusRank(
         a.tx.status,
       ).compareTo(statusRank(b.tx.status));
       if (statusCompare != 0) return statusCompare;
-      return b.tx.date.compareTo(a.tx.date);
+      final dateCompare = b.tx.date.compareTo(a.tx.date);
+      if (dateCompare != 0) return dateCompare;
+      return b.tx.id.compareTo(a.tx.id);
     });
 
-    return scored.map((e) => e.tx).toList();
+    return hits;
   }
 
   String _cancelQueryForSegment(int segIndex) =>
@@ -673,6 +878,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   void _invalidateCancelCandidates(int segIndex) {
+    _targetHits.remove(segIndex);
     _cancelCandidatesCache.remove(segIndex);
     _cancelCandidateQueries.remove(segIndex);
     _cancelCandidatesLoading.remove(segIndex);
@@ -707,17 +913,30 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _cancelCandidateQueries[segIndex] = query;
     });
 
+    // رسالة الإلغاء/التعديل قد تكون بالاسم القديم للحركة
+    unawaited(_ensurePastNames());
+
+    final gen = _searchIndexGeneration;
     _computeCancelCandidates(
       name,
       forEdit: _modeOf(segIndex) == BubbleActionMode.edit,
-    ).then((candidates) {
-      if (!mounted) return;
+      before: _segments[segIndex].timestamp,
+    ).then((hits) {
+      if (!mounted || segIndex >= _selections.length) return;
       final currentQuery = _cancelQueryForSegment(segIndex);
       if (currentQuery != query) return;
+      if (gen != _searchIndexGeneration) {
+        // تغيّر الفهرس أثناء البحث (أسماء سابقة/حركات جديدة): نعيد البحث
+        _cancelCandidatesLoading.remove(segIndex);
+        _cancelCandidateQueries.remove(segIndex);
+        _requestCancelCandidates(segIndex);
+        return;
+      }
       setState(() {
         _cancelCandidatesLoading.remove(segIndex);
         _cancelCandidateQueries[segIndex] = query;
-        _cancelCandidatesCache[segIndex] = candidates;
+        _targetHits[segIndex] = hits;
+        _cancelCandidatesCache[segIndex] = [for (final h in hits) h.tx];
       });
     });
   }
@@ -1373,6 +1592,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
 
       // رسالة بأكثر من عملة: عملة المبلغ المختار هي المكتوبة في سطره
+      _moneyAmbiguity[segIndex]?.autoPicked = false;
       if (_moneyAmbiguity.containsKey(segIndex) &&
           sel.currencyFromMenu == null &&
           _hasAmountFor(segIndex, sel)) {
@@ -1498,11 +1718,24 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _suggestCurrencySymbols.addAll(curRes.suggestSymbols);
     _suggestCurrencyNames.addAll(curRes.suggestNames);
 
-    // 6) أكثر من مبلغ وأكثر من عملة: لا نعرف أي مبلغ لأي عملة، فلا نعتمد مبلغًا
-    //    ويختاره المستخدم (مع تحذير في الفقاعة). العملة تبقى المكتشفة.
+    // 6) تعارض في المبلغ: أكثر من مبلغ وأكثر من عملة (لا نعرف أي مبلغ لأي
+    //    عملة)، أو مبلغان مختلفان أكيدان («50,000 ل.س.ج» و«50,مليون»)، أو المبلغ
+    //    بالحروف غير المبلغ بالأرقام. حسب الإعدادات: يختار المستخدم المبلغ
+    //    بنفسه (مع تحذير)، أو يُعتمد الأرجح تلقائيًا مع تنبيه. العملة تبقى
+    //    المكتشفة.
     _moneyAmbiguity.remove(segIndex);
-    if (amtRes.candidateValues.length >= 2 && curRes.hasMultipleCurrencies) {
-      _moneyAmbiguity[segIndex] = _MoneyAmbiguity(
+    final multiCurrency =
+        amtRes.candidateValues.length >= 2 && curRes.hasMultipleCurrencies;
+    if (multiCurrency || amtRes.hasConflictingAmounts) {
+      final confirm = _prefs.confirmMultiAmount;
+      _TokPos? originalOf(ad.Position p) {
+        if (p.x < 0 || p.x >= amountForward.length) return null;
+        final row = amountForward[p.x];
+        if (p.y < 0 || p.y >= row.originals.length) return null;
+        return row.originals[p.y];
+      }
+
+      final amb = _MoneyAmbiguity(
         currencies: List<String>.from(curRes.currencyNames),
         options: [
           for (int k = 0; k < amtRes.candidateValues.length; k++)
@@ -1511,15 +1744,43 @@ class _BubbleScreenState extends State<BubbleScreen> {
               currency: k < amtRes.candidatePositions.length
                   ? _currencyOnLine(seg, sel, amtRes.candidatePositions[k].x)
                   : null,
+              pos: k < amtRes.candidatePositions.length
+                  ? originalOf(amtRes.candidatePositions[k])
+                  : null,
             ),
         ],
+        multiCurrency: multiCurrency,
+        mismatch: amtRes.wordsDigitsMismatch,
+        strongValues: List<double>.from(amtRes.strongValues),
+        autoPicked: !confirm,
       );
-      sel.amount = null;
-      _amountOverride.remove(segIndex);
-      _amountTextCandidate.remove(segIndex);
+      _moneyAmbiguity[segIndex] = amb;
       _amountConflict.remove(segIndex);
-      _amountCandidatesCache.remove(segIndex);
-      if (_hasNameFor(segIndex, sel)) sel.stage = SelectionStage.amount;
+      if (confirm) {
+        sel.amount = null;
+        _amountOverride.remove(segIndex);
+        _amountTextCandidate.remove(segIndex);
+        _amountCandidatesCache.remove(segIndex);
+        if (_hasNameFor(segIndex, sel)) sel.stage = SelectionStage.amount;
+      } else if (multiCurrency && amb.pairHasTwoCurrencies) {
+        // بدون تأكيد + مبلغان بعملتين: يُعتمدان معًا (المبلغ والمبلغ الثاني)
+        final pair = amb.firstPair!;
+        _amountOverride[segIndex] = pair.$1.value;
+        sel.amount = pair.$1.pos;
+        _applyLineCurrency(sel, pair.$1.currency!);
+        _secondAmount[segIndex] = pair.$2.value;
+        _secondCurrency[segIndex] = pair.$2.currency!.name;
+        amb.autoPicked = false;
+        amb.autoBoth = true;
+      } else {
+        // بدون تأكيد: المبلغ الأرجح يبقى، وعملته هي المكتوبة في سطره
+        final picked = _buildSelectedAmount(seg, sel, segIndex);
+        final c = picked == null ? null : amb.optionFor(picked)?.currency;
+        if (c != null && sel.currencyFromMenu == null) {
+          _applyLineCurrency(sel, c);
+        }
+        if (picked == null) amb.autoPicked = false;
+      }
     }
 
     return sel;
@@ -1590,6 +1851,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
         return "حدد العملة أو اخترها";
       case SelectionStage.done:
         return "تم التحديد";
+      case SelectionStage.newName:
+        return "حدد الاسم الجديد";
     }
   }
 
@@ -1598,6 +1861,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
     setState(() {
       final sel = _selections[segIndex];
       sel.nameTokens.clear();
+      sel.newNameTokens.clear();
+      _editNewNameOverride.remove(segIndex);
+      _secondAmount.remove(segIndex);
+      _secondCurrency.remove(segIndex);
       sel.amount = null;
       sel.currencyToken = null;
       sel.currencyFromMenu = null;
@@ -1619,7 +1886,13 @@ class _BubbleScreenState extends State<BubbleScreen> {
         case 'name':
           sel.nameTokens.clear();
           _nameOverride.remove(segIndex);
+          _editSearchQueries.remove(segIndex);
           _invalidateCancelCandidates(segIndex);
+          break;
+        case 'newName':
+          sel.newNameTokens.clear();
+          _editNewNameOverride.remove(segIndex);
+          _syncEditNameField(segIndex);
           break;
         case 'currency':
           sel.currencyToken = null;
@@ -1659,13 +1932,20 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final isName = sel.nameTokens.contains(pos);
     final isAmt = (sel.amount == pos);
     final isCur = sel.isCurrencyAt(pos);
+    final isNew = sel.newNameTokens.contains(pos);
 
-    if (current == SelectionStage.name && (isAmt || isCur))
-      return isAmt ? 'مبلغ' : 'عملة';
-    if (current == SelectionStage.amount && (isName || isCur))
-      return isName ? 'اسم' : 'عملة';
-    if (current == SelectionStage.currency && (isName || isAmt))
-      return isName ? 'اسم' : 'مبلغ';
+    if (current == SelectionStage.name && (isAmt || isCur || isNew)) {
+      return isAmt ? 'مبلغ' : (isCur ? 'عملة' : 'اسم جديد');
+    }
+    if (current == SelectionStage.amount && (isName || isCur || isNew)) {
+      return isName ? 'اسم' : (isCur ? 'عملة' : 'اسم جديد');
+    }
+    if (current == SelectionStage.currency && (isName || isAmt || isNew)) {
+      return isName ? 'اسم' : (isAmt ? 'مبلغ' : 'اسم جديد');
+    }
+    if (current == SelectionStage.newName && (isName || isAmt || isCur)) {
+      return isName ? 'اسم البحث' : (isAmt ? 'مبلغ' : 'عملة');
+    }
     return null;
   }
 
@@ -1678,6 +1958,15 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     if (isAmt && isCur) {
       _showClearAmountOrCurrencyDialog(segIndex);
+      return;
+    }
+
+    if (sel.newNameTokens.contains(pos)) {
+      setState(() {
+        sel.newNameTokens.remove(pos);
+        _editNewNameOverride.remove(segIndex);
+        _syncEditNameField(segIndex);
+      });
       return;
     }
 
@@ -1746,7 +2035,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     // كلمات ignored لا تُستخدم كاسم
-    if (sel.stage == SelectionStage.name && _isIgnoredWord(tok)) {
+    if ((sel.stage == SelectionStage.name ||
+            sel.stage == SelectionStage.newName) &&
+        _isIgnoredWord(tok)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -1805,6 +2096,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
               ..clear()
               ..addAll(res.span.map((ti) => _TokPos(lineIndex, ti)));
             _nameOverride.remove(segIndex);
+            // التعديل: الاسم المضغوط هو اسم البحث (بدل البحث اليدوي)
+            _editSearchQueries.remove(segIndex);
             _invalidateCancelCandidates(segIndex);
             _refreshStageForSegment(segIndex);
           });
@@ -1816,12 +2109,55 @@ class _BubbleScreenState extends State<BubbleScreen> {
               sel.nameTokens.add(pos);
             }
             _nameOverride.remove(segIndex);
+            _editSearchQueries.remove(segIndex);
             _invalidateCancelCandidates(segIndex);
             _refreshStageForSegment(segIndex);
           });
         }
         if (_needsTarget(segIndex)) {
           _requestCancelCandidates(segIndex);
+        }
+        return;
+
+      case SelectionStage.newName:
+        // التعديل: كلمات الاسم الجديد (مثل الاسم: يمتد تلقائيًا)
+        final keys = _nameConfig.keysOf(tokensThisLine);
+        final forbiddenIdx = _nameConfig.forbiddenMask(keys);
+        if (forbiddenIdx.contains(tokenIndex) &&
+            !sel.newNameTokens.contains(pos)) {
+          _snack('«$tok» كلمة ممنوعة ولا يمكن أن تكون جزءًا من الاسم');
+          return;
+        }
+        final sameLine = sel.newNameTokens.any((p) => p.line == lineIndex);
+        if (sel.newNameTokens.isEmpty || !sameLine) {
+          final res = _nameSpanFromTap(
+            segIndex,
+            lineIndex,
+            tokenIndex,
+            tokensThisLine,
+            keys,
+            forbiddenIdx,
+            stage: SelectionStage.newName,
+          );
+          if (res.span.isEmpty) {
+            _snack(res.reason ?? 'تعذر تحديد الاسم من هذه الكلمة');
+            return;
+          }
+          setState(() {
+            sel.newNameTokens
+              ..clear()
+              ..addAll(res.span.map((ti) => _TokPos(lineIndex, ti)));
+            _editNewNameOverride.remove(segIndex);
+            _syncEditNameField(segIndex);
+          });
+        } else {
+          setState(() {
+            if (!sel.newNameTokens.remove(pos) && !_isIgnoredWord(tok)) {
+              sel.newNameTokens.add(pos);
+            }
+            _editNewNameOverride.remove(segIndex);
+            _syncEditNameField(segIndex);
+          });
         }
         return;
 
@@ -1893,12 +2229,13 @@ class _BubbleScreenState extends State<BubbleScreen> {
     int tokenIndex,
     List<String> tokens,
     List<String> keys,
-    Set<int> forbiddenIdx,
-  ) {
+    Set<int> forbiddenIdx, {
+    SelectionStage stage = SelectionStage.name,
+  }) {
     final sel = _selections[segIndex];
     bool extraStop(int i) {
       final p = _TokPos(lineIndex, i);
-      return _occupiedRoleName(sel, p, SelectionStage.name) != null ||
+      return _occupiedRoleName(sel, p, stage) != null ||
           _isLockedToken(segIndex, lineIndex, i) ||
           sel.phoneLikeTokens.contains(p) ||
           tt.isPhoneLike(tokens[i]);
@@ -2732,6 +3069,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     if (sel.nameTokens.contains(_TokPos(li, ti))) {
       return _readable(ctx, _nameColor);
     }
+    if (sel.newNameTokens.contains(_TokPos(li, ti))) {
+      return _readable(ctx, _newNameColor);
+    }
     if (_isDualAmountCurrencyPos(segIndex, li, ti)) return cs.onSurface;
     if (_isAmountPos(segIndex, li, ti)) return _readable(ctx, _amountColor);
     if (_isCurrencyPos(segIndex, li, ti)) {
@@ -2761,6 +3101,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     if (_selections[segIndex].nameTokens.contains(pos)) {
       return _roleDecoration(_nameColor, radius);
+    }
+
+    if (_selections[segIndex].newNameTokens.contains(pos)) {
+      return _roleDecoration(_newNameColor, radius);
     }
 
     if (_isDualAmountCurrencyPos(segIndex, li, ti)) {
@@ -3198,6 +3542,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final pos = _TokPos(lineIndex, tokenIndex);
     final selected =
         sel.nameTokens.contains(pos) ||
+        sel.newNameTokens.contains(pos) ||
         sel.amount == pos ||
         sel.isCurrencyAt(pos);
     final isLocked = _isLockedToken(segIndex, lineIndex, tokenIndex);
@@ -3395,6 +3740,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _amountConflict.remove(segIndex);
       _amountCandidatesCache.remove(segIndex);
       sel.amount = null;
+      _moneyAmbiguity[segIndex]?.autoPicked = false;
+      _moneyAmbiguity[segIndex]?.autoBoth = false;
+      // اختيار مبلغ واحد: لا مبلغ ثاني
+      _secondAmount.remove(segIndex);
+      _secondCurrency.remove(segIndex);
       // رسالة بأكثر من عملة: المبلغ يأخذ العملة المكتوبة في سطره
       final c = _moneyAmbiguity[segIndex]?.optionFor(amount)?.currency;
       if (c != null && sel.currencyFromMenu == null) {
@@ -3413,6 +3763,102 @@ class _BubbleScreenState extends State<BubbleScreen> {
         ),
       ),
     );
+  }
+
+  /// «اعتماد المبلغين معًا»: الأول مبلغ الحركة والثاني «المبلغ الثاني»
+  void _applyBothAmounts(int segIndex) {
+    final amb = _moneyAmbiguity[segIndex];
+    final pair = amb?.firstPair;
+    if (amb == null || pair == null) return;
+    final seg = _segments[segIndex];
+    String? second;
+    setState(() {
+      final sel = _selections[segIndex];
+      amb.autoPicked = false;
+      amb.autoBoth = false;
+      _amountOverride[segIndex] = pair.$1.value;
+      sel.amount = pair.$1.pos;
+      _amountConflict.remove(segIndex);
+      _amountCandidatesCache.remove(segIndex);
+      final c1 = pair.$1.currency;
+      if (c1 != null && sel.currencyFromMenu == null) {
+        _applyLineCurrency(sel, c1);
+      }
+      _secondAmount[segIndex] = pair.$2.value;
+      final c2 = pair.$2.currency?.name ?? _buildSelectedCurrency(seg, sel);
+      if (c2 != null && c2.trim().isNotEmpty) {
+        _secondCurrency[segIndex] = c2;
+      } else {
+        _secondCurrency.remove(segIndex);
+      }
+      second = c2;
+      _refreshStageForSegment(segIndex);
+    });
+    _snack(
+      'تم اعتماد المبلغين: ${_fmtAmount(pair.$1.value)} '
+      '${pair.$1.currency?.name ?? ''} + ${_fmtAmount(pair.$2.value)} ${second ?? ''}',
+    );
+  }
+
+  /// كتابة/تعديل المبلغ الثاني
+  Future<void> _openSecondAmountDialog(int segIndex) async {
+    final v = await _numberDialog(
+      title: 'المبلغ الثاني',
+      initial: _secondAmount[segIndex],
+    );
+    if (!mounted || v == null || segIndex >= _selections.length) return;
+    if (v <= 0) {
+      setState(() {
+        _secondAmount.remove(segIndex);
+        _secondCurrency.remove(segIndex);
+      });
+      return;
+    }
+    setState(() => _secondAmount[segIndex] = v);
+    if (_secondCurrency[segIndex] == null) await _pickSecondCurrency(segIndex);
+  }
+
+  /// عملة المبلغ الثاني (من عملات الإعدادات)
+  Future<void> _pickSecondCurrency(int segIndex) async {
+    final names = _currencyMap.values.toSet().toList()..sort();
+    if (names.isEmpty) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: SimpleDialog(
+          title: const Text('عملة المبلغ الثاني'),
+          children: [
+            for (final n in names)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, n),
+                child: Row(
+                  children: [
+                    Icon(
+                      _secondCurrency[segIndex] == n
+                          ? Icons.radio_button_checked_rounded
+                          : Icons.radio_button_off_rounded,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(n)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || picked == null || segIndex >= _selections.length) return;
+    setState(() => _secondCurrency[segIndex] = picked);
+  }
+
+  void _clearSecondAmount(int segIndex) {
+    setState(() {
+      _secondAmount.remove(segIndex);
+      _secondCurrency.remove(segIndex);
+      _moneyAmbiguity[segIndex]?.autoBoth = false;
+    });
   }
 
   /// نص زر المبلغ في رسالة بأكثر من عملة: المبلغ مع عملة سطره إن عُرفت
@@ -3673,6 +4119,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _shiftKeys(_editFields, deletedIndex);
     _shiftKeys(_editSearchQueries, deletedIndex);
     _shiftKeys(_editedSummaries, deletedIndex);
+    _shiftKeys(_editNewNameOverride, deletedIndex);
+    _shiftKeys(_targetHits, deletedIndex);
+    _shiftKeys(_secondAmount, deletedIndex);
+    _shiftKeys(_secondCurrency, deletedIndex);
     final newPickerOpen = <int>{
       for (final v in _editPickerOpen)
         if (v != deletedIndex) v > deletedIndex ? v - 1 : v,
@@ -3757,12 +4207,17 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
       if (beneficiary.isEmpty || amount <= 0 || currency == null) continue;
 
+      final second = _secondAmount[i];
+      final hasSecond = second != null && second > 0;
+
       drafts.add(
         _PendingTxDraft(
           segIndex: i,
           beneficiary: beneficiary,
           amount: amount,
           currency: currency,
+          secondAmount: hasSecond ? second : null,
+          secondCurrency: hasSecond ? (_secondCurrency[i] ?? currency) : null,
           companyMovementType: _isCompanyAccount
               ? _companyMovementForSegment(i)
               : null,
@@ -4698,6 +5153,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
           beneficiary: d.beneficiary,
           amount: d.amount,
           currency: d.currency,
+          secondAmount: d.secondAmount,
+          secondCurrency: d.secondCurrency,
           notes: "",
           status: TransactionStatus.added,
           date: d.date,
@@ -4706,6 +5163,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
         await DatabaseService.addTransaction(tx);
         _allTransactions.add(tx);
+        _invalidateSearchIndex();
         if (!_knownBeneficiaryNames.contains(tx.beneficiary)) {
           _knownBeneficiaryNames.add(tx.beneficiary);
           _nameConfig.addKnownName(tx.beneficiary);
@@ -4725,10 +5183,13 @@ class _BubbleScreenState extends State<BubbleScreen> {
           name: d.beneficiary,
           amount: d.amount,
           currency: d.currency,
+          secondAmount: d.secondAmount,
+          secondCurrency: d.secondCurrency,
           companyMovementType: d.companyMovementType,
           date: d.date,
         );
-        if (_hasMultipleAmountCandidates(d.segIndex)) {
+        if (d.secondAmount == null &&
+            _hasMultipleAmountCandidates(d.segIndex)) {
           multiAmountSaved.add(d.segIndex);
         }
         tick('جارٍ حفظ الحركات...');
@@ -4889,6 +5350,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
         _allTransactions.removeWhere((t) => deletedIds.contains(t.id));
         // التراجع عن تعديل يعيد الأسماء القديمة: نعيد تطبيع الأسماء
         _txNormNames = Expando<String>('txNormName');
+        _invalidateSearchIndex();
+        _pastNamesByTx = null;
         for (var i = 0; i < _selections.length; i++) {
           if (_needsTarget(i)) {
             _invalidateCancelCandidates(i);
@@ -4913,6 +5376,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
     setState(() {
       _allTransactions = DatabaseService.transactionsBox.values.toList();
       _txNormNames = Expando<String>('txNormName');
+      _invalidateSearchIndex();
+      _pastNamesByTx = null;
       for (var i = 0; i < _selections.length; i++) {
         if (_needsTarget(i)) {
           _invalidateCancelCandidates(i);
@@ -4925,11 +5390,16 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   Future<void> _openBubbleSettings() async {
+    final confirmBefore = _prefs.confirmMultiAmount;
     await Navigator.of(
       context,
     ).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
     if (!mounted) return;
     setState(_reloadSettings);
+    // تغيّر خيار «تأكيد عند وجود أكثر من مبلغ»: نعيد تحليل الفقاعات غير المحفوظة
+    if (confirmBefore != _prefs.confirmMultiAmount) {
+      await _reanalyzeUnsaved();
+    }
   }
 
   Color _stageBorderColor(SelectionStage s, bool ready) {
@@ -4943,6 +5413,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
         return _chipBlue;
       case SelectionStage.done:
         return _chipGreen;
+      case SelectionStage.newName:
+        return _newNameColor;
     }
   }
 
@@ -4976,8 +5448,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     if (_modeOf(segIndex) == BubbleActionMode.edit) {
+      if (sel.stage == SelectionStage.newName) {
+        return 'حدد الاسم الجديد الذي ستصبح عليه الحركة';
+      }
       if (_targetSearchName(segIndex).isEmpty) {
-        return 'حدد الاسم أو اضغط «بحث باسم آخر» لعرض الحركات المراد تعديلها';
+        return 'حدد اسم البحث (أو الصقه/اكتبه) لعرض الحركات المراد تعديلها';
       }
       if (_selectedEditTx(segIndex) == null) {
         return 'اختر الحركة التي تريد تعديلها من النتائج';
@@ -5028,22 +5503,33 @@ class _BubbleScreenState extends State<BubbleScreen> {
   String _accountNameForTx(TransactionModel tx) =>
       _accountNamesById[tx.accountId] ?? 'حساب #${tx.accountId}';
 
-  List<TransactionModel> _visibleCancelCandidates(int segIndex) {
+  /// النتائج المعروضة قبل «عرض المزيد»: إذا وُجدت حركات مضافة بالاسم نفسه
+  /// تمامًا تُعرض وحدها (بدون المستلمة والملغية والمتشابهة)
+  List<TransactionModel> _collapsedTargetCandidates(
+    int segIndex,
+    bool Function(TransactionModel) active,
+  ) {
     final candidates = _cancelCandidatesForSegment(segIndex);
-    final added = candidates.where(_canCancel).toList();
-
-    if (_cancelShowMore[segIndex] == true) return candidates;
-    if (added.isNotEmpty) return added.take(5).toList();
+    final exactActive = [
+      for (final tx in candidates)
+        if (active(tx) && _isExactHit(segIndex, tx)) tx,
+    ];
+    if (exactActive.isNotEmpty) return exactActive.take(5).toList();
+    final activeOnes = candidates.where(active).toList();
+    if (activeOnes.isNotEmpty) return activeOnes.take(5).toList();
     return candidates.take(5).toList();
   }
 
-  bool _hasMoreCancelCandidates(int segIndex) {
-    final candidates = _cancelCandidatesForSegment(segIndex);
-    final visible = _visibleCancelCandidates(segIndex);
-    return candidates.length > visible.length ||
-        (candidates.any((tx) => !_canCancel(tx)) &&
-            (_cancelShowMore[segIndex] != true));
+  List<TransactionModel> _visibleCancelCandidates(int segIndex) {
+    if (_cancelShowMore[segIndex] == true) {
+      return _cancelCandidatesForSegment(segIndex);
+    }
+    return _collapsedTargetCandidates(segIndex, _canCancel);
   }
+
+  bool _hasMoreCancelCandidates(int segIndex) =>
+      _cancelCandidatesForSegment(segIndex).length >
+      _collapsedTargetCandidates(segIndex, _canCancel).length;
 
   Widget _buildModeSwitch(int segIndex) {
     final mode = _modeOf(segIndex);
@@ -5230,6 +5716,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
           case SelectionStage.currency:
           case SelectionStage.done:
             _clearCategory(segIndex, 'currency');
+            break;
+          case SelectionStage.newName:
+            _clearCategory(segIndex, 'newName');
             break;
         }
         return;
@@ -5428,7 +5917,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 : _txStatusColor(tx.status);
             final statusDate = _txStatusDate(tx);
             final selected = _cancelSelectedTxIds[segIndex] == tx.id;
-            final exactMatch = _isExactCancelMatch(tx, name);
+            final hit = _hitFor(segIndex, tx);
+            final exactMatch = hit?.exact ?? false;
+            final pastName = hit?.pastName;
 
             return Container(
               margin: const EdgeInsets.only(bottom: 8),
@@ -5462,17 +5953,38 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     const SizedBox(height: 5),
                     Align(
                       alignment: Alignment.centerRight,
-                      child: Chip(
-                        label: Text(exactMatch ? 'مطابقة تمامًا' : 'متشابهة'),
-                        visualDensity: VisualDensity.compact,
-                        avatar: Icon(
-                          exactMatch
-                              ? Icons.verified_rounded
-                              : Icons.compare_arrows_rounded,
-                          size: 16,
-                        ),
-                        backgroundColor: (exactMatch ? _chipGreen : _chipYellow)
-                            .withOpacity(.12),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          Chip(
+                            label: Text(
+                              exactMatch ? 'مطابقة تمامًا' : 'متشابهة',
+                            ),
+                            visualDensity: VisualDensity.compact,
+                            avatar: Icon(
+                              exactMatch
+                                  ? Icons.verified_rounded
+                                  : Icons.compare_arrows_rounded,
+                              size: 16,
+                            ),
+                            backgroundColor:
+                                (exactMatch ? _chipGreen : _chipYellow)
+                                    .withValues(alpha: .12),
+                          ),
+                          if (pastName != null)
+                            Chip(
+                              label: Text('بالاسم السابق: $pastName'),
+                              visualDensity: VisualDensity.compact,
+                              avatar: const Icon(
+                                Icons.history_rounded,
+                                size: 16,
+                              ),
+                              backgroundColor: _chipIndigo.withValues(
+                                alpha: .12,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ],
@@ -5547,7 +6059,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       oldName: tx.beneficiary,
       oldAmount: tx.amount,
       oldCurrency: tx.currency,
-      newName: _buildSelectedName(seg, sel, segIndex),
+      newName: _editNewName(segIndex),
       newAmount: _buildSelectedAmount(seg, sel, segIndex),
       newCurrency: _buildSelectedCurrency(seg, sel),
       normalizeName: _normalizeForSearch,
@@ -5592,9 +6104,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
           transaction: tx,
           proposals: proposals,
           fields: fields,
-          name: fields.contains(em.EditField.name)
-              ? _buildSelectedName(seg, sel, i).trim()
-              : null,
+          name: fields.contains(em.EditField.name) ? _editNewName(i) : null,
           amount: fields.contains(em.EditField.amount)
               ? _buildSelectedAmount(seg, sel, i)
               : null,
@@ -5614,6 +6124,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
       _editFields[segIndex] = em.defaultEditSelection(
         _editProposalsFor(segIndex, tx),
       );
+      _syncEditNameField(segIndex);
     });
   }
 
@@ -5632,6 +6143,26 @@ class _BubbleScreenState extends State<BubbleScreen> {
         _editSearchQueries.remove(segIndex);
       } else {
         _editSearchQueries[segIndex] = q;
+        // البحث باسم آخر: الاسم المحدد في الرسالة يصبح «الاسم الجديد» (كما
+        // كان سابقًا) ما لم يُحدَّد اسم جديد
+        final sel = _selections[segIndex];
+        final messageName = _buildSelectedName(
+          _segments[segIndex],
+          sel,
+          segIndex,
+        ).trim();
+        if (_editNewName(segIndex).isEmpty &&
+            messageName.isNotEmpty &&
+            _normalizeForSearch(messageName) != _normalizeForSearch(q)) {
+          if (sel.nameTokens.isNotEmpty && _nameOverride[segIndex] == null) {
+            sel.newNameTokens.addAll(sel.nameTokens);
+            sel.nameTokens.clear();
+          } else {
+            _editNewNameOverride[segIndex] = messageName;
+            _nameOverride.remove(segIndex);
+            sel.nameTokens.clear();
+          }
+        }
       }
       _invalidateCancelCandidates(segIndex);
       _editPickerOpen.add(segIndex);
@@ -5775,7 +6306,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     final showAll = _cancelShowMore[segIndex] == true;
-    final visible = showAll ? candidates : candidates.take(5).toList();
+    final collapsed = _collapsedTargetCandidates(segIndex, _isActiveTx);
+    final visible = showAll ? candidates : collapsed;
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Column(
@@ -5792,7 +6324,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
           const SizedBox(height: 8),
           for (final tx in visible)
             _buildEditCandidateRow(context, segIndex, tx, searchName),
-          if (candidates.length > 5)
+          if (candidates.length > collapsed.length)
             Align(
               alignment: AlignmentDirectional.centerStart,
               child: TextButton.icon(
@@ -5804,7 +6336,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
                       : Icons.expand_more_rounded,
                 ),
                 label: Text(
-                  showAll ? 'عرض أقل' : 'عرض الكل (${candidates.length})',
+                  showAll ? 'عرض أقل' : 'عرض المزيد (${candidates.length})',
                 ),
               ),
             ),
@@ -5822,7 +6354,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final cs = Theme.of(context).colorScheme;
     const color = _chipEdit;
     final selected = _editSelectedTxIds[segIndex] == tx.id;
-    final exact = _isExactCancelMatch(tx, searchName);
+    final hit = _hitFor(segIndex, tx);
+    final exact = hit?.exact ?? false;
+    final pastName = hit?.pastName;
     final movement = tx.companyMovementType;
     final statusColor = movement != null
         ? (movement.isCancelled
@@ -5877,6 +6411,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
                           _statusChip(context, _anyTxLabel(tx), statusColor),
                           if (exact)
                             _statusChip(context, 'مطابقة تمامًا', _chipGreen),
+                          if (pastName != null)
+                            _statusChip(
+                              context,
+                              'بالاسم السابق: $pastName',
+                              _chipIndigo,
+                            ),
                           Text(
                             _fmtDateTime(tx.date),
                             style: TextStyle(
@@ -5979,7 +6519,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final Widget detail;
     if (p.newText == null) {
       detail = Text(
-        'لم يُحدَّد في الرسالة',
+        p.field == em.EditField.name
+            ? 'بدون تغيير — حدد «الاسم الجديد» إن أردت تعديله'
+            : 'لم يُحدَّد في الرسالة',
         style: TextStyle(color: muted, fontSize: 12.5),
       );
     } else if (!p.changes) {
@@ -6097,6 +6639,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
         );
         await tx.save();
         _txNormNames[tx] = null;
+        _invalidateSearchIndex();
+        if (name != null) _pastNamesByTx = null;
         if (name != null && !_knownBeneficiaryNames.contains(tx.beneficiary)) {
           _knownBeneficiaryNames.add(tx.beneficiary);
           _nameConfig.addKnownName(tx.beneficiary);
@@ -6672,6 +7216,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
       lines: [
         'الاسم: ${summary.name}',
         'المبلغ: ${_fmtAmount(summary.amount)} ${summary.currency}',
+        if (summary.secondAmount != null)
+          'المبلغ الثاني: ${_fmtAmount(summary.secondAmount!)} ${summary.secondCurrency ?? ''}',
         'التاريخ: ${_fmtDateTime(summary.date)}',
       ],
     );
@@ -6871,6 +7417,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     VoidCallback? onTap,
     List<({IconData icon, String tooltip, VoidCallback onTap})> actions =
         const [],
+    String emptyText = 'غير محدد',
   }) {
     final done = value != null && value.trim().isNotEmpty;
     final fg = active ? Colors.white : _readable(context, color);
@@ -6907,7 +7454,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
             const SizedBox(width: 6),
             Flexible(
               child: Text(
-                done ? '$title: $value' : '$title: غير محدد',
+                done ? '$title: $value' : '$title: $emptyText',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(color: fg, fontWeight: FontWeight.w800),
@@ -6951,32 +7498,99 @@ class _BubbleScreenState extends State<BubbleScreen> {
       }
     }
 
+    final isEdit = mode == BubbleActionMode.edit;
+    final searchName = isEdit ? _targetSearchName(si) : '';
+    final newName = isEdit ? _editNewName(si) : '';
+
     return Wrap(
       spacing: 8,
       runSpacing: 8,
       children: [
-        _rolePill(
-          context,
-          icon: Icons.person_rounded,
-          title: mode == BubbleActionMode.cancel ? 'اسم الإلغاء' : 'الاسم',
-          value: nameText.trim().isEmpty ? null : nameText,
-          color: nameColor,
-          active: stage == SelectionStage.name,
-          onTap: () => _goStage(si, SelectionStage.name),
-          actions: [
-            (
-              icon: Icons.edit_rounded,
-              tooltip: 'تحرير الاسم يدويًا',
-              onTap: () => _openNameManualDialog(si, nameText),
-            ),
-            if (nameText.trim().isNotEmpty)
+        if (isEdit) ...[
+          // التعديل: اسم للبحث عن الحركة، واسم جديد تصبح عليه
+          _rolePill(
+            context,
+            icon: Icons.person_search_rounded,
+            title: 'اسم البحث',
+            value: searchName.isEmpty ? null : searchName,
+            color: nameColor,
+            active: stage == SelectionStage.name,
+            onTap: () => _goStage(si, SelectionStage.name),
+            actions: [
               (
-                icon: Icons.backspace_rounded,
-                tooltip: 'مسح تحديد الاسم',
-                onTap: () => _clearCategory(si, 'name'),
+                icon: Icons.content_paste_rounded,
+                tooltip: 'لصق اسم البحث من الحافظة',
+                onTap: () => _pasteName(si),
               ),
-          ],
-        ),
+              (
+                icon: Icons.edit_rounded,
+                tooltip: 'كتابة اسم البحث',
+                onTap: () => _openEditSearchDialog(si),
+              ),
+              if (searchName.isNotEmpty)
+                (
+                  icon: Icons.backspace_rounded,
+                  tooltip: 'مسح اسم البحث',
+                  onTap: () => _clearCategory(si, 'name'),
+                ),
+            ],
+          ),
+          _rolePill(
+            context,
+            icon: Icons.drive_file_rename_outline_rounded,
+            title: 'الاسم الجديد',
+            value: newName.isEmpty ? null : newName,
+            color: _newNameColor,
+            active: stage == SelectionStage.newName,
+            emptyText: 'بدون تغيير',
+            onTap: () => _goStage(si, SelectionStage.newName),
+            actions: [
+              (
+                icon: Icons.content_paste_rounded,
+                tooltip: 'لصق الاسم الجديد من الحافظة',
+                onTap: () => _pasteEditNewName(si),
+              ),
+              (
+                icon: Icons.edit_rounded,
+                tooltip: 'كتابة الاسم الجديد',
+                onTap: () => _openEditNewNameDialog(si),
+              ),
+              if (newName.isNotEmpty)
+                (
+                  icon: Icons.backspace_rounded,
+                  tooltip: 'مسح الاسم الجديد',
+                  onTap: () => _clearCategory(si, 'newName'),
+                ),
+            ],
+          ),
+        ] else
+          _rolePill(
+            context,
+            icon: Icons.person_rounded,
+            title: mode == BubbleActionMode.cancel ? 'اسم الإلغاء' : 'الاسم',
+            value: nameText.trim().isEmpty ? null : nameText,
+            color: nameColor,
+            active: stage == SelectionStage.name,
+            onTap: () => _goStage(si, SelectionStage.name),
+            actions: [
+              (
+                icon: Icons.content_paste_rounded,
+                tooltip: 'لصق الاسم من الحافظة',
+                onTap: () => _pasteName(si),
+              ),
+              (
+                icon: Icons.edit_rounded,
+                tooltip: 'تحرير الاسم يدويًا',
+                onTap: () => _openNameManualDialog(si, nameText),
+              ),
+              if (nameText.trim().isNotEmpty)
+                (
+                  icon: Icons.backspace_rounded,
+                  tooltip: 'مسح تحديد الاسم',
+                  onTap: () => _clearCategory(si, 'name'),
+                ),
+            ],
+          ),
         if (mode != BubbleActionMode.cancel)
           _rolePill(
             context,
@@ -6992,12 +7606,43 @@ class _BubbleScreenState extends State<BubbleScreen> {
                 tooltip: 'تحرير المبلغ يدويًا',
                 onTap: () => _openAmountManualDialog(si, amountVal),
               ),
+              if (mode == BubbleActionMode.add &&
+                  amountVal != null &&
+                  _secondAmount[si] == null)
+                (
+                  icon: Icons.add_card_rounded,
+                  tooltip: 'إضافة مبلغ ثاني',
+                  onTap: () => _openSecondAmountDialog(si),
+                ),
               if (amountVal != null)
                 (
                   icon: Icons.backspace_rounded,
                   tooltip: 'مسح تحديد المبلغ',
                   onTap: () => clearAmountOrCurrency('amount'),
                 ),
+            ],
+          ),
+        if (mode == BubbleActionMode.add && _secondAmount[si] != null)
+          _rolePill(
+            context,
+            icon: Icons.add_card_rounded,
+            title: 'المبلغ الثاني',
+            value:
+                '${_fmtAmount(_secondAmount[si]!)} ${_secondCurrency[si] ?? '(بدون عملة)'}',
+            color: _amountColor,
+            active: false,
+            onTap: () => _openSecondAmountDialog(si),
+            actions: [
+              (
+                icon: Icons.currency_exchange_rounded,
+                tooltip: 'عملة المبلغ الثاني',
+                onTap: () => _pickSecondCurrency(si),
+              ),
+              (
+                icon: Icons.backspace_rounded,
+                tooltip: 'حذف المبلغ الثاني',
+                onTap: () => _clearSecondAmount(si),
+              ),
             ],
           ),
         if (mode != BubbleActionMode.cancel)
@@ -7042,8 +7687,12 @@ class _BubbleScreenState extends State<BubbleScreen> {
           extra = ' — اضغط على العملة أو اخترها من القائمة';
           break;
         case SelectionStage.done:
+        case SelectionStage.newName:
           break;
       }
+    } else if (mode == BubbleActionMode.edit &&
+        sel.stage == SelectionStage.newName) {
+      extra = ' — اضغط على أول كلمة من الاسم الجديد، أو الصقه أو اكتبه';
     }
     return Container(
       width: double.infinity,
@@ -7212,17 +7861,46 @@ class _BubbleScreenState extends State<BubbleScreen> {
     required String nameText,
     required List<double> amountCandidates,
   }) {
-    // أكثر من مبلغ وأكثر من عملة: تحذير أوضح وأزرار اعتماد مباشرة
+    // تعارض في المبلغ: تحذير أوضح وأزرار اعتماد مباشرة
     final amb = wasSaved ? null : _moneyAmbiguity[si];
     final base = amb != null
         ? Colors.deepOrange
         : (wasSaved ? Colors.orange : Colors.amber);
     final String message;
     if (amb != null) {
-      final curs = amb.currencies.join(' ، ');
-      message = amountVal == null
-          ? 'تنبيه: الرسالة فيها أكثر من مبلغ وأكثر من عملة ($curs)، لذلك ما تم تحديد المبلغ تلقائيًا. اختر المبلغ الصحيح:'
-          : 'تنبيه: الرسالة فيها أكثر من مبلغ وأكثر من عملة ($curs). تأكد أن المبلغ والعملة صحيحين.';
+      final mm = amb.mismatch;
+      final values = amb.strongValues.length >= 2
+          ? amb.strongValues
+          : [for (final o in amb.options) o.value];
+      final String head;
+      if (mm != null) {
+        head =
+            'تنبيه: المبلغ بالأرقام (${_fmtAmount(mm.digits)}) لا يطابق المبلغ المكتوب بالحروف (${_fmtAmount(mm.words)}).';
+      } else if (amb.multiCurrency) {
+        head =
+            'تنبيه: عثرت على مبلغين وعملتين في الرسالة (${amb.currencies.join(' ، ')}).';
+      } else {
+        head =
+            'تنبيه: الرسالة فيها مبلغين مختلفين (${values.map(_fmtAmount).join(' و ')}).';
+      }
+      final String tail;
+      if (amountVal == null) {
+        tail =
+            amb.options.length >= 2 &&
+                mm == null &&
+                _modeOf(si) == BubbleActionMode.add
+            ? ' اعتمد المبلغين معًا (المبلغ والمبلغ الثاني) أو اختر مبلغًا واحدًا:'
+            : ' لذلك ما تم تحديد المبلغ تلقائيًا. اختر المبلغ الصحيح:';
+      } else if (amb.autoBoth) {
+        tail =
+            ' تم اعتماد المبلغين تلقائيًا (حسب الإعدادات): المبلغ والمبلغ الثاني — يمكنك اختيار مبلغ واحد بدلًا من ذلك:';
+      } else if (amb.autoPicked) {
+        tail =
+            ' تم اختيار ${_fmtAmount(amountVal)} تلقائيًا (حسب الإعدادات) — اضغط على مبلغ آخر لتغييره:';
+      } else {
+        tail = ' تأكد أن المبلغ والعملة صحيحين.';
+      }
+      message = '$head$tail';
     } else {
       message = wasSaved
           ? 'تم حفظ الرسالة، لكن يوجد أكثر من مبلغ محتمل. يمكنك اختيار المبلغ الصحيح ونسخ الاسم أو أي مبلغ بشكل منفصل.'
@@ -7264,6 +7942,23 @@ class _BubbleScreenState extends State<BubbleScreen> {
           ),
           const SizedBox(height: 8),
           if (amb != null) ...[
+            if (_modeOf(si) == BubbleActionMode.add &&
+                amb.mismatch == null &&
+                amb.firstPair != null &&
+                _secondAmount[si] == null) ...[
+              FilledButton.icon(
+                onPressed: () => _applyBothAmounts(si),
+                icon: const Icon(Icons.done_all_rounded, size: 18),
+                label: Text(
+                  'اعتماد المبلغين: ${_amountOptionLabel(amb, amb.firstPair!.$1.value)} + ${_amountOptionLabel(amb, amb.firstPair!.$2.value)}',
+                ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.deepOrange,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -7286,6 +7981,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
           if (amountVal != null)
             Text(
               'المبلغ المعتمد حاليًا: ${_fmtAmount(amountVal)}',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          if (_secondAmount[si] != null)
+            Text(
+              'المبلغ الثاني: ${_fmtAmount(_secondAmount[si]!)} ${_secondCurrency[si] ?? ''}',
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           const SizedBox(height: 10),
@@ -7742,6 +8442,9 @@ class _SegmentSelection {
   SelectionStage stage;
 
   final Set<_TokPos> nameTokens = {};
+
+  /// رسائل التعديل: كلمات الاسم الجديد (الاسم الحالي [nameTokens] للبحث)
+  final Set<_TokPos> newNameTokens = {};
   _TokPos? amount; // رقم
   _TokPos? currencyToken; // عملة من النص
   String? currencyFromMenu; // اسم عملة من القائمة
@@ -7794,21 +8497,68 @@ class _AmountOption {
   final double value;
   final _LineCurrency? currency;
 
-  const _AmountOption({required this.value, this.currency});
+  /// مكان المبلغ في الرسالة (لترتيب المبلغ الأول ثم الثاني)
+  final _TokPos? pos;
+
+  const _AmountOption({required this.value, this.currency, this.pos});
 }
 
-/// رسالة فيها أكثر من مبلغ وأكثر من عملة: لا يُعتمد المبلغ تلقائيًا
+/// تعارض في مبلغ الرسالة: أكثر من مبلغ وأكثر من عملة، أو مبلغان مختلفان،
+/// أو المبلغ بالحروف غير المبلغ بالأرقام
 class _MoneyAmbiguity {
   final List<_AmountOption> options;
   final List<String> currencies;
 
-  const _MoneyAmbiguity({required this.options, required this.currencies});
+  /// أكثر من مبلغ وأكثر من عملة
+  final bool multiCurrency;
+
+  /// المبلغ بالأرقام والمبلغ المكتوب بالحروف (عند اختلافهما)
+  final ({double digits, double words})? mismatch;
+
+  /// المبالغ المختلفة الأكيدة في الرسالة (للتحذير)
+  final List<double> strongValues;
+
+  /// اعتُمد المبلغ الأرجح تلقائيًا (الإعدادات: بدون تأكيد) ولم يغيّره المستخدم
+  bool autoPicked;
+
+  /// اعتُمد المبلغان معًا تلقائيًا (المبلغ + المبلغ الثاني بعملتيهما)
+  bool autoBoth = false;
+
+  _MoneyAmbiguity({
+    required this.options,
+    required this.currencies,
+    this.multiCurrency = false,
+    this.mismatch,
+    this.strongValues = const [],
+    this.autoPicked = false,
+  });
 
   _AmountOption? optionFor(double value) {
     for (final o in options) {
       if ((o.value - value).abs() < 0.0001) return o;
     }
     return null;
+  }
+
+  /// أول مبلغين مختلفين حسب مكانهما في الرسالة (المبلغ ثم المبلغ الثاني)
+  (_AmountOption, _AmountOption)? get firstPair {
+    if (options.length < 2) return null;
+    final sorted = List<_AmountOption>.of(options)
+      ..sort((a, b) {
+        final pa = a.pos, pb = b.pos;
+        if (pa == null || pb == null) return 0;
+        if (pa.line != pb.line) return pa.line.compareTo(pb.line);
+        return pa.index.compareTo(pb.index);
+      });
+    return (sorted[0], sorted[1]);
+  }
+
+  /// المبلغان بعملتين مختلفتين معروفتين (يصلحان كمبلغ + مبلغ ثاني)
+  bool get pairHasTwoCurrencies {
+    final p = firstPair;
+    if (p == null) return false;
+    final a = p.$1.currency?.name, b = p.$2.currency?.name;
+    return a != null && b != null && a != b;
   }
 }
 
@@ -7817,6 +8567,8 @@ class _SavedAddSummary {
   final String name;
   final double amount;
   final String currency;
+  final double? secondAmount;
+  final String? secondCurrency;
   final CompanyMovementType? companyMovementType;
   final DateTime date;
 
@@ -7825,6 +8577,8 @@ class _SavedAddSummary {
     required this.name,
     required this.amount,
     required this.currency,
+    this.secondAmount,
+    this.secondCurrency,
     this.companyMovementType,
     required this.date,
   });
@@ -7917,6 +8671,8 @@ class _PendingTxDraft {
   final String beneficiary;
   final double amount;
   final String currency;
+  final double? secondAmount;
+  final String? secondCurrency;
   final CompanyMovementType? companyMovementType;
   final DateTime date;
 
@@ -7925,6 +8681,8 @@ class _PendingTxDraft {
     required this.beneficiary,
     required this.amount,
     required this.currency,
+    this.secondAmount,
+    this.secondCurrency,
     this.companyMovementType,
     required this.date,
   });
@@ -7960,6 +8718,162 @@ class _PendingEditDraft {
     this.amount,
     this.currency,
   });
+}
+
+/// نتيجة بحث عن حركة لرسالة إلغاء/تعديل
+class _TargetHit {
+  final TransactionModel tx;
+  final double score;
+
+  /// الاسم يطابق اسم الحركة (الحالي أو السابق) تمامًا
+  final bool exact;
+
+  /// تطابقت مع اسم سابق للحركة من سجل التعديل (وليس اسمها الحالي)
+  final String? pastName;
+
+  const _TargetHit({
+    required this.tx,
+    required this.score,
+    required this.exact,
+    this.pastName,
+  });
+}
+
+/// اسم حركة (حالي أو سابق) مطبّع ومقسّم إلى كلمات
+class _NameEntry {
+  final TransactionModel tx;
+  final String norm;
+  final List<String> words;
+  final String? pastName;
+
+  const _NameEntry(this.tx, this.norm, this.words, this.pastName);
+}
+
+/// فهرس أسماء الحركات: مطابقة تامة فورية، والمتشابهة تُفحص فقط للحركات التي
+/// تشترك بكلمة قريبة من كلمات الاسم (بدل مقارنة كل الحركات)
+class _TargetSearchIndex {
+  final List<_NameEntry> entries;
+  final Map<String, List<int>> _exact = {};
+  final Map<String, List<int>> _byWord = {};
+  final Map<String, List<String>> _similarCache = {};
+
+  _TargetSearchIndex(this.entries) {
+    for (var i = 0; i < entries.length; i++) {
+      final e = entries[i];
+      (_exact[e.norm] ??= <int>[]).add(i);
+      for (final w in e.words.toSet()) {
+        (_byWord[w] ??= <int>[]).add(i);
+      }
+    }
+  }
+
+  static int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    var prev = List<int>.generate(b.length + 1, (i) => i);
+    var curr = List<int>.filled(b.length + 1, 0);
+    for (var i = 0; i < a.length; i++) {
+      curr[0] = i + 1;
+      for (var j = 0; j < b.length; j++) {
+        final cost = a.codeUnitAt(i) == b.codeUnitAt(j) ? 0 : 1;
+        var v = curr[j] + 1;
+        if (prev[j + 1] + 1 < v) v = prev[j + 1] + 1;
+        if (prev[j] + cost < v) v = prev[j] + cost;
+        curr[j + 1] = v;
+      }
+      final t = prev;
+      prev = curr;
+      curr = t;
+    }
+    return prev[b.length];
+  }
+
+  /// نفس قواعد التشابه السابقة: كلمة قصيرة (أقل من 3 أحرف) تطابق تمامًا فقط
+  static bool similarWord(String a, String b) {
+    if (a == b) return true;
+    final minLen = a.length < b.length ? a.length : b.length;
+    if (minLen < 3) return false;
+    final maxDistance = minLen >= 7 ? 2 : 1;
+    if ((a.length - b.length).abs() > maxDistance) return false;
+    return _levenshtein(a, b) <= maxDistance;
+  }
+
+  List<String> _similarWords(String w) => _similarCache[w] ??= [
+    for (final v in _byWord.keys)
+      if (similarWord(w, v)) v,
+  ];
+
+  static double _score(String wanted, List<String> wantedWords, _NameEntry e) {
+    if (e.norm == wanted) return 1;
+    final candidateWords = e.words;
+    if (wantedWords.isEmpty || candidateWords.isEmpty) return -1;
+    if (candidateWords.length < (wantedWords.length >= 3 ? 2 : 1)) return -1;
+    if ((candidateWords.length - wantedWords.length).abs() > 1) return -1;
+    final used = <int>{};
+    var matches = 0;
+    for (final w in wantedWords) {
+      for (var i = 0; i < candidateWords.length; i++) {
+        if (used.contains(i)) continue;
+        if (similarWord(w, candidateWords[i])) {
+          used.add(i);
+          matches++;
+          break;
+        }
+      }
+    }
+    final required = wantedWords.length <= 2
+        ? wantedWords.length
+        : wantedWords.length - 1;
+    if (matches < required) return -1;
+    return matches / wantedWords.length;
+  }
+
+  /// كل الحركات المطابقة للاسم (أفضل نتيجة لكل حركة)
+  List<_TargetHit> search(String wanted, List<String> wantedWords) {
+    final best = <int, _TargetHit>{};
+    void consider(int i, double score) {
+      final e = entries[i];
+      final hit = _TargetHit(
+        tx: e.tx,
+        score: score,
+        exact: e.norm == wanted,
+        pastName: e.pastName,
+      );
+      final prev = best[e.tx.id];
+      if (prev == null ||
+          hit.score > prev.score ||
+          (hit.score == prev.score &&
+              prev.pastName != null &&
+              hit.pastName == null)) {
+        best[e.tx.id] = hit;
+      }
+    }
+
+    if (wanted.isEmpty) return const [];
+    for (final i in _exact[wanted] ?? const <int>[]) {
+      consider(i, 1);
+    }
+    // كم كلمة من كلمات الاسم تشبه كلمة في كل حركة: تُفحص بالتفصيل فقط
+    // الحركات التي فيها العدد المطلوب من الكلمات المتشابهة
+    final unique = wantedWords.toSet().toList();
+    final counts = <int, int>{};
+    for (final w in unique) {
+      final seen = <int>{};
+      for (final v in _similarWords(w)) {
+        for (final i in _byWord[v]!) {
+          if (seen.add(i)) counts[i] = (counts[i] ?? 0) + 1;
+        }
+      }
+    }
+    final required = unique.length <= 2 ? unique.length : unique.length - 1;
+    counts.forEach((i, n) {
+      if (n < required || entries[i].norm == wanted) return;
+      final s = _score(wanted, wantedWords, entries[i]);
+      if (s >= 0) consider(i, s);
+    });
+    return best.values.toList();
+  }
 }
 
 /// ملخص فقاعة تعديل بعد تنفيذها
