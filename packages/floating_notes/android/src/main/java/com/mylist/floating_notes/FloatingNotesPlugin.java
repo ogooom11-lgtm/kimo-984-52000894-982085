@@ -1,7 +1,10 @@
 package com.mylist.floating_notes;
 
+import android.app.StatusBarManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -13,13 +16,16 @@ import io.flutter.plugin.common.MethodChannel;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
 
 /**
- * يربط فقاعة الملاحظات بـ Dart:
+ * يربط الحافظة العائمة بـ Dart:
  * - MethodChannel "my_list/floating_notes": canDrawOverlays / openPermissionSettings /
- *   show / hide / isShowing / getNotes / addNote / deleteNote / clearNotes
+ *   show / hide / isShowing / getNotes / addNote / updateNote / setDone / deleteNote /
+ *   clearNotes / clearDone / getPrefs / setPrefs / canRequestTile / requestAddTile
  * - EventChannel "my_list/floating_notes/events": "notes" عند تغيّر الملاحظات،
- *   و"state" عند ظهور الفقاعة أو إخفائها
+ *   و"state" عند ظهور الفقاعة أو إخفائها، و"prefs" عند تغيّر الخيارات
  */
 public class FloatingNotesPlugin
     implements FlutterPlugin,
@@ -82,7 +88,8 @@ public class FloatingNotesPlugin
           return;
         }
         Object open = call.argument("open");
-        startService(
+        FloatingNotesService.start(
+            context,
             Boolean.TRUE.equals(open)
                 ? FloatingNotesService.ACTION_OPEN
                 : FloatingNotesService.ACTION_SHOW);
@@ -103,6 +110,40 @@ public class FloatingNotesPlugin
                 text == null ? "" : text.toString(),
                 type == null ? NotesStore.TYPE_ADD : type.toString());
         result.success(Long.valueOf(id));
+      } else if ("updateNote".equals(method)) {
+        Object id = call.argument("id");
+        Object text = call.argument("text");
+        Object type = call.argument("type");
+        boolean ok =
+            id instanceof Number
+                && NotesStore.update(
+                    context,
+                    ((Number) id).longValue(),
+                    text == null ? null : text.toString(),
+                    type == null ? null : type.toString());
+        result.success(Boolean.valueOf(ok));
+      } else if ("setDone".equals(method)) {
+        Object id = call.argument("id");
+        Object done = call.argument("done");
+        boolean ok =
+            id instanceof Number
+                && NotesStore.setDone(
+                    context, ((Number) id).longValue(), Boolean.TRUE.equals(done));
+        result.success(Boolean.valueOf(ok));
+      } else if ("clearDone".equals(method)) {
+        result.success(Integer.valueOf(NotesStore.clearDone(context)));
+      } else if ("getPrefs".equals(method)) {
+        result.success(NotesStore.prefsJson(context));
+      } else if ("setPrefs".equals(method)) {
+        Object values = call.argument("values");
+        if (values instanceof Map) {
+          NotesStore.savePrefs(context, (Map<?, ?>) values);
+        }
+        result.success(Boolean.TRUE);
+      } else if ("canRequestTile".equals(method)) {
+        result.success(Boolean.valueOf(Build.VERSION.SDK_INT >= 33));
+      } else if ("requestAddTile".equals(method)) {
+        requestAddTile(result);
       } else if ("deleteNote".equals(method)) {
         Object id = call.argument("id");
         boolean removed = id instanceof Number && NotesStore.delete(context, ((Number) id).longValue());
@@ -118,13 +159,49 @@ public class FloatingNotesPlugin
     }
   }
 
-  private void startService(String action) {
-    Intent i = new Intent(context, FloatingNotesService.class);
-    i.setAction(action);
-    if (Build.VERSION.SDK_INT >= 26) {
-      context.startForegroundService(i);
-    } else {
-      context.startService(i);
+  /**
+   * يطلب من النظام إضافة زر «الحافظة» للوحة الإعدادات السريعة (أندرويد 13+):
+   * بيطلع مربع من النظام والمستخدم بيوافق. النتيجة: added / already /
+   * notAdded / unsupported / error.
+   */
+  private void requestAddTile(final MethodChannel.Result result) {
+    if (Build.VERSION.SDK_INT < 33) {
+      result.success("unsupported");
+      return;
+    }
+    try {
+      StatusBarManager sbm = context.getSystemService(StatusBarManager.class);
+      if (sbm == null) {
+        result.success("unsupported");
+        return;
+      }
+      final boolean[] answered = {false};
+      sbm.requestAddTileService(
+          new ComponentName(context, NotesTileService.class),
+          NotesStore.title(context),
+          Icon.createWithResource(context, R.drawable.ic_floating_notes_tile),
+          context.getMainExecutor(),
+          new Consumer<Integer>() {
+            @Override
+            public void accept(Integer code) {
+              if (answered[0]) {
+                return;
+              }
+              answered[0] = true;
+              int c = code == null ? -1 : code.intValue();
+              if (c == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
+                result.success("added");
+              } else if (c == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) {
+                result.success("already");
+              } else if (c == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_NOT_ADDED) {
+                result.success("notAdded");
+              } else {
+                result.success("error");
+              }
+            }
+          });
+    } catch (Exception e) {
+      result.success("error");
     }
   }
 
@@ -153,6 +230,11 @@ public class FloatingNotesPlugin
   @Override
   public void onNotesChanged() {
     emit("notes");
+  }
+
+  @Override
+  public void onPrefsChanged() {
+    emit("prefs");
   }
 
   /** تستدعيها الخدمة عند ظهور الفقاعة أو إخفائها (على الخيط الرئيسي). */

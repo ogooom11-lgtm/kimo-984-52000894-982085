@@ -9,7 +9,7 @@ import android.view.View;
 
 /**
  * أيقونة مرسومة بالكود (بدون ملفات موارد): دائرة ملونة اختيارية وبداخلها رمز
- * (إضافة، تعديل، إلغاء، تسليم، ملاحظات، إغلاق، حذف، نسخ).
+ * (إضافة، تعديل، إلغاء، تسليم، ملاحظات، إغلاق، حذف، نسخ، إعدادات، لصق، رجوع).
  */
 final class NoteIconView extends View {
   static final int GLYPH_NOTES = 0;
@@ -20,6 +20,9 @@ final class NoteIconView extends View {
   static final int GLYPH_CLOSE = 5;
   static final int GLYPH_DELETE = 6;
   static final int GLYPH_COPY = 7;
+  static final int GLYPH_SETTINGS = 8;
+  static final int GLYPH_PASTE = 9;
+  static final int GLYPH_UNDO = 10;
 
   private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -121,6 +124,36 @@ final class NoteIconView extends View {
         c.drawPath(path, stroke);
         rect.set(l + g * 0.1f, t + g * 0.3f, l + g * 0.68f, t + g * 0.92f);
         c.drawRoundRect(rect, g * 0.1f, g * 0.1f, stroke);
+        break;
+      case GLYPH_SETTINGS:
+        // ثلاث خطوط مع مقابض (منزلقات)
+        stroke.setStrokeWidth(Math.max(1.5f, g * 0.1f));
+        float[] ys = {0.22f, 0.5f, 0.78f};
+        float[] knobs = {0.68f, 0.32f, 0.58f};
+        for (int i = 0; i < 3; i++) {
+          float y = t + g * ys[i];
+          c.drawLine(l + g * 0.08f, y, l + g * 0.92f, y, stroke);
+          c.drawCircle(l + g * knobs[i], y, g * 0.11f, fill);
+        }
+        break;
+      case GLYPH_PASTE:
+        stroke.setStrokeWidth(Math.max(1.5f, g * 0.1f));
+        rect.set(l + g * 0.16f, t + g * 0.14f, l + g * 0.84f, t + g * 0.96f);
+        c.drawRoundRect(rect, g * 0.1f, g * 0.1f, stroke);
+        rect.set(l + g * 0.34f, t + g * 0.04f, l + g * 0.66f, t + g * 0.24f);
+        c.drawRoundRect(rect, g * 0.06f, g * 0.06f, fill);
+        c.drawLine(l + g * 0.32f, t + g * 0.5f, l + g * 0.68f, t + g * 0.5f, stroke);
+        c.drawLine(l + g * 0.32f, t + g * 0.7f, l + g * 0.58f, t + g * 0.7f, stroke);
+        break;
+      case GLYPH_UNDO:
+        stroke.setStrokeWidth(Math.max(1.5f, g * 0.12f));
+        rect.set(l + g * 0.2f, t + g * 0.2f, l + g * 0.9f, t + g * 0.9f);
+        c.drawArc(rect, 180f, 230f, false, stroke);
+        path.reset();
+        path.moveTo(l + g * 0.04f, t + g * 0.42f);
+        path.lineTo(l + g * 0.2f, t + g * 0.58f);
+        path.lineTo(l + g * 0.38f, t + g * 0.42f);
+        c.drawPath(path, stroke);
         break;
       case GLYPH_NOTES:
       default:

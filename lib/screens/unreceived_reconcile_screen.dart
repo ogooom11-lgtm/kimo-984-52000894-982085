@@ -1065,20 +1065,52 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     return t.currency;
   }
 
-  double? _parseAmount(dynamic v) {
+  double? _parseAmount(dynamic v) => parseLooseAmount(v);
+
+  /// قراءة مبلغ مكتوب بأي شكل: 1250000 أو 1,250,000 أو 1.250.000 أو
+  /// 1.250.000,50 أو 1,250,000.50 أو ١٢٥٠ — مع تجاهل الرموز والعملة.
+  /// النقطة/الفاصلة الوحيدة يليها 3 أرقام بالضبط = فاصل آلاف (1.250 = 1250).
+  static double? parseLooseAmount(dynamic v) {
     if (v == null) return null;
     String s = v.toString();
     const arabic = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
     for (int i = 0; i < arabic.length; i++) {
       s = s.replaceAll(arabic[i], i.toString());
     }
-
-    s = s.replaceAll('٬', '');
-    s = s.replaceAll(' ', '');
-    s = s.replaceAllMapped(RegExp(r'(?<=\d),(?=\d{2}$)'), (_) => '.');
-    s = s.replaceAll(RegExp(r'[^\d\.\-]+'), '');
-
-    return double.tryParse(s);
+    s = s.replaceAll('٬', ',').replaceAll('٫', '.');
+    final negative = RegExp(r'^\s*[-−(]').hasMatch(s);
+    s = s.replaceAll(RegExp(r'[^0-9.,]'), '');
+    if (!RegExp(r'\d').hasMatch(s)) return null;
+    s = s.replaceAll(RegExp(r'^[.,]+|[.,]+$'), '');
+    final lastDot = s.lastIndexOf('.');
+    final lastComma = s.lastIndexOf(',');
+    String intPart;
+    String decPart = '';
+    if (lastDot >= 0 && lastComma >= 0) {
+      // الفاصل الأخير هو الفاصلة العشرية
+      final i = lastDot > lastComma ? lastDot : lastComma;
+      intPart = s.substring(0, i).replaceAll(RegExp(r'[.,]'), '');
+      decPart = s.substring(i + 1).replaceAll(RegExp(r'[.,]'), '');
+    } else if (lastDot >= 0 || lastComma >= 0) {
+      final sep = lastDot >= 0 ? '.' : ',';
+      final parts = s.split(sep);
+      if (parts.length > 2) {
+        intPart = parts.join();
+      } else if (parts[1].length == 3 &&
+          parts[0].isNotEmpty &&
+          parts[0] != '0') {
+        intPart = parts.join();
+      } else {
+        intPart = parts[0];
+        decPart = parts[1];
+      }
+    } else {
+      intPart = s;
+    }
+    if (intPart.isEmpty) intPart = '0';
+    final value = double.tryParse(decPart.isEmpty ? intPart : '$intPart.$decPart');
+    if (value == null) return null;
+    return negative ? -value : value;
   }
 
   double _nameSimilarity(String a, String b) {
@@ -1473,12 +1505,17 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   }
 
   Widget _buildStepNameMapping() {
-    // الأعمدة التي فيها نص فقط (ولو لم يكن النص في أول صف)
-    final items = _headers.where(_columnHasText).toList();
+    // كل عمود فيه نص أو رقم بأي صف (ولو كان أول صف فاضي): أعمدة النص أولًا
+    final textCols = _headers.where(_columnHasText).toList();
+    final otherCols = [
+      for (final h in _headers)
+        if (!textCols.contains(h) && _columnHasAny(h)) h,
+    ];
+    final items = [...textCols, ...otherCols];
     return _buildSelectionStep(
       title: 'تحديد أعمدة الاسم',
       subtitle:
-          'كل عمود بحرفه في الملف وتحته أول كلمة فيه. اختر عمودًا أو أكثر لتكوين اسم المستفيد.',
+          'كل عمود فيه نص أو رقم (ولو بصف واحد) يظهر هون بحرفه في الملف وتحته أول كلمة فيه. اختر عمودًا أو أكثر لتكوين اسم المستفيد.',
       items: items.isEmpty ? _headers : items,
       selected: _selectedNameCols,
       onToggle: (h) {
@@ -1503,6 +1540,19 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
 
   Widget _buildStepAmountAndDate() {
     final cs = Theme.of(context).colorScheme;
+    // كل عمود فيه رقم بأي صف (ولو كان أول صف فاضي) يظهر هون مع اختيار العملة،
+    // وبعدها باقي الأعمدة يلي فيها شي (إذا الأرقام مكتوبة بشكل غريب)
+    final candidates = [
+      for (final h in _headers)
+        if (!_selectedNameCols.contains(h) &&
+            h != _currencyColumn &&
+            _columnHasAny(h))
+          h,
+    ];
+    final amountItems = [
+      ...candidates.where(_columnHasNumber),
+      ...candidates.where((h) => !_columnHasNumber(h)),
+    ];
 
     return Column(
       children: [
@@ -1582,15 +1632,11 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
         Expanded(
           child: ListView.separated(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-            itemCount: _headers.length,
+            itemCount: amountItems.length,
             separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (ctx, i) {
-              final h = _headers[i];
-              if (_selectedNameCols.contains(h) ||
-                  h == _currencyColumn ||
-                  !_columnHasNumber(h)) {
-                return const SizedBox.shrink();
-              }
+              final h = amountItems[i];
+              final hasNumber = _columnHasNumber(h);
               final isSelected = _selectedAmountCols.contains(h);
 
               return InkWell(
@@ -1640,12 +1686,24 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              'مثال: ${_getSampleData(h, isNum: true)} | العملة: ${_currencyLabelForColumn(h)}',
+                              'مثال: ${_getSampleData(h, isNum: true)}${_firstRowNote(h)} | العملة: ${_currencyLabelForColumn(h)}',
                               style: TextStyle(
                                 fontSize: 11.5,
                                 color: cs.onSurfaceVariant,
                               ),
                             ),
+                            if (!hasNumber)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  'ما لقيت فيه أرقام مقروءة — اختاره إذا كان فيه مبالغ',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.orange.shade800,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
                             if (isSelected) ...[
                               const SizedBox(height: 8),
                               _buildColumnCurrencyPicker(h, cs),
@@ -2399,7 +2457,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              _samplesOf(item),
+                              '${_samplesOf(item)}${_firstRowNote(item)}',
                               style: TextStyle(
                                 fontSize: 11.5,
                                 color: cs.onSurfaceVariant,
@@ -2826,13 +2884,53 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     return false;
   }
 
+  /// كاش «العمود فيه شي/فيه رقم» (بيتصفّر لما يتغيّر الملف المقروء)
+  int? _colStatsKey;
+  final Map<String, bool> _hasAnyCache = {};
+  final Map<String, bool> _hasNumberCache = {};
+
+  void _checkColStats() {
+    final key = Object.hash(
+      _rows.length,
+      _headers.length,
+      _rows.isEmpty ? 0 : identityHashCode(_rows.first),
+      _rows.isEmpty ? 0 : identityHashCode(_rows.last),
+    );
+    if (key != _colStatsKey) {
+      _colStatsKey = key;
+      _hasAnyCache.clear();
+      _hasNumberCache.clear();
+    }
+  }
+
+  /// العمود فيه أي شي (نص أو رقم) في أي صف من البيانات
+  bool _columnHasAny(String h) {
+    _checkColStats();
+    return _hasAnyCache[h] ??= _rows.any(
+      (r) => (r[h]?.toString() ?? '').trim().isNotEmpty,
+    );
+  }
+
+  /// « • من الصف 81» إذا أول قيمة بالعمود مو بأول صفوف الملف
+  String _firstRowNote(String h) {
+    for (var i = 0; i < _rows.length; i++) {
+      final r = _rows[i];
+      final v = r[h]?.toString() ?? '';
+      if (v.trim().isEmpty) continue;
+      if (i < 3) return '';
+      final n = r[_rowNumberKey];
+      return n is int ? ' • من الصف $n' : ' • من الصف ${i + 2}';
+    }
+    return '';
+  }
+
   /// العمود فيه رقم في أي صف (أعمدة المبالغ)
   bool _columnHasNumber(String h) {
-    for (final r in _rows) {
+    _checkColStats();
+    return _hasNumberCache[h] ??= _rows.any((r) {
       final v = r[h]?.toString() ?? '';
-      if (_hasDigitRe.hasMatch(v) && _parseAmount(v) != null) return true;
-    }
-    return false;
+      return _hasDigitRe.hasMatch(v) && _parseAmount(v) != null;
+    });
   }
 
   /// أول كلمة في العمود (من أول خلية فيها شيء، وليس شرطًا أن تكون أول صف)
@@ -3191,11 +3289,14 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
 
   String _getSampleData(String header, {bool isNum = false}) {
     if (_rows.isEmpty) return 'فارغ';
-    for (final r in _rows.take(6)) {
+    String? first;
+    for (final r in _rows) {
       final v = r[header]?.toString();
-      if (v != null && v.trim().isNotEmpty) return v;
+      if (v == null || v.trim().isEmpty) continue;
+      first ??= v;
+      if (!isNum || _parseAmount(v) != null) return v;
     }
-    return 'فارغ';
+    return first ?? 'فارغ';
   }
 }
 

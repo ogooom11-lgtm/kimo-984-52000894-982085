@@ -17,10 +17,15 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
+import '../services/destinations.dart';
 import '../services/detection/text_tokens.dart' show normalizeArabic;
 import '../services/settings_words.dart';
 import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
+import '../widgets/destination_picker.dart'
+    show kDestExternalColor, kDestOfficeColor;
+import '../widgets/quick_action_defs.dart';
+import 'clipboard_settings_screen.dart';
 import 'trace_warnings_screen.dart';
 
 // =============================================================
@@ -119,6 +124,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     final actions = s.bubbleQuickActions;
     final tp = TraceService.prefs.value;
     final warnCount = TraceService.activeCount.value;
+    final dests = _store.destinationBook;
 
     return [
       _HubGroup(
@@ -199,17 +205,31 @@ class _SettingsScreenState extends State<SettingsScreen>
         icon: Icons.alt_route_rounded,
         tiles: [
           _HubTile(
+            icon: Icons.place_rounded,
+            color: _kCyan,
+            title: 'الوجهات',
+            subtitle: dests.isEmpty
+                ? 'وجهات حركات الشركات مع اختصاراتها'
+                : '${dests.items.length} وجهة • '
+                      '${dests.items.where((d) => d.toOffice).length} تابعة لمكتب',
+            count: dests.isEmpty ? null : dests.items.length,
+            searchText:
+                'وجهه وجهات اختصار مدينه بلد مكتب تابعه لازم توصل تغيير مسار',
+            contents: [
+              for (final d in dests.items) ...[d.name, ...d.aliases],
+            ],
+            onTap: () => _open(_DestinationsPage(store: _store)),
+          ),
+          _HubTile(
             icon: Icons.tune_rounded,
             color: _kTeal,
             title: 'إعدادات التتبّع',
             subtitle:
                 'عادي ${tp.normalHoursSafe} س • أقصى ${tp.maxHoursSafe} س • '
                 '«${tp.unknown}»',
-            count: tp.mustReachWords.isEmpty ? null : tp.mustReachWords.length,
-            searchText:
-                'مصدر مسار شركة مكتب ربط وقت ساعات مجهول تحذير مرسلة لازم تروح',
-            contents: [tp.unknown, ...tp.mustReachWords],
-            onTap: () => _open(const _TracePrefsPage()),
+            searchText: 'مصدر مسار شركة مكتب ربط وقت ساعات مجهول تحذير مرسلة',
+            contents: [tp.unknown],
+            onTap: () => _open(_TracePrefsPage(store: _store)),
           ),
           _HubTile(
             icon: Icons.warning_amber_rounded,
@@ -221,6 +241,22 @@ class _SettingsScreenState extends State<SettingsScreen>
             count: warnCount == 0 ? null : warnCount,
             searchText: 'تحذيرات تنبيه مصدر شركة مكتب اسم مبلغ ما راحت',
             onTap: () => _open(const TraceWarningsScreen()),
+          ),
+        ],
+      ),
+      _HubGroup(
+        title: 'الحافظة',
+        icon: Icons.sticky_note_2_rounded,
+        tiles: [
+          _HubTile(
+            icon: Icons.sticky_note_2_rounded,
+            color: _kViolet,
+            title: 'الحافظة العائمة',
+            subtitle: 'شكلها، أنواعها، وزرها بلوحة الإشعارات (الستارة)',
+            searchText:
+                'حافظه محفظه ملاحظات عائمه فقاعه ستاره اشعارات زر سريع لون '
+                'حجم لصق نسخ',
+            onTap: () => _open(const ClipboardSettingsScreen()),
           ),
         ],
       ),
@@ -241,9 +277,10 @@ class _SettingsScreenState extends State<SettingsScreen>
             icon: Icons.touch_app_rounded,
             color: _kCyan,
             title: 'الأزرار السريعة',
-            subtitle: 'أزرار داخل الفقاعة: أصفار، اسم جاهز، عملة…',
+            subtitle: 'أزرار داخل الفقاعة: أصفار، لصق، نسخ، حافظة، حفظ…',
             count: actions.length,
-            searchText: 'ازرار زر سريع اصفار',
+            searchText:
+                'ازرار زر سريع اصفار لصق نسخ ملخص حافظه حفظ وجهه لون شكل ترتيب',
             contents: actions.map((a) => a.label).toList(),
             onTap: () => _open(_QuickActionsPage(store: _store)),
           ),
@@ -407,21 +444,17 @@ class _SettingsStore extends ChangeNotifier {
     amountWordValues: Map<String, double>.from(s.amountWordValues),
     bubbleReadyNames: List<String>.from(s.bubbleReadyNames),
     companyUserNames: List<String>.from(s.companyUserNames),
-    bubbleQuickActions: s.bubbleQuickActions
-        .map(
-          (a) => BubbleQuickActionConfig(
-            id: a.id,
-            label: a.label,
-            iconKey: a.iconKey,
-            actionType: a.actionType,
-            value: a.value,
-            iconAbove: a.iconAbove,
-          ),
-        )
-        .toList(),
+    bubbleQuickActions: s.bubbleQuickActions.map((a) => a.copy()).toList(),
     forbiddenWords: List<String>.from(s.forbiddenWords),
     forbiddenPhrases: List<String>.from(s.forbiddenPhrases),
     bubbleUiPrefs: Map<String, dynamic>.from(s.bubbleUiPrefs),
+    destinationMap: Map<String, String>.from(s.destinationMap),
+    destinationInfo: {
+      for (final e in s.destinationInfo.entries)
+        e.key: e.value is Map
+            ? Map<String, dynamic>.from(e.value as Map)
+            : <String, dynamic>{'office': false},
+    },
   );
 
   void attach() {
@@ -687,6 +720,28 @@ class _SettingsStore extends ChangeNotifier {
     changed();
   }
 
+  void updateQuickAction(BubbleQuickActionConfig action) {
+    final list = settings.bubbleQuickActions;
+    final i = list.indexWhere((a) => a.id == action.id);
+    if (i < 0) {
+      list.add(action);
+    } else {
+      list[i] = action;
+    }
+    changed();
+  }
+
+  void moveQuickAction(int oldIndex, int newIndex) {
+    final list = settings.bubbleQuickActions;
+    if (oldIndex < 0 || oldIndex >= list.length) return;
+    if (newIndex > oldIndex) newIndex--;
+    newIndex = newIndex.clamp(0, list.length - 1);
+    if (newIndex == oldIndex) return;
+    final a = list.removeAt(oldIndex);
+    list.insert(newIndex, a);
+    changed();
+  }
+
   /// يحذف الزر ويعيد موضعه السابق (للتراجع)، أو -1 إن لم يوجد.
   int removeQuickAction(BubbleQuickActionConfig action) {
     final list = settings.bubbleQuickActions;
@@ -696,6 +751,147 @@ class _SettingsStore extends ChangeNotifier {
       changed();
     }
     return i;
+  }
+
+  // ---------------- الوجهات ----------------
+
+  DestinationBook get destinationBook => DestinationBook.fromSettings(settings);
+
+  /// اسم الوجهة يلي إلها هالاسم أو الاختصار (أو null)
+  String? destinationOwnerOf(String text) {
+    final k = destinationKey(text);
+    if (k.isEmpty) return null;
+    for (final n in settings.destinationInfo.keys) {
+      if (destinationKey(n) == k) return n;
+    }
+    for (final e in settings.destinationMap.entries) {
+      if (destinationKey(e.key) == k) return e.value.trim();
+    }
+    return null;
+  }
+
+  Map<String, dynamic> _destInfo(String name) {
+    final raw = settings.destinationInfo[name];
+    return raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{'office': false};
+  }
+
+  /// يضيف وجهة جديدة مع اختصاراتها. يعيد رسالة خطأ أو null.
+  String? addDestination(
+    String name,
+    Iterable<String> aliases, {
+    bool toOffice = false,
+  }) {
+    final n = name.trim();
+    if (n.isEmpty) return 'أدخل اسم الوجهة';
+    final owner = destinationOwnerOf(n);
+    if (owner != null) {
+      return owner == n ? '«$n» موجودة مسبقًا' : '«$n» اختصار لوجهة «$owner»';
+    }
+    settings.destinationInfo[n] = <String, dynamic>{'office': toOffice};
+    for (final raw in aliases) {
+      final a = raw.trim();
+      if (a.isEmpty || destinationKey(a) == destinationKey(n)) continue;
+      if (destinationOwnerOf(a) != null) continue;
+      settings.destinationMap[a] = n;
+    }
+    changed();
+    return null;
+  }
+
+  /// يضيف اختصارًا لوجهة. يعيد رسالة خطأ أو null.
+  String? addDestinationAlias(String name, String alias) {
+    final a = alias.trim();
+    if (a.isEmpty) return 'أدخل الاختصار';
+    final owner = destinationOwnerOf(a);
+    if (owner != null) return '«$a» موجود مسبقًا ضمن «$owner»';
+    settings.destinationMap[a] = name;
+    changed();
+    return null;
+  }
+
+  void removeDestinationAlias(String alias) {
+    if (settings.destinationMap.remove(alias) != null) changed();
+  }
+
+  /// يعيد تسمية الوجهة (مع اختصاراتها). يعيد رسالة خطأ أو null.
+  String? renameDestination(String oldName, String newName) {
+    final v = newName.trim();
+    if (v.isEmpty || v == oldName) return null;
+    final owner = destinationOwnerOf(v);
+    if (owner != null && owner != oldName) {
+      return '«$v» موجود مسبقًا ضمن «$owner»';
+    }
+    final info = _destInfo(oldName);
+    settings.destinationInfo.remove(oldName);
+    settings.destinationInfo[v] = info;
+    final keys = settings.destinationMap.entries
+        .where((e) => e.value.trim() == oldName)
+        .map((e) => e.key)
+        .toList();
+    for (final k in keys) {
+      settings.destinationMap[k] = v;
+    }
+    // الاسم الجديد كان اختصارًا لنفس الوجهة: ما عاد لازم
+    settings.destinationMap.removeWhere(
+      (k, value) => destinationKey(k) == destinationKey(v),
+    );
+    changed();
+    return null;
+  }
+
+  /// يحذف الوجهة كاملة ويعيد ما حُذف (للتراجع).
+  (Map<String, dynamic>, Map<String, String>) deleteDestination(String name) {
+    final info = <String, dynamic>{};
+    final raw = settings.destinationInfo.remove(name);
+    if (raw != null) info[name] = raw;
+    final aliases = <String, String>{};
+    settings.destinationMap.removeWhere((k, v) {
+      if (v.trim() != name) return false;
+      aliases[k] = v;
+      return true;
+    });
+    if (info.isNotEmpty || aliases.isNotEmpty) changed();
+    return (info, aliases);
+  }
+
+  void restoreDestination((Map<String, dynamic>, Map<String, String>) data) {
+    settings.destinationInfo.addAll(data.$1);
+    settings.destinationMap.addAll(data.$2);
+    changed();
+  }
+
+  void setDestinationOffice(String name, bool toOffice) {
+    final info = _destInfo(name)..['office'] = toOffice;
+    settings.destinationInfo[name] = info;
+    changed();
+  }
+
+  /// يضيف/يشيل مكتبًا من مكاتب الوجهة (بدون مكاتب = أي مكتب)
+  void toggleDestinationAccount(String name, int accountId) {
+    final info = _destInfo(name);
+    final raw = info['accounts'];
+    final ids = <int>[
+      if (raw is List)
+        for (final x in raw)
+          if (x is num) x.toInt(),
+    ];
+    if (!ids.remove(accountId)) ids.add(accountId);
+    if (ids.isEmpty) {
+      info.remove('accounts');
+    } else {
+      info['accounts'] = ids;
+    }
+    info['office'] = true;
+    settings.destinationInfo[name] = info;
+    changed();
+  }
+
+  void clearDestinationAccounts(String name) {
+    final info = _destInfo(name)..remove('accounts');
+    settings.destinationInfo[name] = info;
+    changed();
   }
 }
 
@@ -2008,7 +2204,15 @@ class _BubbleAppearancePage extends StatelessWidget {
 
         return [
           const _SectionTitle(text: 'معاينة'),
-          _Card(child: _BubblePreview(prefs: p)),
+          _Card(
+            child: _BubblePreview(
+              prefs: p,
+              actions: [
+                for (final a in store.settings.bubbleQuickActions)
+                  if (a.enabled) a,
+              ],
+            ),
+          ),
           const SizedBox(height: 20),
           const _SectionTitle(text: 'الخط والعرض'),
           _Card(
@@ -2162,8 +2366,9 @@ class _BubbleAppearancePage extends StatelessWidget {
 /// معاينة مصغّرة لفقاعة تعكس التفضيلات الحالية.
 class _BubblePreview extends StatelessWidget {
   final BubbleUiPrefs prefs;
+  final List<BubbleQuickActionConfig> actions;
 
-  const _BubblePreview({required this.prefs});
+  const _BubblePreview({required this.prefs, this.actions = const []});
 
   @override
   Widget build(BuildContext context) {
@@ -2306,10 +2511,22 @@ class _BubblePreview extends StatelessWidget {
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
-                  children: [
-                    quickButton('00', Icons.exposure_zero_rounded),
-                    quickButton('اسم جاهز', Icons.person_add_alt_1_rounded),
-                  ],
+                  children: actions.isEmpty
+                      ? [
+                          quickButton('00', Icons.exposure_zero_rounded),
+                          quickButton(
+                            'اسم جاهز',
+                            Icons.person_add_alt_1_rounded,
+                          ),
+                        ]
+                      : [
+                          for (final a in actions.take(5))
+                            QuickActionButton(
+                              action: a,
+                              size: p.quickActionsSize,
+                              onPressed: () {},
+                            ),
+                        ],
                 ),
               ],
             ],
@@ -2386,69 +2603,62 @@ class _ColorRow extends StatelessWidget {
 // صفحة الأزرار السريعة
 // =============================================================
 
-const List<String> _actionTypes = [
-  'appendZeros',
-  'setName',
-  'clearStage',
-  'setCurrency',
-];
-
-const List<String> _actionIconKeys = [
-  'zeros',
-  'person',
-  'clear',
-  'currency',
-  'flash',
-  'check',
-];
-
-String _actionTypeTitle(String type) {
-  switch (type) {
-    case 'appendZeros':
-      return 'إضافة أصفار للمبلغ';
-    case 'setName':
-      return 'اعتماد اسم جاهز';
-    case 'clearStage':
-      return 'مسح المختار';
-    case 'setCurrency':
-      return 'تغيير العملة';
-    default:
-      return 'زر مخصص';
+/// أزرار مقترحة (إضافة بضغطة)
+List<BubbleQuickActionConfig> _quickPresets(List<String> currencies) {
+  var id = DateTime.now().millisecondsSinceEpoch;
+  BubbleQuickActionConfig make(
+    String type, {
+    String? label,
+    String? value,
+    int? color,
+    String style = 'tonal',
+  }) {
+    final t = quickActionTypeOf(type);
+    return BubbleQuickActionConfig(
+      id: id++,
+      label: label ?? t.defaultLabel,
+      iconKey: t.icon,
+      actionType: type,
+      value: value ?? t.defaultValue,
+      colorValue: color,
+      style: style,
+    );
   }
+
+  return [
+    make('appendZeros', label: '000', value: '3', color: 0xFFF08006),
+    make('removeZeros', label: '÷1000', value: '3', color: 0xFF546E7A),
+    make('copySummary', color: 0xFF1E88E5),
+    make('addToNotes', color: 0xFF8E24AA),
+    make('pasteName', color: 0xFF3F51B5),
+    make('saveNow', color: 0xFF43A047, style: 'filled'),
+    make('setMode', label: 'إلغاء', value: 'cancel', color: 0xFFE53935),
+    make('clearAll', color: 0xFF6D4C41),
+    if (currencies.isNotEmpty)
+      make(
+        'setCurrency',
+        label: currencies.first,
+        value: currencies.first,
+        color: 0xFF00897B,
+      ),
+    make('setDestination', color: 0xFF0E7490),
+  ];
 }
 
-String _defaultIconFor(String type) {
-  switch (type) {
-    case 'appendZeros':
-      return 'zeros';
-    case 'setName':
-      return 'person';
-    case 'clearStage':
-      return 'clear';
-    case 'setCurrency':
-      return 'currency';
-    default:
-      return 'flash';
-  }
-}
-
-IconData _actionIconData(String key) {
-  switch (key) {
-    case 'zeros':
-      return Icons.exposure_zero_rounded;
-    case 'person':
-      return Icons.person_add_alt_1_rounded;
-    case 'clear':
-      return Icons.backspace_rounded;
-    case 'currency':
-      return Icons.currency_exchange_rounded;
-    case 'flash':
-      return Icons.bolt_rounded;
-    case 'check':
-      return Icons.task_alt_rounded;
-    default:
-      return Icons.tune_rounded;
-  }
+String _quickActionDetails(BubbleQuickActionConfig a) {
+  final t = quickActionTypeOf(a.actionType);
+  final where = <String>[
+    if (a.modes.isNotEmpty)
+      a.modes.map((m) => quickActionModeLabels[m] ?? m).join('/'),
+    if (a.scope == 'office') 'المكاتب',
+    if (a.scope == 'company' || t.companyOnly) 'الشركات',
+  ];
+  return [
+    t.title,
+    if (a.value.trim().isNotEmpty) '«${a.value.trim()}»',
+    if (where.isNotEmpty) 'بـ ${where.join(' • ')}',
+    if (!a.enabled) 'مخفي',
+  ].join(' • ');
 }
 
 class _QuickActionsPage extends StatefulWidget {
@@ -2463,17 +2673,26 @@ class _QuickActionsPage extends StatefulWidget {
 class _QuickActionsPageState extends State<_QuickActionsPage> {
   _SettingsStore get _store => widget.store;
 
-  Future<void> _add() async {
+  Future<void> _edit([BubbleQuickActionConfig? existing]) async {
     final action = await showModalBottomSheet<BubbleQuickActionConfig>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       useSafeArea: true,
-      builder: (_) => _QuickActionSheet(currencyNames: _store.currencyNames()),
+      builder: (_) => _QuickActionSheet(
+        initial: existing,
+        currencyNames: _store.currencyNames(),
+        destinationNames: _store.destinationBook.names,
+        size: _store.bubblePrefs.quickActionsSize,
+      ),
     );
     if (action == null || !mounted) return;
-    _store.addQuickAction(action);
-    _snack(context, 'أُضيف زر «${action.label}»');
+    if (existing == null) {
+      _store.addQuickAction(action);
+      _snack(context, 'أُضيف زر «${action.label}»');
+    } else {
+      _store.updateQuickAction(action);
+    }
   }
 
   void _remove(BubbleQuickActionConfig action) {
@@ -2486,6 +2705,23 @@ class _QuickActionsPageState extends State<_QuickActionsPage> {
     );
   }
 
+  void _duplicate(BubbleQuickActionConfig action) {
+    final list = _store.settings.bubbleQuickActions;
+    final i = list.indexWhere((a) => a.id == action.id);
+    _store.addQuickAction(
+      action.copy(id: DateTime.now().millisecondsSinceEpoch),
+      at: i < 0 ? null : i + 1,
+    );
+    _snack(context, 'انعملت نسخة من «${action.label}»');
+  }
+
+  void _addPreset(BubbleQuickActionConfig preset) {
+    _store.addQuickAction(
+      preset.copy(id: DateTime.now().millisecondsSinceEpoch),
+    );
+    _snack(context, 'أُضيف زر «${preset.label}»');
+  }
+
   @override
   Widget build(BuildContext context) {
     return _SubPageScaffold(
@@ -2494,41 +2730,163 @@ class _QuickActionsPageState extends State<_QuickActionsPage> {
       icon: Icons.touch_app_rounded,
       color: _kCyan,
       description:
-          'أزرار تظهر داخل كل فقاعة في شاشة التحليل لتنفيذ أوامر سريعة: إضافة أصفار للمبلغ، اعتماد اسم جاهز، مسح المختار أو تغيير العملة.',
+          'أزرار داخل كل فقاعة بشاشة التحليل: أصفار، اسم جاهز، لصق، عملة، '
+          'وجهة، نسخ ملخص، إضافة للحافظة، حفظ الفقاعة لحالها… غيّر لون كل '
+          'زر وشكله ووين يظهر، ورتّبها بالسحب.',
       builder: (context) {
         final actions = _store.settings.bubbleQuickActions;
+        final p = _store.bubblePrefs;
+        final enabled = [
+          for (final a in actions)
+            if (a.enabled) a,
+        ];
+        final presets = _quickPresets(_store.currencyNames());
         return [
-          FilledButton.icon(
-            onPressed: _add,
-            icon: const Icon(Icons.add_rounded),
-            label: const Text('إضافة زر جديد'),
+          const _SectionTitle(text: 'معاينة'),
+          _Card(
+            child: enabled.isEmpty
+                ? Text(
+                    'ما في أزرار ظاهرة.',
+                    style: TextStyle(color: _muted(context)),
+                  )
+                : Wrap(
+                    spacing: p.quickActionsSize == 0 ? 6 : 8,
+                    runSpacing: p.quickActionsSize == 0 ? 6 : 8,
+                    children: [
+                      for (final a in enabled)
+                        QuickActionButton(
+                          action: a,
+                          size: p.quickActionsSize,
+                          onPressed: () => _edit(a),
+                        ),
+                    ],
+                  ),
           ),
           const SizedBox(height: 18),
-          _SectionTitle(text: 'الأزرار (${actions.length})'),
+          const _SectionTitle(text: 'طريقة العرض'),
+          _Card(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _SwitchRow(
+                  icon: Icons.touch_app_rounded,
+                  title: 'إظهار الأزرار بالفقاعات',
+                  subtitle: 'إذا طفيتها بتختفي كل الأزرار من شاشة التحليل',
+                  value: p.showQuickActions,
+                  onChanged: (v) =>
+                      _store.setBubblePrefs(p.copyWith(showQuickActions: v)),
+                ),
+                const _ListDivider(),
+                _SwitchRow(
+                  icon: Icons.vertical_align_bottom_rounded,
+                  title: 'تحت الفقاعة',
+                  subtitle: 'الأزرار بعد كلمات الرسالة بدل ما تكون فوقها',
+                  value: p.quickActionsBottom,
+                  onChanged: (v) =>
+                      _store.setBubblePrefs(p.copyWith(quickActionsBottom: v)),
+                ),
+                const _ListDivider(),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                  child: Row(
+                    children: [
+                      Icon(Icons.format_size_rounded, color: _muted(context)),
+                      const SizedBox(width: 16),
+                      const Expanded(
+                        child: Text(
+                          'حجم الأزرار',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                      SegmentedButton<int>(
+                        showSelectedIcon: false,
+                        segments: const [
+                          ButtonSegment(value: 0, label: Text('صغير')),
+                          ButtonSegment(value: 1, label: Text('عادي')),
+                          ButtonSegment(value: 2, label: Text('كبير')),
+                        ],
+                        selected: {p.quickActionsSize},
+                        onSelectionChanged: (s) => _store.setBubblePrefs(
+                          p.copyWith(quickActionsSize: s.first),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              Expanded(
+                child: _SectionTitle(text: 'الأزرار (${actions.length})'),
+              ),
+              FilledButton.icon(
+                onPressed: () => _edit(),
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('زر جديد'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
           if (actions.isEmpty)
             const _EmptyHint(
               icon: Icons.touch_app_outlined,
               color: _kCyan,
-              text: 'لا توجد أزرار بعد.',
+              text: 'لا توجد أزرار بعد — أضف زرًا أو اختار من المقترحة تحت.',
             )
           else
             _Card(
               padding: EdgeInsets.zero,
-              child: Column(
+              child: ReorderableListView(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                buildDefaultDragHandles: false,
+                onReorder: _store.moveQuickAction,
                 children: [
-                  for (var i = 0; i < actions.length; i++) ...[
-                    if (i > 0) const _ListDivider(indent: 70),
+                  for (var i = 0; i < actions.length; i++)
                     _QuickActionRow(
+                      key: ObjectKey(actions[i]),
+                      index: i,
                       action: actions[i],
+                      onTap: () => _edit(actions[i]),
+                      onToggle: (v) =>
+                          _store.updateQuickAction(actions[i].copy(enabled: v)),
+                      onDuplicate: () => _duplicate(actions[i]),
                       onDelete: () => _remove(actions[i]),
                     ),
-                  ],
                 ],
               ),
             ),
+          const SizedBox(height: 18),
+          const _SectionTitle(text: 'أزرار مقترحة'),
+          _Card(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final pr in presets)
+                  ActionChip(
+                    avatar: Icon(
+                      quickActionIcon(pr.iconKey),
+                      size: 18,
+                      color: pr.colorValue == null
+                          ? null
+                          : _fg(context, Color(pr.colorValue!)),
+                    ),
+                    label: Text(
+                      '${pr.label} • ${quickActionTypeOf(pr.actionType).title}',
+                    ),
+                    onPressed: () => _addPreset(pr),
+                  ),
+              ],
+            ),
+          ),
           const SizedBox(height: 14),
           const _TipText(
-            'تظهر هذه الأزرار داخل الفقاعات عند تفعيل «الأزرار السريعة» في صفحة المظهر والسلوك.',
+            'اسحب الزر من المقبض ⋮⋮ لترتيبه. الزر المطفي بيختفي من الفقاعات بدون '
+            'ما ينحذف. أزرار الوجهة ونوع حركة الشركة بتظهر بحسابات الشركات بس.',
           ),
         ];
       },
@@ -2537,63 +2895,137 @@ class _QuickActionsPageState extends State<_QuickActionsPage> {
 }
 
 class _QuickActionRow extends StatelessWidget {
+  final int index;
   final BubbleQuickActionConfig action;
+  final VoidCallback onTap;
+  final ValueChanged<bool> onToggle;
+  final VoidCallback onDuplicate;
   final VoidCallback onDelete;
 
-  const _QuickActionRow({required this.action, required this.onDelete});
+  const _QuickActionRow({
+    super.key,
+    required this.index,
+    required this.action,
+    required this.onTap,
+    required this.onToggle,
+    required this.onDuplicate,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final details = [
-      _actionTypeTitle(action.actionType),
-      if (action.value.isNotEmpty) action.value,
-      if (action.iconAbove) 'الأيقونة فوق',
-    ].join(' • ');
-    return ListTile(
-      contentPadding: const EdgeInsetsDirectional.only(start: 14, end: 4),
-      leading: _IconBadge(
-        icon: _actionIconData(action.iconKey),
-        color: _kCyan,
-        size: 40,
-      ),
-      title: Text(
-        action.label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontWeight: FontWeight.w800),
-      ),
-      subtitle: Text(
-        details,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(color: _muted(context), fontSize: 12.5),
-      ),
-      trailing: _SmallIconButton(
-        icon: Icons.delete_outline_rounded,
-        tooltip: 'حذف الزر',
-        color: Theme.of(context).colorScheme.error,
-        onPressed: onDelete,
+    final color = action.colorValue == null
+        ? Theme.of(context).colorScheme.primary
+        : Color(action.colorValue!);
+    return Opacity(
+      opacity: action.enabled ? 1 : .55,
+      child: ListTile(
+        onTap: onTap,
+        contentPadding: const EdgeInsetsDirectional.only(start: 4, end: 0),
+        leading: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ReorderableDragStartListener(
+              index: index,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Icon(
+                  Icons.drag_indicator_rounded,
+                  color: _muted(context),
+                ),
+              ),
+            ),
+            _IconBadge(
+              icon: quickActionIcon(action.iconKey),
+              color: color,
+              size: 38,
+            ),
+          ],
+        ),
+        title: Text(
+          action.label.trim().isEmpty
+              ? quickActionTypeOf(action.actionType).defaultLabel
+              : action.label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+        subtitle: Text(
+          _quickActionDetails(action),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: _muted(context), fontSize: 12),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Switch(value: action.enabled, onChanged: onToggle),
+            PopupMenuButton<String>(
+              tooltip: 'خيارات',
+              onSelected: (v) {
+                if (v == 'edit') onTap();
+                if (v == 'dup') onDuplicate();
+                if (v == 'del') onDelete();
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'edit', child: Text('تعديل')),
+                PopupMenuItem(value: 'dup', child: Text('نسخة منه')),
+                PopupMenuItem(value: 'del', child: Text('حذف')),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
 class _QuickActionSheet extends StatefulWidget {
+  final BubbleQuickActionConfig? initial;
   final List<String> currencyNames;
+  final List<String> destinationNames;
+  final int size;
 
-  const _QuickActionSheet({required this.currencyNames});
+  const _QuickActionSheet({
+    this.initial,
+    required this.currencyNames,
+    required this.destinationNames,
+    this.size = 1,
+  });
 
   @override
   State<_QuickActionSheet> createState() => _QuickActionSheetState();
 }
 
 class _QuickActionSheetState extends State<_QuickActionSheet> {
-  String _type = _actionTypes.first;
-  String _icon = _defaultIconFor(_actionTypes.first);
-  bool _iconAbove = false;
-  final _labelCtrl = TextEditingController();
-  final _valueCtrl = TextEditingController();
+  late String _type = widget.initial?.actionType ?? 'appendZeros';
+  late String _icon = widget.initial?.iconKey ?? quickActionTypeOf(_type).icon;
+  late bool _iconAbove = widget.initial?.iconAbove ?? false;
+  late int? _color = widget.initial?.colorValue;
+  late String _style = widget.initial?.style ?? 'tonal';
+  late String _display = widget.initial?.display ?? '';
+  late final Set<String> _modes = {...?widget.initial?.modes};
+  late String _scope = widget.initial?.scope ?? '';
+  late final _labelCtrl = TextEditingController(
+    text: widget.initial?.label ?? quickActionTypeOf(_type).defaultLabel,
+  );
+  late final _valueCtrl = TextEditingController(
+    text: widget.initial?.value ?? quickActionTypeOf(_type).defaultValue,
+  );
   String? _error;
+
+  bool get _editing => widget.initial != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _labelCtrl.addListener(_refresh);
+    _valueCtrl.addListener(_refresh);
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void dispose() {
@@ -2602,55 +3034,120 @@ class _QuickActionSheetState extends State<_QuickActionSheet> {
     super.dispose();
   }
 
-  String get _valueHint {
-    switch (_type) {
-      case 'appendZeros':
-        return 'عدد الأصفار (من 1 إلى 6)، مثل: 2';
-      case 'setCurrency':
-        return 'اسم العملة، مثل: دولار';
-      case 'setName':
-        return 'اسم محدد، أو اتركه فارغًا لعرض قائمة الأسماء الجاهزة';
-      default:
-        return '';
-    }
+  void _selectType(String t) {
+    final old = quickActionTypeOf(_type);
+    final next = quickActionTypeOf(t);
+    setState(() {
+      // نغيّر النص والأيقونة والقيمة إذا كانوا افتراضيين للنوع القديم
+      if (_labelCtrl.text.trim().isEmpty ||
+          _labelCtrl.text.trim() == old.defaultLabel) {
+        _labelCtrl.text = next.defaultLabel;
+      }
+      if (_icon == old.icon) _icon = next.icon;
+      if (_valueCtrl.text.trim().isEmpty ||
+          _valueCtrl.text.trim() == old.defaultValue) {
+        _valueCtrl.text = next.defaultValue;
+      }
+      _type = t;
+      _error = null;
+    });
+  }
+
+  BubbleQuickActionConfig _build() {
+    final t = quickActionTypeOf(_type);
+    final label = _labelCtrl.text.trim();
+    return BubbleQuickActionConfig(
+      id: widget.initial?.id ?? DateTime.now().millisecondsSinceEpoch,
+      label: label.isEmpty ? t.defaultLabel : label,
+      iconKey: _icon,
+      actionType: _type,
+      value: t.hasValue ? _valueCtrl.text.trim() : '',
+      iconAbove: _iconAbove,
+      colorValue: _color,
+      enabled: widget.initial?.enabled ?? true,
+      style: _style,
+      modes: _modes.toList(),
+      scope: _scope,
+      display: _display,
+    );
   }
 
   void _submit() {
-    final label = _labelCtrl.text.trim();
-    var value = _valueCtrl.text.trim();
-    if (label.isEmpty) {
-      setState(() => _error = 'أدخل نص الزر');
+    final t = quickActionTypeOf(_type);
+    var value = _asciiDigits(_valueCtrl.text.trim());
+    if (t.valueRequired && value.isEmpty) {
+      setState(() => _error = 'اكتب القيمة: ${t.valueHint}');
       return;
     }
-    if (_type == 'appendZeros') {
-      value = _asciiDigits(value);
+    if (_type == 'appendZeros' || _type == 'removeZeros') {
       final n = int.tryParse(value);
       if (n == null || n < 1 || n > 6) {
-        setState(() => _error = 'أدخل عدد الأصفار (رقم من 1 إلى 6)');
+        setState(() => _error = 'عدد الأصفار لازم يكون من 1 إلى 6');
         return;
       }
+      _valueCtrl.text = value;
     }
-    if (_type == 'setCurrency' && value.isEmpty) {
-      setState(() => _error = 'أدخل اسم العملة');
-      return;
+    if (_type == 'setAmount') {
+      final v = double.tryParse(value.replaceAll(RegExp(r'[^0-9.]'), ''));
+      if (v == null || v <= 0) {
+        setState(() => _error = 'اكتب مبلغ صحيح');
+        return;
+      }
+      _valueCtrl.text = value;
     }
-    Navigator.pop(
-      context,
-      BubbleQuickActionConfig(
-        id: DateTime.now().millisecondsSinceEpoch,
-        label: label,
-        iconKey: _icon,
-        actionType: _type,
-        value: _type == 'clearStage' ? '' : value,
-        iconAbove: _iconAbove,
-      ),
+    Navigator.pop(context, _build());
+  }
+
+  void _insertToken(String token) {
+    final text = _valueCtrl.text;
+    final sel = _valueCtrl.selection;
+    final at = sel.isValid ? sel.end : text.length;
+    final next = text.replaceRange(at, at, token);
+    _valueCtrl.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: at + token.length),
     );
+  }
+
+  List<(String, String)> get _valueChoices {
+    switch (_type) {
+      case 'setCurrency':
+        return [for (final c in widget.currencyNames) (c, c)];
+      case 'setDestination':
+        return [
+          ('', 'قائمة الوجهات'),
+          for (final d in widget.destinationNames) (d, d),
+        ];
+      case 'setMovement':
+        return const [('sent', 'مرسلة'), ('received', 'استقبال')];
+      case 'setMode':
+        return const [('add', 'إضافة'), ('edit', 'تعديل'), ('cancel', 'إلغاء')];
+      case 'appendZeros':
+      case 'removeZeros':
+        return const [('1', '0'), ('2', '00'), ('3', '000'), ('6', '000000')];
+      default:
+        return const [];
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final needsValue = _type != 'clearStage';
+    final t = quickActionTypeOf(_type);
+    final isTemplate = _type == 'copySummary' || _type == 'addToNotes';
+    final choices = _valueChoices;
+
+    Widget section(String title) => Padding(
+      padding: const EdgeInsets.only(top: 16, bottom: 8),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontWeight: FontWeight.w900,
+          fontSize: 14,
+          color: _muted(context),
+        ),
+      ),
+    );
 
     return Directionality(
       textDirection: TextDirection.rtl,
@@ -2664,104 +3161,239 @@ class _QuickActionSheetState extends State<_QuickActionSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'زر سريع جديد',
-                style: TextStyle(fontSize: 19, fontWeight: FontWeight.w900),
-              ),
-              const SizedBox(height: 16),
-              const _SectionTitle(text: 'نوع الزر'),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
+              Row(
                 children: [
-                  for (final t in _actionTypes)
-                    ChoiceChip(
-                      avatar: Icon(
-                        _actionIconData(_defaultIconFor(t)),
-                        size: 18,
+                  Expanded(
+                    child: Text(
+                      _editing ? 'تعديل الزر' : 'زر سريع جديد',
+                      style: const TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w900,
                       ),
-                      label: Text(_actionTypeTitle(t)),
-                      selected: _type == t,
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: cs.surfaceContainerHighest.withValues(alpha: .5),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: QuickActionButton(
+                      action: _build(),
+                      size: widget.size,
+                      onPressed: () {},
+                    ),
+                  ),
+                ],
+              ),
+              section('شو بيعمل الزر؟'),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final type in quickActionTypes)
+                    ChoiceChip(
+                      avatar: Icon(quickActionIcon(type.icon), size: 17),
+                      label: Text(type.title),
+                      selected: _type == type.id,
                       showCheckmark: false,
-                      onSelected: (_) => setState(() {
-                        _type = t;
-                        _icon = _defaultIconFor(t);
-                        _error = null;
-                      }),
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (_) => _selectType(type.id),
                     ),
                 ],
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 8),
+              Text(
+                t.description +
+                    (t.companyOnly ? ' — بيظهر بحسابات الشركات بس.' : ''),
+                style: TextStyle(
+                  color: _muted(context),
+                  fontSize: 12.5,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 14),
               TextField(
                 controller: _labelCtrl,
-                textInputAction: needsValue
+                textInputAction: t.hasValue
                     ? TextInputAction.next
                     : TextInputAction.done,
                 decoration: _fieldDecoration(
                   context,
                   label: 'نص الزر',
-                  hint: 'مثل: 00 أو اسم',
+                  hint: t.defaultLabel,
                   icon: Icons.label_outline_rounded,
                 ),
               ),
-              if (needsValue) ...[
+              if (t.hasValue) ...[
                 const SizedBox(height: 10),
                 TextField(
                   controller: _valueCtrl,
-                  keyboardType: _type == 'appendZeros'
+                  keyboardType: t.numeric
                       ? TextInputType.number
                       : TextInputType.text,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _submit(),
+                  minLines: 1,
+                  maxLines: isTemplate ? 3 : 1,
+                  textInputAction: isTemplate
+                      ? TextInputAction.newline
+                      : TextInputAction.done,
+                  onSubmitted: isTemplate ? null : (_) => _submit(),
                   decoration: _fieldDecoration(
                     context,
-                    label: 'القيمة',
-                    hint: _valueHint,
+                    label: isTemplate ? 'القالب' : 'القيمة',
+                    hint: t.valueHint,
                     icon: Icons.edit_note_rounded,
                   ),
                 ),
+                if (choices.isNotEmpty || isTemplate) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final c in choices)
+                        ChoiceChip(
+                          label: Text(c.$2),
+                          selected: _valueCtrl.text.trim() == c.$1,
+                          showCheckmark: false,
+                          visualDensity: VisualDensity.compact,
+                          onSelected: (_) => _valueCtrl.text = c.$1,
+                        ),
+                      if (isTemplate)
+                        for (final token in quickTemplateTokens)
+                          ActionChip(
+                            label: Text(token),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _insertToken(token),
+                          ),
+                    ],
+                  ),
+                ],
               ],
-              if (_type == 'setCurrency' &&
-                  widget.currencyNames.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final c in widget.currencyNames)
-                      ActionChip(
-                        label: Text(c),
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () => setState(() => _valueCtrl.text = c),
-                      ),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 16),
-              const _SectionTitle(text: 'الأيقونة'),
+              section('الأيقونة'),
               Wrap(
-                spacing: 8,
-                runSpacing: 8,
+                spacing: 6,
+                runSpacing: 6,
                 children: [
-                  for (final k in _actionIconKeys)
+                  for (final k in quickActionIconKeys)
                     ChoiceChip(
-                      label: Icon(_actionIconData(k), size: 20),
+                      label: Icon(quickActionIcon(k), size: 20),
                       selected: _icon == k,
                       showCheckmark: false,
+                      visualDensity: VisualDensity.compact,
                       onSelected: (_) => setState(() => _icon = k),
                     ),
                 ],
               ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _iconAbove,
-                onChanged: (v) => setState(() => _iconAbove = v),
-                title: const Text(
-                  'الأيقونة فوق النص',
-                  style: TextStyle(fontWeight: FontWeight.w700),
-                ),
+              section('اللون'),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ChoiceChip(
+                    label: const Text('لون التطبيق'),
+                    selected: _color == null,
+                    showCheckmark: false,
+                    visualDensity: VisualDensity.compact,
+                    onSelected: (_) => setState(() => _color = null),
+                  ),
+                  for (final c in quickActionPalette)
+                    InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () => setState(() => _color = c),
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: Color(c),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: _color == c
+                                ? cs.onSurface
+                                : Colors.transparent,
+                            width: 3,
+                          ),
+                        ),
+                        child: _color == c
+                            ? const Icon(
+                                Icons.check_rounded,
+                                color: Colors.white,
+                                size: 18,
+                              )
+                            : null,
+                      ),
+                    ),
+                ],
               ),
+              section('الشكل'),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: [
+                  for (final e in quickActionStyles.entries)
+                    ButtonSegment(value: e.key, label: Text(e.value)),
+                ],
+                selected: {_style},
+                onSelectionChanged: (s) => setState(() => _style = s.first),
+              ),
+              const SizedBox(height: 10),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: '', label: Text('أيقونة ونص')),
+                  ButtonSegment(value: 'icon', label: Text('أيقونة')),
+                  ButtonSegment(value: 'text', label: Text('نص')),
+                ],
+                selected: {_display},
+                onSelectionChanged: (s) => setState(() => _display = s.first),
+              ),
+              if (_display.isEmpty)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _iconAbove,
+                  onChanged: (v) => setState(() => _iconAbove = v),
+                  title: const Text(
+                    'الأيقونة فوق النص',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              section('وين يظهر؟'),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final e in quickActionModeLabels.entries)
+                    FilterChip(
+                      label: Text('فقاعات ${e.value}'),
+                      selected: _modes.contains(e.key),
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (v) => setState(
+                        () => v ? _modes.add(e.key) : _modes.remove(e.key),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _modes.isEmpty
+                    ? 'ما اخترت شي = بيظهر بكل أنواع الفقاعات.'
+                    : 'بيظهر بس بالأنواع المختارة.',
+                style: TextStyle(color: _muted(context), fontSize: 12),
+              ),
+              if (!t.companyOnly) ...[
+                const SizedBox(height: 10),
+                SegmentedButton<String>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(value: '', label: Text('كل الحسابات')),
+                    ButtonSegment(value: 'office', label: Text('المكاتب')),
+                    ButtonSegment(value: 'company', label: Text('الشركات')),
+                  ],
+                  selected: {_scope},
+                  onSelectionChanged: (s) => setState(() => _scope = s.first),
+                ),
+              ],
               if (_error != null) ...[
+                const SizedBox(height: 12),
                 Text(
                   _error!,
                   style: TextStyle(
@@ -2769,9 +3401,8 @@ class _QuickActionSheetState extends State<_QuickActionSheet> {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                const SizedBox(height: 8),
               ],
-              const SizedBox(height: 8),
+              const SizedBox(height: 18),
               Row(
                 children: [
                   Expanded(
@@ -2784,8 +3415,10 @@ class _QuickActionSheetState extends State<_QuickActionSheet> {
                   Expanded(
                     child: FilledButton.icon(
                       onPressed: _submit,
-                      icon: const Icon(Icons.add_rounded),
-                      label: const Text('إضافة'),
+                      icon: Icon(
+                        _editing ? Icons.check_rounded : Icons.add_rounded,
+                      ),
+                      label: Text(_editing ? 'حفظ' : 'إضافة'),
                     ),
                   ),
                 ],
@@ -2984,8 +3617,625 @@ Future<String?> _promptText(
 // تتبّع مصدر الحركة
 // =============================================================
 
+// =============================================================
+// الوجهات (لحركات الشركات)
+// =============================================================
+
+/// حسابات المكاتب (لاختيار مكاتب الوجهة)
+List<Account> _officeAccounts() {
+  final list = DatabaseService.accountsBox.values
+      .where((a) => !a.type.isCompany)
+      .toList();
+  list.sort((a, b) => _ci(a.name, b.name));
+  return list;
+}
+
+class _DestinationsPage extends StatefulWidget {
+  final _SettingsStore store;
+
+  const _DestinationsPage({required this.store});
+
+  @override
+  State<_DestinationsPage> createState() => _DestinationsPageState();
+}
+
+class _DestinationsPageState extends State<_DestinationsPage> {
+  _SettingsStore get _store => widget.store;
+  final _searchCtrl = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _add() async {
+    final result = await showDialog<_NewDestinationResult>(
+      context: context,
+      builder: (_) => _NewDestinationDialog(ownerOf: _store.destinationOwnerOf),
+    );
+    if (result == null || !mounted) return;
+    final error = _store.addDestination(
+      result.name,
+      result.aliases,
+      toOffice: result.toOffice,
+    );
+    _snack(context, error ?? 'أُضيفت وجهة «${result.name.trim()}»');
+  }
+
+  Future<void> _addAlias(Destination d) async {
+    final v = await _promptText(
+      context,
+      title: 'اختصار جديد لـ «${d.name}»',
+      hint: 'مثلًا: اسطنبول أو TR (أكتر من واحد؟ افصل بفاصلة)',
+      icon: Icons.alternate_email_rounded,
+      confirmLabel: 'إضافة',
+    );
+    if (v == null || !mounted) return;
+    final errors = <String>[];
+    var added = 0;
+    for (final raw in v.split(RegExp(r'[،,\n]'))) {
+      if (raw.trim().isEmpty) continue;
+      final e = _store.addDestinationAlias(d.name, raw);
+      if (e == null) {
+        added++;
+      } else {
+        errors.add(e);
+      }
+    }
+    if (!mounted) return;
+    if (errors.isNotEmpty) {
+      _snack(context, errors.first);
+    } else if (added > 1) {
+      _snack(context, 'أُضيف $added اختصار لـ «${d.name}»');
+    }
+  }
+
+  void _removeAlias(Destination d, String alias) {
+    _store.removeDestinationAlias(alias);
+    _snack(
+      context,
+      'حُذف «$alias» من «${d.name}»',
+      onUndo: () => _store.addDestinationAlias(d.name, alias),
+    );
+  }
+
+  Future<void> _rename(Destination d) async {
+    final v = await _promptText(
+      context,
+      title: 'إعادة تسمية الوجهة',
+      initial: d.name,
+      hint: 'الاسم الجديد',
+      icon: Icons.edit_rounded,
+    );
+    if (v == null || !mounted) return;
+    final newName = v.trim();
+    final error = _store.renameDestination(d.name, newName);
+    if (error != null) {
+      _snack(context, error);
+      return;
+    }
+    if (newName.isEmpty || newName == d.name) return;
+    // الحركات المحفوظة بالاسم القديم بتاخد الاسم الجديد
+    final oldKey = destinationKey(d.name);
+    final changed = <TransactionModel>[];
+    for (final t in DatabaseService.transactionsBox.values) {
+      if (t.destination != null && destinationKey(t.destination) == oldKey) {
+        changed.add(t);
+      }
+    }
+    if (changed.isNotEmpty) {
+      TxHistoryService.annotate([
+        for (final t in changed) t.id,
+      ], 'إعادة تسمية الوجهة');
+      for (final t in changed) {
+        t.destination = newName;
+        await t.save();
+      }
+    }
+    if (!mounted) return;
+    _snack(
+      context,
+      changed.isEmpty
+          ? 'صار اسمها «$newName»'
+          : 'صار اسمها «$newName» وتحدّثت ${changed.length} حركة',
+    );
+  }
+
+  Future<void> _delete(Destination d) async {
+    final used = DatabaseService.transactionsBox.values
+        .where(
+          (t) =>
+              t.destination != null && destinationKey(t.destination) == d.key,
+        )
+        .length;
+    final ok = await _confirm(
+      context,
+      title: 'حذف الوجهة',
+      message:
+          'سيتم حذف «${d.name}» مع اختصاراتها (${d.aliases.length}).'
+          '${used == 0 ? '' : ' الحركات القديمة ($used) بتضل الوجهة مكتوبة فيها بس ما عاد إلها قاعدة بالتتبّع.'}',
+      confirmLabel: 'حذف',
+      danger: true,
+    );
+    if (!ok || !mounted) return;
+    final removed = _store.deleteDestination(d.name);
+    _snack(
+      context,
+      'حُذفت وجهة «${d.name}»',
+      onUndo: () => _store.restoreDestination(removed),
+    );
+  }
+
+  bool _matches(Destination d, String q) {
+    if (q.isEmpty) return true;
+    if (_norm(d.name).contains(q)) return true;
+    return d.aliases.any((a) => _norm(a).contains(q));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SubPageScaffold(
+      store: _store,
+      title: 'الوجهات',
+      icon: Icons.place_rounded,
+      color: _kCyan,
+      description:
+          'وجهات حركات الشركات: لكل وجهة اختصارات تابعة إلها (متل العملات)، '
+          'والبرنامج بيتعرف عليها من الرسالة وقت إضافة حركة الشركة. حدد إذا '
+          'الوجهة تابعة لمكتب من المكاتب أو لا: التابعة لمكتب لازم توصل لمكتب، '
+          'ويلي مو تابعة ما منستناها — وإذا وصلت لمكتب بيطلع تحذير «يمكن تغيّر '
+          'المسار».',
+      extraListenable: DatabaseService.accountsBox.listenable(),
+      builder: (context) {
+        final all = _store.destinationBook.items;
+        final q = _norm(_query.trim());
+        final shown = [
+          for (final d in all)
+            if (_matches(d, q)) d,
+        ];
+        final offices = _officeAccounts();
+        final officeCount = all.where((d) => d.toOffice).length;
+        return [
+          FilledButton.tonalIcon(
+            onPressed: _add,
+            icon: const Icon(Icons.add_location_alt_rounded),
+            label: const Text('إضافة وجهة'),
+          ),
+          if (all.length > 5) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _searchCtrl,
+              onChanged: (v) => setState(() => _query = v),
+              decoration: _fieldDecoration(
+                context,
+                hint: 'ابحث عن وجهة أو اختصار…',
+                icon: Icons.search_rounded,
+              ),
+            ),
+          ],
+          const SizedBox(height: 18),
+          _SectionTitle(
+            text: 'الوجهات (${all.length})',
+            trailing: all.isEmpty
+                ? null
+                : _ValuePill(
+                    text: '$officeCount تابعة لمكتب',
+                    color: kDestOfficeColor,
+                  ),
+          ),
+          if (all.isEmpty)
+            const _EmptyHint(
+              icon: Icons.place_outlined,
+              color: _kCyan,
+              text:
+                  'لا توجد وجهات بعد — أضف وجهة (مثل: حلب، تركيا، دمشق) مع '
+                  'اختصاراتها.',
+            )
+          else if (shown.isEmpty)
+            _EmptyHint(
+              icon: Icons.search_off_rounded,
+              text: 'لا توجد وجهة مطابقة لـ «${_query.trim()}»',
+            )
+          else
+            for (final d in shown)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _DestinationCard(
+                  destination: d,
+                  offices: offices,
+                  onAddAlias: () => _addAlias(d),
+                  onRemoveAlias: (a) => _removeAlias(d, a),
+                  onRename: () => _rename(d),
+                  onDelete: () => _delete(d),
+                  onOffice: (v) => _store.setDestinationOffice(d.name, v),
+                  onToggleAccount: (id) =>
+                      _store.toggleDestinationAccount(d.name, id),
+                  onAnyOffice: () => _store.clearDestinationAccounts(d.name),
+                ),
+              ),
+          const SizedBox(height: 6),
+          const _TipText(
+            'الوجهة بتنسجل بس لحركات الشركات وقت الإضافة (بشاشة الفقاعات أو '
+            'الإضافة اليدوية)، ويمكن تغييرها من الفقاعة نفسها. إذا انذكرت '
+            'وجهتين بنفس الرسالة بتختار أنت.',
+          ),
+        ];
+      },
+    );
+  }
+}
+
+/// شارة صغيرة لوجهة (تابعة لمكتب / مو تابعة)
+class _DestinationTag extends StatelessWidget {
+  final Destination destination;
+
+  const _DestinationTag({required this.destination});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = destination.toOffice ? kDestOfficeColor : kDestExternalColor;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: _tint(context, color, light: .08, dark: .16),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: .25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            destination.toOffice
+                ? Icons.storefront_rounded
+                : Icons.place_rounded,
+            size: 14,
+            color: _fg(context, color),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            destination.name,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              color: _fg(context, color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DestinationCard extends StatelessWidget {
+  final Destination destination;
+  final List<Account> offices;
+  final VoidCallback onAddAlias;
+  final ValueChanged<String> onRemoveAlias;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+  final ValueChanged<bool> onOffice;
+  final ValueChanged<int> onToggleAccount;
+  final VoidCallback onAnyOffice;
+
+  const _DestinationCard({
+    required this.destination,
+    required this.offices,
+    required this.onAddAlias,
+    required this.onRemoveAlias,
+    required this.onRename,
+    required this.onDelete,
+    required this.onOffice,
+    required this.onToggleAccount,
+    required this.onAnyOffice,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final d = destination;
+    final color = d.toOffice ? kDestOfficeColor : kDestExternalColor;
+    final selectedNames = [
+      for (final a in offices)
+        if (d.officeIds.contains(a.id)) a.name,
+    ];
+    final subtitle = d.toOffice
+        ? (selectedNames.isEmpty
+              ? 'تابعة لمكتب (أي مكتب)'
+              : 'تابعة لـ ${selectedNames.join('، ')}')
+        : 'مو تابعة لمكتب';
+
+    return _Card(
+      padding: const EdgeInsetsDirectional.fromSTEB(14, 10, 6, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              _IconBadge(
+                icon: d.toOffice
+                    ? Icons.storefront_rounded
+                    : Icons.place_rounded,
+                color: color,
+                size: 38,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      d.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$subtitle • ${d.aliases.length} اختصار',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: _muted(context), fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              _SmallIconButton(
+                icon: Icons.edit_rounded,
+                tooltip: 'إعادة تسمية',
+                onPressed: onRename,
+              ),
+              _SmallIconButton(
+                icon: Icons.delete_outline_rounded,
+                tooltip: 'حذف الوجهة',
+                color: cs.error,
+                onPressed: onDelete,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsetsDirectional.only(end: 8),
+            child: SegmentedButton<bool>(
+              showSelectedIcon: false,
+              style: SegmentedButton.styleFrom(
+                selectedBackgroundColor: color,
+                selectedForegroundColor: Colors.white,
+              ),
+              segments: const [
+                ButtonSegment(
+                  value: true,
+                  icon: Icon(Icons.storefront_rounded),
+                  label: Text('تابعة لمكتب'),
+                ),
+                ButtonSegment(
+                  value: false,
+                  icon: Icon(Icons.near_me_disabled_rounded),
+                  label: Text('مو تابعة لمكتب'),
+                ),
+              ],
+              selected: {d.toOffice},
+              onSelectionChanged: (s) => onOffice(s.first),
+            ),
+          ),
+          if (d.toOffice && offices.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              'أي مكاتب؟',
+              style: TextStyle(
+                color: _muted(context),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: 8),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  ChoiceChip(
+                    label: const Text('أي مكتب'),
+                    selected: d.officeIds.isEmpty,
+                    showCheckmark: false,
+                    visualDensity: VisualDensity.compact,
+                    onSelected: (_) => onAnyOffice(),
+                  ),
+                  for (final a in offices)
+                    FilterChip(
+                      label: Text(a.name),
+                      selected: d.officeIds.contains(a.id),
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (_) => onToggleAccount(a.id),
+                    ),
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Text(
+            'الاختصارات',
+            style: TextStyle(
+              color: _muted(context),
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Padding(
+            padding: const EdgeInsetsDirectional.only(end: 8),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final a in d.aliases)
+                  _WordChip(
+                    text: a,
+                    color: color,
+                    onDelete: () => onRemoveAlias(a),
+                  ),
+                _AddChip(label: 'اختصار', onPressed: onAddAlias),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NewDestinationResult {
+  final String name;
+  final List<String> aliases;
+  final bool toOffice;
+
+  const _NewDestinationResult(this.name, this.aliases, this.toOffice);
+}
+
+class _NewDestinationDialog extends StatefulWidget {
+  final String? Function(String text) ownerOf;
+
+  const _NewDestinationDialog({required this.ownerOf});
+
+  @override
+  State<_NewDestinationDialog> createState() => _NewDestinationDialogState();
+}
+
+class _NewDestinationDialogState extends State<_NewDestinationDialog> {
+  final _nameCtrl = TextEditingController();
+  final _aliasCtrl = TextEditingController();
+  bool _toOffice = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _aliasCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'أدخل اسم الوجهة');
+      return;
+    }
+    final owner = widget.ownerOf(name);
+    if (owner != null) {
+      setState(() => _error = '«$name» موجود مسبقًا ضمن «$owner»');
+      return;
+    }
+    final aliases = [
+      for (final raw in _aliasCtrl.text.split(RegExp(r'[،,\n]')))
+        if (raw.trim().isNotEmpty) raw.trim(),
+    ];
+    Navigator.pop(context, _NewDestinationResult(name, aliases, _toOffice));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: AlertDialog(
+        title: const Text(
+          'إضافة وجهة',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _nameCtrl,
+                autofocus: true,
+                textInputAction: TextInputAction.next,
+                decoration: _fieldDecoration(
+                  context,
+                  hint: 'اسم الوجهة، مثل: حلب',
+                  icon: Icons.place_rounded,
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _aliasCtrl,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _submit(),
+                decoration: _fieldDecoration(
+                  context,
+                  hint: 'اختصارات (اختياري)، مثل: حلب الشهباء، ALP',
+                  icon: Icons.alternate_email_rounded,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'افصل بين الاختصارات بفاصلة. الاسم نفسه بينعرف لحاله.',
+                style: TextStyle(color: _muted(context), fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.storefront_rounded),
+                    label: Text('تابعة لمكتب'),
+                  ),
+                  ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.near_me_disabled_rounded),
+                    label: Text('مو تابعة'),
+                  ),
+                ],
+                selected: {_toOffice},
+                onSelectionChanged: (s) => setState(() => _toOffice = s.first),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _toOffice
+                    ? 'حركاتها لازم توصل لمكتب، وإلا بيطلع تنبيه «ما راحت لمكتب».'
+                    : 'ما منستنى توصل لمكتب. إذا وصلت بيطلع تحذير «يمكن تغيّر المسار».',
+                style: TextStyle(
+                  color: _muted(context),
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _error!,
+                  style: TextStyle(
+                    color: cs.error,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(onPressed: _submit, child: const Text('إضافة')),
+        ],
+      ),
+    );
+  }
+}
+
 class _TracePrefsPage extends StatelessWidget {
-  const _TracePrefsPage();
+  final _SettingsStore store;
+
+  const _TracePrefsPage({required this.store});
 
   static String _hoursText(int h) {
     if (h == 1) return 'ساعة';
@@ -3048,30 +4298,6 @@ class _TracePrefsPage extends StatelessWidget {
     _set(p.copyWith(unknownLabel: v.trim()));
   }
 
-  Future<void> _addWords(BuildContext context, TracePrefs p) async {
-    final v = await _promptText(
-      context,
-      title: 'كلمة جديدة',
-      hint: 'مثلًا: حلب (أكتر من كلمة؟ افصل بفاصلة)',
-      icon: Icons.add_rounded,
-      confirmLabel: 'إضافة',
-    );
-    if (v == null) return;
-    final list = [...p.mustReachWords];
-    var added = 0;
-    for (final raw in v.split(RegExp(r'[،,\n]'))) {
-      final w = raw.trim();
-      if (w.isEmpty || list.any((e) => _norm(e) == _norm(w))) continue;
-      list.add(w);
-      added++;
-    }
-    if (added == 0) {
-      if (context.mounted) _snack(context, 'الكلمة موجودة');
-      return;
-    }
-    _set(p.copyWith(mustReachWords: list));
-  }
-
   @override
   Widget build(BuildContext context) {
     final bg = _pageBg(context);
@@ -3089,12 +4315,13 @@ class _TracePrefsPage extends StatelessWidget {
             style: TextStyle(fontWeight: FontWeight.w800, fontSize: 19),
           ),
         ),
-        body: ValueListenableBuilder<TracePrefs>(
-          valueListenable: TraceService.prefs,
-          builder: (context, p, _) {
+        body: ListenableBuilder(
+          listenable: Listenable.merge([TraceService.prefs, store]),
+          builder: (context, _) {
+            final p = TraceService.prefs.value;
             final normal = p.normalHoursSafe;
             final max = p.maxHoursSafe;
-            final words = p.mustReachWords;
+            final dests = store.destinationBook.items;
             return ListView(
               padding: EdgeInsets.fromLTRB(
                 16,
@@ -3195,45 +4422,54 @@ class _TracePrefsPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 20),
                 _SectionTitle(
-                  text: 'حركات لازم تروح لمكتب',
-                  trailing: words.isEmpty
+                  text: 'الوجهات',
+                  trailing: dests.isEmpty
                       ? null
-                      : _ValuePill(text: '${words.length}', color: _kOrange),
+                      : _ValuePill(text: '${dests.length}', color: _kCyan),
                 ),
                 _Card(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Text(
-                        'إذا حركة استقبال بحساب الشركة فيها وحدة من هالكلمات '
-                        '(بالاسم أو الملاحظات أو نص الرسالة) وما راحت لمكتب، '
-                        'بيطلعلك تحذير «ما راحت لمكتب».',
+                        'وجهة حركة الشركة بتنسجل وقت الإضافة. يلي وجهتها تابعة '
+                        'لمكتب لازم توصل لمكتب، وإذا ما وصلت خلال الوقت تحت '
+                        'بيطلع تنبيه «ما راحت لمكتب». يلي وجهتها مو تابعة لمكتب '
+                        'ما منستناها، وإذا لقينا إلها حركة مكتب مطابقة بيطلع '
+                        'تحذير «يمكن تغيّر المسار». (ما منحتفظ بنص الرسائل.)',
                         style: TextStyle(
                           color: _muted(context),
                           fontSize: 12.5,
                           height: 1.5,
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final w in words)
-                            _WordChip(
-                              text: w,
-                              color: _kOrange,
-                              onDelete: () => _set(
-                                p.copyWith(
-                                  mustReachWords: [...words]..remove(w),
-                                ),
+                      if (dests.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            for (final d in dests.take(16))
+                              _DestinationTag(destination: d),
+                            if (dests.length > 16)
+                              _ValuePill(
+                                text: '+${dests.length - 16}',
+                                color: _kSlate,
                               ),
-                            ),
-                          _AddChip(
-                            label: 'إضافة كلمة',
-                            onPressed: () => _addWords(context, p),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      FilledButton.tonalIcon(
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => _DestinationsPage(store: store),
                           ),
-                        ],
+                        ),
+                        icon: const Icon(Icons.place_rounded),
+                        label: Text(
+                          dests.isEmpty ? 'إضافة وجهات' : 'إدارة الوجهات',
+                        ),
                       ),
                     ],
                   ),
@@ -3245,8 +4481,10 @@ class _TracePrefsPage extends StatelessWidget {
                     children: [
                       _SliderRow(
                         icon: Icons.notifications_active_rounded,
-                        title: 'التنبيه بعد',
-                        subtitle: 'إذا ما انربطت بحركة مكتب خلال هالوقت',
+                        title: 'تنبيه «ما راحت لمكتب» بعد',
+                        subtitle:
+                            'لحركات الوجهات التابعة لمكتب: إذا ما انربطت بحركة '
+                            'مكتب خلال هالوقت',
                         valueText: p.alertAfterHours <= 0
                             ? 'فورًا'
                             : _hoursText(p.alertAfterHours.clamp(1, 48)),

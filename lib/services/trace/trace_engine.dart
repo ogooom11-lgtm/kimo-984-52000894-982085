@@ -17,14 +17,20 @@
 //    الاسم والمبلغ والعملة): بتتوزع حسب الترتيب الزمني.
 //  • قرارات المستخدم (تأكيد/تغيير/مجهول/مو هي/تجاهل) ثابتة وما بتتغير
 //    تلقائيًا.
+//  • الوجهة (من الإعدادات): حركة شركة وجهتها تابعة لمكتب لازم توصل لمكتب
+//    (وإلا «ما راحت لمكتب»)، ووجهتها مو تابعة لمكتب ما منستناها، وإذا
+//    وصلت لمكتب = تحذير «يمكن تغيّر المسار».
 //
 // ملف Dart نقي (بدون Flutter) حتى يمكن اختباره مباشرة.
 // -------------------------------------------------------------
 
 import '../../models.dart';
+import '../destinations.dart';
 import '../detection/receive_matching.dart' show CurrencyMatcher, nameKeysOf;
 import '../detection/text_tokens.dart' show normalizeText;
 import '../tx_history.dart';
+
+export '../destinations.dart' show Destination, DestinationBook;
 
 int? _asInt(Object? v) {
   if (v is int) return v;
@@ -113,14 +119,11 @@ class TracePrefs {
   /// سماحية إذا انسجلت حركة المكتب قبل رسالة الشركة بشوي (دقائق).
   final int earlyMinutes;
 
-  /// تنبيه «ما راحت لمكتب» بعد هالوقت (ساعات).
+  /// تنبيه «ما راحت لمكتب» (للوجهات التابعة لمكتب) بعد هالوقت (ساعات).
   final int alertAfterHours;
 
   /// الكلمة يلي بتظهر لما يكون المصدر غير معروف.
   final String unknownLabel;
-
-  /// حركات الشركة يلي فيها وحدة من هالكلمات لازم تروح لمكتب.
-  final List<String> mustReachWords;
 
   /// حركات الشركة «المرسلة» كمان بتنحسب مصدر (افتراضيًا: الاستقبال بس).
   final bool includeSent;
@@ -135,7 +138,6 @@ class TracePrefs {
     this.earlyMinutes = 15,
     this.alertAfterHours = 2,
     this.unknownLabel = defaultUnknownLabel,
-    this.mustReachWords = const [],
     this.includeSent = false,
     this.warnDays = 30,
   });
@@ -169,7 +171,6 @@ class TracePrefs {
     'earlyMinutes': earlyMinutes,
     'alertAfterHours': alertAfterHours,
     'unknownLabel': unknownLabel,
-    'mustReachWords': mustReachWords,
     'includeSent': includeSent,
     'warnDays': warnDays,
   };
@@ -177,19 +178,12 @@ class TracePrefs {
   factory TracePrefs.fromMap(Object? raw) {
     if (raw is! Map) return const TracePrefs();
     int i(Object? v, int d) => _asInt(v) ?? d;
-    final words = raw['mustReachWords'];
     return TracePrefs(
       normalHours: i(raw['normalHours'], 24),
       maxHours: i(raw['maxHours'], 48),
       earlyMinutes: i(raw['earlyMinutes'], 15),
       alertAfterHours: i(raw['alertAfterHours'], 2),
       unknownLabel: raw['unknownLabel']?.toString() ?? defaultUnknownLabel,
-      mustReachWords: words is List
-          ? [
-              for (final w in words)
-                if ('$w'.trim().isNotEmpty) '$w'.trim(),
-            ]
-          : const [],
       includeSent: raw['includeSent'] == true,
       warnDays: i(raw['warnDays'], 30).clamp(0, 3650),
     );
@@ -201,7 +195,6 @@ class TracePrefs {
     int? earlyMinutes,
     int? alertAfterHours,
     String? unknownLabel,
-    List<String>? mustReachWords,
     bool? includeSent,
     int? warnDays,
   }) => TracePrefs(
@@ -210,7 +203,6 @@ class TracePrefs {
     earlyMinutes: earlyMinutes ?? this.earlyMinutes,
     alertAfterHours: alertAfterHours ?? this.alertAfterHours,
     unknownLabel: unknownLabel ?? this.unknownLabel,
-    mustReachWords: mustReachWords ?? this.mustReachWords,
     includeSent: includeSent ?? this.includeSent,
     warnDays: warnDays ?? this.warnDays,
   );
@@ -450,8 +442,13 @@ class CompanyTrace {
 
   /// حركات مكتب ممكن تكون وجهتها (بدها اختيار)
   final List<int> possibleOfficeIds;
-  final bool mustReach;
-  final String? mustReachWord;
+
+  /// الوجهة المسجلة مع الحركة (كما هي) ونوعها حسب الإعدادات
+  final String? destination;
+  final TraceDestKind destKind;
+
+  /// المكاتب المحددة للوجهة (فاضية = أي مكتب)
+  final List<int> destOfficeIds;
 
   /// من إيمتى عم تستنى مكتب (رسالة الشركة أو آخر إلغاء)
   final DateTime waitingSince;
@@ -463,15 +460,26 @@ class CompanyTrace {
     required this.officeIds,
     required this.activeOfficeId,
     required this.possibleOfficeIds,
-    required this.mustReach,
-    required this.mustReachWord,
+    required this.destination,
+    required this.destKind,
+    this.destOfficeIds = const [],
     required this.waitingSince,
     required this.overdue,
     required this.cancelled,
   });
 
   bool get reached => activeOfficeId != null;
+
+  /// وجهتها تابعة لمكتب: لازم توصل لمكتب
+  bool get mustReach => destKind == TraceDestKind.office;
+
+  /// وجهتها مو تابعة لمكتب: ما منستناها
+  bool get external => destKind == TraceDestKind.external;
 }
+
+/// نوع وجهة حركة الشركة: بدون وجهة (أو وجهة ما عادت موجودة بالإعدادات)،
+/// تابعة لمكتب، أو مو تابعة لمكتب.
+enum TraceDestKind { none, office, external }
 
 enum TraceWarningKind {
   choose,
@@ -482,6 +490,12 @@ enum TraceWarningKind {
   companyCancelled,
   notReached,
   brokenLink,
+
+  /// وجهتها مو تابعة لمكتب بس انربطت بحركة مكتب
+  routeChanged,
+
+  /// وجهتها لمكاتب محددة بس وصلت لمكتب تاني
+  wrongOffice,
 }
 
 class TraceWarning {
@@ -871,16 +885,18 @@ class TraceEngine {
           (m == CompanyMovementType.sent ||
               m == CompanyMovementType.sentCancelled));
 
+  /// [destinations]: الوجهات حسب مفتاحها ([destinationKey]).
   TraceResult run({
     required Iterable<TransactionModel> transactions,
     required Map<int, Account> accounts,
     Map<int, List<TxHistoryEntry>> keyEdits = const {},
-    Map<int, String> messages = const {},
+    Map<String, Destination> destinations = const {},
   }) {
     final ctx = _Ctx(this);
+    ctx.destinations = destinations;
     ctx.build(transactions, accounts, keyEdits);
     ctx.resolve();
-    final companyTraces = ctx.companyTraces(messages);
+    final companyTraces = ctx.companyTraces();
     final warnings = ctx.warnings(companyTraces);
     return TraceResult._(
       prefs: prefs,
@@ -899,6 +915,11 @@ class _Ctx {
   _Ctx(this.e);
 
   TracePrefs get prefs => e.prefs;
+
+  Map<String, Destination> destinations = const {};
+
+  /// أسماء كل الحسابات (للشرح)
+  Map<int, String> accountNames = const {};
 
   final Map<int, _Node> nodes = {};
   final List<_Node> offices = [];
@@ -926,6 +947,7 @@ class _Ctx {
     Map<int, Account> accounts,
     Map<int, List<TxHistoryEntry>> keyEdits,
   ) {
+    accountNames = {for (final a in accounts.entries) a.key: a.value.name};
     for (final t in txs) {
       final acc = accounts[t.accountId];
       if (acc == null) continue;
@@ -1460,20 +1482,36 @@ class _Ctx {
   // حركات الشركات
   // ---------------------------------------------------------
 
-  String? mustReachWordOf(_Node c, Map<int, String> messages) {
-    if (prefs.mustReachWords.isEmpty) return null;
-    final text = normalizeText(
-      '${c.tx.beneficiary} ${c.tx.notes} ${messages[c.id] ?? ''}',
-    );
-    if (text.isEmpty) return null;
-    for (final w in prefs.mustReachWords) {
-      final k = normalizeText(w);
-      if (k.isNotEmpty && text.contains(k)) return w;
+  final Map<int, Destination?> _destCache = {};
+
+  /// وجهة حركة الشركة حسب الإعدادات (null = بدون وجهة أو ما عادت موجودة)
+  Destination? destOf(_Node c) {
+    final name = c.tx.destination;
+    if (name == null || name.trim().isEmpty || destinations.isEmpty) {
+      return null;
     }
-    return null;
+    return _destCache.putIfAbsent(
+      c.id,
+      () => destinations[destinationKey(name)],
+    );
   }
 
-  Map<int, CompanyTrace> companyTraces(Map<int, String> messages) {
+  TraceDestKind destKindOf(_Node c) {
+    final d = destOf(c);
+    if (d == null) return TraceDestKind.none;
+    return d.toOffice ? TraceDestKind.office : TraceDestKind.external;
+  }
+
+  /// «وجهتها «حلب» (تابعة لمكتب)»
+  String destText(_Node c) {
+    final d = destOf(c);
+    final name = d?.name ?? c.tx.destination?.trim() ?? '';
+    if (name.isEmpty) return '';
+    if (d == null) return 'وجهتها «$name»';
+    return 'وجهتها «$name» (${d.toOffice ? 'تابعة لمكتب' : 'مو تابعة لمكتب'})';
+  }
+
+  Map<int, CompanyTrace> companyTraces() {
     final possibleByCompany = <int, List<int>>{};
     for (final t in officeTraces.values) {
       if (t.status != TraceStatus.possible) continue;
@@ -1494,9 +1532,12 @@ class _Ctx {
           active = o.id;
         }
       }
-      final word = mustReachWordOf(c, messages);
+      final dest = destOf(c);
+      final kind = dest == null
+          ? TraceDestKind.none
+          : (dest.toOffice ? TraceDestKind.office : TraceDestKind.external);
       final overdue =
-          word != null &&
+          kind == TraceDestKind.office &&
           !c.companyCancelled &&
           active == null &&
           e.now.difference(since) > prefs.alertAfter;
@@ -1505,8 +1546,11 @@ class _Ctx {
         officeIds: [for (final o in hs) o.id],
         activeOfficeId: active,
         possibleOfficeIds: possibleByCompany[c.id] ?? const [],
-        mustReach: word != null,
-        mustReachWord: word,
+        destination: c.tx.destination?.trim().isEmpty ?? true
+            ? null
+            : c.tx.destination!.trim(),
+        destKind: kind,
+        destOfficeIds: dest?.officeIds ?? const [],
         waitingSince: since,
         overdue: overdue,
         cancelled: c.companyCancelled,
@@ -1614,6 +1658,9 @@ class _Ctx {
               '${first.amountSame ? '' : ' • المبلغ ${traceAmount(first.companyAmount)} بدل ${traceAmount(first.officeAmount)}'}'
               '$more';
         }
+        final firstDest = destKindOf(c) == TraceDestKind.external
+            ? ' • حركة الشركة ${destText(c)}'
+            : '';
         out.add(
           TraceWarning(
             kind: TraceWarningKind.choose,
@@ -1621,7 +1668,7 @@ class _Ctx {
             officeId: o.id,
             sig: 'ch:${o.id}',
             title: title,
-            detail: detail,
+            detail: '$detail$firstDest',
             at: o.date,
           ),
         );
@@ -1648,6 +1695,40 @@ class _Ctx {
                 'حركة «${c.tx.beneficiary}» انلغت بـ ${_companyLabel(c)}'
                 '${c.tx.cancelledAt == null ? '' : ' بتاريخ ${_dateTime(c.tx.cancelledAt!)}'}'
                 '، بس بـ ${_officeLabel(o)} ${delivered ? 'انسلمت' : 'لسا مضافة'}.',
+            at: o.date,
+          ),
+        );
+      }
+
+      // الوجهة: مو تابعة لمكتب بس وصلت لمكتب، أو وصلت لمكتب غير مكاتبها
+      final dest = destOf(c);
+      if (dest != null && !dest.toOffice) {
+        out.add(
+          TraceWarning(
+            kind: TraceWarningKind.routeChanged,
+            officeId: o.id,
+            companyId: c.id,
+            sig: 'rc:${o.id}:${c.id}:${_hash(dest.key)}',
+            title: 'يمكن تغيّر المسار',
+            detail:
+                'حركة «${c.tx.beneficiary}» بـ ${_companyLabel(c)} وجهتها '
+                '«${dest.name}» (مو تابعة لمكتب)، بس انربطت بحركة بـ '
+                '${_officeLabel(o)}. تأكد إذا المسار تغيّر.',
+            at: o.date,
+          ),
+        );
+      } else if (dest != null && !dest.allowsOffice(o.account.id)) {
+        out.add(
+          TraceWarning(
+            kind: TraceWarningKind.wrongOffice,
+            officeId: o.id,
+            companyId: c.id,
+            sig: 'wo:${o.id}:${c.id}:${_hash(dest.key)}',
+            title: 'وصلت لمكتب غير مكتب الوجهة',
+            detail:
+                'حركة «${c.tx.beneficiary}» بـ ${_companyLabel(c)} وجهتها '
+                '«${dest.name}»، بس وصلت لـ ${_officeLabel(o)} وهو مو من '
+                'مكاتب هالوجهة.',
             at: o.date,
           ),
         );
@@ -1761,7 +1842,7 @@ class _Ctx {
           title: 'ما راحت لمكتب',
           detail:
               '«${c.tx.beneficiary}» ${traceAmount(c.tx.amount)} ${c.tx.currency} '
-              'بـ ${_companyLabel(c)} فيها «${ct.mustReachWord}» '
+              'بـ ${_companyLabel(c)} ${destText(c)} '
               '${lastOffice != null ? 'وانلغت من ${_officeLabel(lastOffice)} ' : ''}'
               'وصار إلها ${traceDuration(e.now.difference(ct.waitingSince))} '
               'ما انربطت بحركة مكتب.',
@@ -2015,6 +2096,36 @@ class _Ctx {
         ),
       );
     }
+    // وجهة حركة الشركة المربوطة
+    final linked = t.link;
+    final lc = linked != null && t.status.linked
+        ? nodes[linked.companyId]
+        : null;
+    final ld = lc == null ? null : destOf(lc);
+    if (ld != null && !ld.toOffice) {
+      reasons.add(
+        TraceReason(
+          TraceReasonTone.warn,
+          'حركة الشركة وجهتها «${ld.name}» (مو تابعة لمكتب)، بس وصلت لهون — '
+          'يمكن تغيّر المسار.',
+        ),
+      );
+    } else if (ld != null && !ld.allowsOffice(o.account.id)) {
+      reasons.add(
+        TraceReason(
+          TraceReasonTone.warn,
+          'حركة الشركة وجهتها «${ld.name}»، و${_officeLabel(o)} مو من مكاتب '
+          'هالوجهة.',
+        ),
+      );
+    } else if (ld != null) {
+      reasons.add(
+        TraceReason(
+          TraceReasonTone.good,
+          'حركة الشركة وجهتها «${ld.name}» (تابعة لمكتب).',
+        ),
+      );
+    }
 
     // مرشحين ما انختاروا
     final rejected = <TraceRejected>[];
@@ -2043,6 +2154,42 @@ class _Ctx {
     }
     rejected.sort((a, b) => a.match!.gap.abs().compareTo(b.match!.gap.abs()));
     return TraceExplanation(reasons, rejected.take(10).toList());
+  }
+
+  /// سبب يخص وجهة حركة الشركة (null = ما في شي نحكيه)
+  TraceReason? _destReason(CompanyTrace ct, Destination? dest) {
+    if (ct.destination == null) {
+      // ما في وجهات بالإعدادات أصلًا: ما منحكي عنها
+      if (destinations.isEmpty) return null;
+      return const TraceReason(
+        TraceReasonTone.info,
+        'ما انسجلت إلها وجهة، فما منستنى توصل لمكتب معيّن.',
+      );
+    }
+    if (dest == null) {
+      return TraceReason(
+        TraceReasonTone.info,
+        'وجهتها «${ct.destination}» بس هالوجهة ما عادت موجودة بالإعدادات.',
+      );
+    }
+    if (dest.toOffice) {
+      final names = [
+        for (final id in dest.officeIds)
+          if (accountNames[id] != null) accountNames[id]!,
+      ];
+      return TraceReason(
+        TraceReasonTone.info,
+        'وجهتها «${dest.name}» تابعة لمكتب'
+        '${names.isEmpty ? '' : ' (${names.join('، ')})'}، فلازم توصل لمكتب.',
+      );
+    }
+    return TraceReason(
+      ct.reached ? TraceReasonTone.warn : TraceReasonTone.good,
+      ct.reached
+          ? 'وجهتها «${dest.name}» مو تابعة لمكتب، بس وصلت لمكتب — يمكن '
+                'تغيّر المسار.'
+          : 'وجهتها «${dest.name}» مو تابعة لمكتب، فعادي ما توصل لمكتب.',
+    );
   }
 
   TraceExplanation explainCompany(int id, TraceResult r) {
@@ -2088,14 +2235,8 @@ class _Ctx {
         ),
       );
     }
-    if (ct.mustReach) {
-      reasons.add(
-        TraceReason(
-          TraceReasonTone.info,
-          'فيها كلمة «${ct.mustReachWord}» من كلمات «لازم تروح لمكتب».',
-        ),
-      );
-    }
+    final destReason = _destReason(ct, destOf(c));
+    if (destReason != null) reasons.add(destReason);
     if (ct.overdue) {
       reasons.add(
         TraceReason(

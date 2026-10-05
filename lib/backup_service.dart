@@ -312,6 +312,7 @@ class BackupService {
       'secondAmount': t.secondAmount,
       'secondCurrency': t.secondCurrency,
       'companyMovementType': t.companyMovementType?.name,
+      if (t.destination != null) 'destination': t.destination,
     };
   }
 
@@ -334,6 +335,9 @@ class BackupService {
       companyMovementType: _companyMovementTypeFromAny(
         map['companyMovementType'],
       ),
+      destination: (map['destination']?.toString().trim().isEmpty ?? true)
+          ? null
+          : map['destination'].toString().trim(),
     );
   }
 
@@ -348,22 +352,13 @@ class BackupService {
       'editKeywords': s.editKeywords,
       'amountWordValues': s.amountWordValues,
       'bubbleReadyNames': s.bubbleReadyNames,
-      'bubbleQuickActions': s.bubbleQuickActions
-          .map(
-            (a) => {
-              'id': a.id,
-              'label': a.label,
-              'iconKey': a.iconKey,
-              'actionType': a.actionType,
-              'value': a.value,
-              'iconAbove': a.iconAbove,
-            },
-          )
-          .toList(),
+      'bubbleQuickActions': s.bubbleQuickActions.map((a) => a.toMap()).toList(),
       'companyUserNames': s.companyUserNames,
       'forbiddenWords': s.forbiddenWords,
       'forbiddenPhrases': s.forbiddenPhrases,
       'bubbleUiPrefs': s.bubbleUiPrefs,
+      'destinationMap': s.destinationMap,
+      'destinationInfo': s.destinationInfo,
     };
   }
 
@@ -392,6 +387,17 @@ class BackupService {
               (key, value) => MapEntry(key.toString(), value),
             )
           : <String, dynamic>{},
+      destinationMap: _stringMap(map['destinationMap']),
+      destinationInfo: map['destinationInfo'] is Map
+          ? (map['destinationInfo'] as Map).map(
+              (key, value) => MapEntry(
+                key.toString(),
+                value is Map
+                    ? Map<String, dynamic>.from(value)
+                    : <String, dynamic>{'office': false},
+              ),
+            )
+          : <String, dynamic>{},
     );
   }
 
@@ -415,15 +421,9 @@ class BackupService {
     for (final item in value) {
       if (item is! Map) continue;
       out.add(
-        BubbleQuickActionConfig(
-          id: item['id'] is num
-              ? (item['id'] as num).toInt()
-              : DateTime.now().millisecondsSinceEpoch + out.length,
-          label: item['label']?.toString() ?? '',
-          iconKey: item['iconKey']?.toString() ?? 'bolt',
-          actionType: item['actionType']?.toString() ?? 'clearStage',
-          value: item['value']?.toString() ?? '',
-          iconAbove: item['iconAbove'] == true,
+        BubbleQuickActionConfig.fromMap(
+          item,
+          id: DateTime.now().millisecondsSinceEpoch + out.length,
         ),
       );
     }

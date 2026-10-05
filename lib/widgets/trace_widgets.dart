@@ -15,6 +15,7 @@ import '../screens/account_screen.dart';
 import '../screens/transaction_details_screen.dart';
 import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
+import 'destination_picker.dart' show kDestExternalColor, kDestOfficeColor;
 
 // =============================================================
 // ألوان وتسميات
@@ -95,6 +96,10 @@ class TraceUi {
         return const Color(0xFFB91C1C);
       case TraceWarningKind.brokenLink:
         return const Color(0xFF6B7280);
+      case TraceWarningKind.routeChanged:
+        return const Color(0xFF9333EA);
+      case TraceWarningKind.wrongOffice:
+        return const Color(0xFFC2410C);
     }
   }
 
@@ -116,7 +121,33 @@ class TraceUi {
         return Icons.wrong_location_rounded;
       case TraceWarningKind.brokenLink:
         return Icons.link_off_rounded;
+      case TraceWarningKind.routeChanged:
+        return Icons.fork_right_rounded;
+      case TraceWarningKind.wrongOffice:
+        return Icons.location_off_rounded;
     }
+  }
+
+  static const Color destOffice = kDestOfficeColor;
+  static const Color destExternal = kDestExternalColor;
+
+  /// وجهة حركة الشركة كما هي بالإعدادات (null = بدون وجهة)
+  static Destination? destinationOf(TransactionModel t) =>
+      TraceService.destinations.byName(t.destination);
+
+  /// شارة الوجهة («📍 حلب») لحركات الشركات، أو null
+  static Widget? destinationPill(TransactionModel t) {
+    final name = t.destination?.trim() ?? '';
+    if (name.isEmpty || !isCompanyTx(t)) return null;
+    final d = destinationOf(t);
+    final color = d == null
+        ? unknownColor
+        : (d.toOffice ? destOffice : destExternal);
+    return TracePill(
+      text: d == null ? name : '${d.name}${d.toOffice ? '' : ' • مو مكتب'}',
+      color: color,
+      icon: Icons.place_rounded,
+    );
   }
 
   static Color reasonColor(TraceReasonTone t) {
@@ -437,6 +468,7 @@ class TraceTxTile extends StatelessWidget {
                         text: TraceUi.txStatusLabel(t),
                         color: TraceUi.txStatusColor(t),
                       ),
+                      if (TraceUi.destinationPill(t) case final pill?) pill,
                     ],
                   ),
                   const SizedBox(height: 3),
@@ -734,15 +766,20 @@ class TracePathCard extends StatelessWidget {
           _Stop.placeholder(
             title: ct.cancelled ? 'ملغاة بالشركة' : 'لسا ما وصلت لأي مكتب',
             line: ct.overdue
-                ? 'صار إلها ${traceDuration(waited)} — لازم تروح لمكتب'
+                ? 'صار إلها ${traceDuration(waited)} — وجهتها «${ct.destination}» '
+                      'تابعة لمكتب'
                 : (ct.mustReach
-                      ? 'فيها «${ct.mustReachWord}» — لازم تروح لمكتب'
-                      : null),
+                      ? 'وجهتها «${ct.destination}» — لازم توصل لمكتب'
+                      : (ct.external
+                            ? 'وجهتها «${ct.destination}» مو تابعة لمكتب — عادي'
+                            : null)),
             color: ct.overdue
                 ? const Color(0xFFB91C1C)
                 : (ct.mustReach
                       ? const Color(0xFFD97706)
-                      : TraceUi.unknownColor),
+                      : (ct.external
+                            ? TraceUi.destExternal
+                            : TraceUi.unknownColor)),
             icon: ct.cancelled
                 ? Icons.block_rounded
                 : Icons.hourglass_empty_rounded,
@@ -776,6 +813,10 @@ class TracePathCard extends StatelessWidget {
       headColor = const Color(0xFFB91C1C);
       headLabel = 'ما راحت لمكتب';
       headIcon = Icons.wrong_location_rounded;
+    } else if (ct != null && ct.external && !ct.cancelled) {
+      headColor = TraceUi.destExternal;
+      headLabel = 'وجهتها مو مكتب';
+      headIcon = Icons.place_rounded;
     } else {
       headColor = TraceUi.unknownColor;
       headLabel = ct?.cancelled ?? false ? 'ملغاة' : 'لسا ما وصلت';
@@ -1110,6 +1151,8 @@ class _StopRow extends StatelessWidget {
                         text: TraceUi.txStatusLabel(t),
                         color: TraceUi.txStatusColor(t),
                       ),
+                    if (t != null)
+                      if (TraceUi.destinationPill(t) case final pill?) pill,
                     if (stop.current)
                       TracePill(text: 'هالحركة', color: color, strong: true),
                     if (stop.dashed && t != null)

@@ -12,6 +12,7 @@ import '../utils/amount_format.dart';
 import 'add_account_screen.dart';
 import 'account_screen.dart';
 import 'add_edit_transaction_screen.dart';
+import 'clipboard_settings_screen.dart';
 import 'operations_log_screen.dart';
 import 'trace_warnings_screen.dart';
 import 'transaction_history_screen.dart';
@@ -98,10 +99,11 @@ class _HomeScreenState extends State<HomeScreen> {
     final showing = await FloatingNotes.isShowing();
     final notes = await FloatingNotes.getNotes();
     if (!mounted) return;
-    if (showing == _notesShowing && notes.length == _notesCount) return;
+    final pending = notes.where((n) => !n.done).length;
+    if (showing == _notesShowing && pending == _notesCount) return;
     setState(() {
       _notesShowing = showing;
-      _notesCount = notes.length;
+      _notesCount = notes.where((n) => !n.done).length;
     });
   }
 
@@ -118,7 +120,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   static const String _notesShownMessage =
-      'ظهرت فقاعة الملاحظات: اسحبها لأي مكان، واضغط عليها لإضافة ملاحظة';
+      'ظهرت الحافظة: اسحبها لأي مكان، واضغط عليها لإضافة ملاحظة '
+      '(ضغطة مطوّلة على زر «الحافظة» هون بتفتح إعداداتها)';
 
   void _notesSnack(String message) {
     if (!mounted) return;
@@ -129,13 +132,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _toggleFloatingNotes() async {
     if (!FloatingNotes.isSupported) {
-      _notesSnack('فقاعة الملاحظات متاحة على أندرويد فقط');
+      _notesSnack('الحافظة العائمة متاحة على أندرويد فقط');
       return;
     }
     if (await FloatingNotes.isShowing()) {
       await FloatingNotes.hide();
       await _refreshNotesState();
-      _notesSnack('تم إخفاء فقاعة الملاحظات (ملاحظاتك محفوظة)');
+      _notesSnack('تم إخفاء الحافظة (ملاحظاتك محفوظة)');
       return;
     }
     if (!await FloatingNotes.canDrawOverlays()) {
@@ -148,7 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     final shown = await FloatingNotes.show();
     await _refreshNotesState();
-    _notesSnack(shown ? _notesShownMessage : 'تعذر إظهار فقاعة الملاحظات');
+    _notesSnack(shown ? _notesShownMessage : 'تعذر إظهار الحافظة');
   }
 
   Future<bool?> _askNotesPermission() {
@@ -1283,6 +1286,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           active: _notesShowing,
                           count: _notesCount,
                           onPressed: _toggleFloatingNotes,
+                          onLongPress: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ClipboardSettingsScreen(),
+                            ),
+                          ),
                         ),
                         const SizedBox(width: 8),
                         const _TraceWarningsButton(),
@@ -2051,11 +2060,13 @@ class _NotesHeaderButton extends StatelessWidget {
   final bool active;
   final int count;
   final VoidCallback onPressed;
+  final VoidCallback? onLongPress;
 
   const _NotesHeaderButton({
     required this.active,
     required this.count,
     required this.onPressed,
+    this.onLongPress,
   });
 
   @override
@@ -2063,7 +2074,9 @@ class _NotesHeaderButton extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final fg = active ? cs.onPrimary : cs.onSurface;
     return Tooltip(
-      message: active ? 'إخفاء فقاعة الملاحظات' : 'إظهار فقاعة الملاحظات',
+      message: active
+          ? 'إخفاء الحافظة (ضغطة مطوّلة: إعداداتها)'
+          : 'إظهار الحافظة (ضغطة مطوّلة: إعداداتها)',
       child: Material(
         color: active ? cs.primary : _cardBg(context),
         shape: StadiumBorder(
@@ -2072,6 +2085,7 @@ class _NotesHeaderButton extends StatelessWidget {
         child: InkWell(
           customBorder: const StadiumBorder(),
           onTap: onPressed,
+          onLongPress: onLongPress,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
             child: Row(
@@ -2080,7 +2094,7 @@ class _NotesHeaderButton extends StatelessWidget {
                 Icon(Icons.sticky_note_2_rounded, size: 19, color: fg),
                 const SizedBox(width: 6),
                 Text(
-                  'ملاحظات',
+                  'الحافظة',
                   style: TextStyle(
                     fontWeight: FontWeight.w800,
                     fontSize: 13.5,

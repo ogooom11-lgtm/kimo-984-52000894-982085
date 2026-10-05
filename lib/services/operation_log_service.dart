@@ -213,6 +213,7 @@ class OperationLogService {
     'secondAmount': t.secondAmount,
     'secondCurrency': t.secondCurrency,
     'companyMovementType': t.companyMovementType?.name,
+    'destination': t.destination,
   };
 
   static TransactionStatus _statusFrom(dynamic raw) {
@@ -250,6 +251,7 @@ class OperationLogService {
           : _toDouble(m['secondAmount']),
       secondCurrency: m['secondCurrency']?.toString(),
       companyMovementType: _movementFrom(m['companyMovementType']),
+      destination: m['destination']?.toString(),
     );
   }
 
@@ -268,13 +270,17 @@ class OperationLogService {
           ? null
           : _toDouble(m['secondAmount'])
       ..secondCurrency = m['secondCurrency']?.toString()
-      ..companyMovementType = _movementFrom(m['companyMovementType']);
+      ..companyMovementType = _movementFrom(m['companyMovementType'])
+      // لقطات قديمة بدون الوجهة: منخلي الوجهة الحالية
+      ..destination = m.containsKey('destination')
+          ? m['destination']?.toString()
+          : t.destination;
   }
 
   static bool _sameAsSnapshot(TransactionModel t, Map<String, dynamic>? m) {
     if (m == null) return true;
     final now = snapshot(t);
-    for (final key in const [
+    for (final key in [
       'accountId',
       'beneficiary',
       'amount',
@@ -285,6 +291,7 @@ class OperationLogService {
       'secondAmount',
       'secondCurrency',
       'companyMovementType',
+      if (m.containsKey('destination')) 'destination',
     ]) {
       final a = now[key];
       final b = m[key];

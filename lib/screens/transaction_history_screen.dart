@@ -258,6 +258,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         return Icons.event_busy_rounded;
       case TxRowKind.notes:
         return Icons.sticky_note_2_rounded;
+      case TxRowKind.destination:
+        return Icons.place_rounded;
       case TxRowKind.deleted:
         return Icons.delete_outline_rounded;
       case TxRowKind.restored:
@@ -1040,6 +1042,9 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         break;
       case TxRowKind.link:
         toColor = const Color(0xFF0F766E);
+        break;
+      case TxRowKind.destination:
+        toColor = const Color(0xFF0E7490);
         break;
       default:
         strike = true;

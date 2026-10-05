@@ -166,7 +166,8 @@ class DatabaseService {
         ..accountId = tx.accountId
         ..notes = tx.notes
         ..receivedAt = tx.receivedAt
-        ..cancelledAt = tx.cancelledAt;
+        ..cancelledAt = tx.cancelledAt
+        ..destination = tx.destination;
 
       await existing.save(); // تحديث في مكانه بدون تغيير المفتاح
       // تحديث في مكانه بدون تغيير المفتاح

@@ -23,6 +23,12 @@ class BubbleUiPrefs {
   /// إظهار الأزرار السريعة المعرفة في الإعدادات داخل كل فقاعة.
   final bool showQuickActions;
 
+  /// مكان الأزرار السريعة: أسفل الفقاعة (بعد الكلمات) بدل أعلاها.
+  final bool quickActionsBottom;
+
+  /// حجم الأزرار السريعة: 0 صغير، 1 عادي، 2 كبير.
+  final int quickActionsSize;
+
   /// عرض الفقاعات غير المكتملة أولًا (وإلا تبقى بترتيبها الزمني).
   final bool incompleteFirst;
 
@@ -52,6 +58,8 @@ class BubbleUiPrefs {
     this.showSenderHeader = true,
     this.showLegend = true,
     this.showQuickActions = true,
+    this.quickActionsBottom = false,
+    this.quickActionsSize = 1,
     this.incompleteFirst = true,
     this.autoExtendName = true,
     this.confirmForbiddenPhrase = true,
@@ -126,6 +134,14 @@ class BubbleUiPrefs {
       showSenderHeader: _toBool(map['showSenderHeader'], d.showSenderHeader),
       showLegend: _toBool(map['showLegend'], d.showLegend),
       showQuickActions: _toBool(map['showQuickActions'], d.showQuickActions),
+      quickActionsBottom: _toBool(
+        map['quickActionsBottom'],
+        d.quickActionsBottom,
+      ),
+      quickActionsSize: _toInt(
+        map['quickActionsSize'],
+        d.quickActionsSize,
+      ).clamp(0, 2).toInt(),
       incompleteFirst: _toBool(map['incompleteFirst'], d.incompleteFirst),
       autoExtendName: _toBool(map['autoExtendName'], d.autoExtendName),
       confirmForbiddenPhrase: _toBool(
@@ -155,6 +171,8 @@ class BubbleUiPrefs {
     'showSenderHeader': showSenderHeader,
     'showLegend': showLegend,
     'showQuickActions': showQuickActions,
+    'quickActionsBottom': quickActionsBottom,
+    'quickActionsSize': quickActionsSize,
     'incompleteFirst': incompleteFirst,
     'autoExtendName': autoExtendName,
     'confirmForbiddenPhrase': confirmForbiddenPhrase,
@@ -171,6 +189,8 @@ class BubbleUiPrefs {
     bool? showSenderHeader,
     bool? showLegend,
     bool? showQuickActions,
+    bool? quickActionsBottom,
+    int? quickActionsSize,
     bool? incompleteFirst,
     bool? autoExtendName,
     bool? confirmForbiddenPhrase,
@@ -186,6 +206,8 @@ class BubbleUiPrefs {
       showSenderHeader: showSenderHeader ?? this.showSenderHeader,
       showLegend: showLegend ?? this.showLegend,
       showQuickActions: showQuickActions ?? this.showQuickActions,
+      quickActionsBottom: quickActionsBottom ?? this.quickActionsBottom,
+      quickActionsSize: quickActionsSize ?? this.quickActionsSize,
       incompleteFirst: incompleteFirst ?? this.incompleteFirst,
       autoExtendName: autoExtendName ?? this.autoExtendName,
       confirmForbiddenPhrase:

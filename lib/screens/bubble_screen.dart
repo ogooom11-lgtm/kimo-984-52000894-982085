@@ -5,16 +5,19 @@ import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:characters/characters.dart';
 import 'package:flutter/services.dart';
+import 'package:floating_notes/floating_notes.dart';
 import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
+import '../services/destinations.dart';
 import '../services/operation_log_service.dart';
-import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
 import '../services/settings_words.dart';
 import '../utils/amount_format.dart';
 import '../utils/chunked_task.dart';
+import '../widgets/destination_picker.dart';
 import '../widgets/operation_progress_bar.dart';
+import '../widgets/quick_action_defs.dart';
 import '../widgets/scroll_edge_buttons.dart';
 import 'add_edit_transaction_screen.dart';
 import 'operations_log_screen.dart';
@@ -121,6 +124,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
   late List<String> _forbiddenWords;
   late List<String> _forbiddenPhrases;
   late BubbleUiPrefs _prefs;
+
+  /// الوجهات (لحركات الشركات) من الإعدادات
+  late DestinationBook _destinations;
   late nd.NameDetectorConfig _nameConfig;
   late tt.PhraseSet _forbiddenPhraseSet;
   late tt.PhraseSet _forbiddenWordSet;
@@ -145,6 +151,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
   final Set<int> _cancelCandidatesLoading = {};
   final Map<int, bool> _cancelShowMore = {};
   final Map<int, CompanyMovementType> _companyMovementOverrides = {};
+
+  /// الوجهة: اختيار المستخدم لكل فقاعة ('' = بدون وجهة) + الكشف من الرسالة
+  final Map<int, String> _destOverride = {};
+  final Map<int, DestinationDetection> _destDetected = {};
 
   // رسائل التعديل: الحركة المختارة، الحقول المختارة للتعديل، اسم بحث يدوي،
   // فتح قائمة النتائج بعد اختيار الحركة، وملخص ما تم تعديله
@@ -317,6 +327,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _forbiddenWords = List.of(_settings.forbiddenWords);
     _forbiddenPhrases = List.of(_settings.forbiddenPhrases);
     _prefs = BubbleUiPrefs.fromSettings(_settings);
+    _destinations = DestinationBook.fromSettings(_settings);
   }
 
   void _rebuildNameConfig() {
@@ -341,6 +352,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _loadSettingsAndPrefs();
     _rebuildNameConfig();
     _tokenCache.clear();
+    _destDetected.clear();
     for (var i = 0; i < _selections.length; i++) {
       _computeForbiddenFor(_segments[i], _selections[i]);
     }
@@ -4124,6 +4136,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
     _shiftKeys(_targetHits, deletedIndex);
     _shiftKeys(_secondAmount, deletedIndex);
     _shiftKeys(_secondCurrency, deletedIndex);
+    _shiftKeys(_destOverride, deletedIndex);
+    _shiftKeys(_destDetected, deletedIndex);
     final newPickerOpen = <int>{
       for (final v in _editPickerOpen)
         if (v != deletedIndex) v > deletedIndex ? v - 1 : v,
@@ -4191,10 +4205,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
     ).showSnackBar(const SnackBar(content: Text('تم حذف الفقاعة')));
   }
 
-  List<_PendingTxDraft> _collectReadyDrafts() {
+  List<_PendingTxDraft> _collectReadyDrafts({Set<int>? only}) {
     final drafts = <_PendingTxDraft>[];
 
     for (int i = 0; i < _selections.length; i++) {
+      if (only != null && !only.contains(i)) continue;
       if (_modeOf(i) != BubbleActionMode.add) continue;
       if (_savedSegments.contains(i)) continue;
       final seg = _segments[i];
@@ -4222,6 +4237,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
           companyMovementType: _isCompanyAccount
               ? _companyMovementForSegment(i)
               : null,
+          destination: _isCompanyAccount ? _destinationForSegment(i) : null,
           date: date,
         ),
       );
@@ -4230,10 +4246,11 @@ class _BubbleScreenState extends State<BubbleScreen> {
     return drafts;
   }
 
-  List<_PendingCancelDraft> _collectReadyCancelDrafts() {
+  List<_PendingCancelDraft> _collectReadyCancelDrafts({Set<int>? only}) {
     final drafts = <_PendingCancelDraft>[];
 
     for (int i = 0; i < _selections.length; i++) {
+      if (only != null && !only.contains(i)) continue;
       if (_modeOf(i) != BubbleActionMode.cancel) continue;
       if (_cancelledSummaries.containsKey(i)) continue;
       final selectedId = _cancelSelectedTxIds[i];
@@ -5071,7 +5088,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
         false;
   }
 
-  Future<void> _sendForMode(BubbleActionMode mode) async {
+  /// [only]: تنفيذ فقاعات محددة بس (زر «حفظ هالفقاعة»)
+  Future<void> _sendForMode(BubbleActionMode mode, {Set<int>? only}) async {
     if (_busy) return;
     if (mode == BubbleActionMode.edit) {
       await _sendEdits();
@@ -5079,31 +5097,40 @@ class _BubbleScreenState extends State<BubbleScreen> {
     }
 
     final drafts = mode == BubbleActionMode.add
-        ? _collectReadyDrafts()
+        ? _collectReadyDrafts(only: only)
         : const <_PendingTxDraft>[];
     final cancelDrafts = mode == BubbleActionMode.cancel
-        ? _collectReadyCancelDrafts()
+        ? _collectReadyCancelDrafts(only: only)
         : const <_PendingCancelDraft>[];
 
     if (drafts.isEmpty && cancelDrafts.isEmpty) {
       _snack(
-        mode == BubbleActionMode.add
-            ? 'لا توجد إضافات مكتملة للتنفيذ'
-            : 'لا توجد إلغاءات مختارة للتنفيذ',
+        only != null
+            ? (mode == BubbleActionMode.add
+                  ? 'هالفقاعة لسا مو جاهزة للحفظ'
+                  : 'اختار الحركة يلي بدك تلغيها أولًا')
+            : (mode == BubbleActionMode.add
+                  ? 'لا توجد إضافات مكتملة للتنفيذ'
+                  : 'لا توجد إلغاءات مختارة للتنفيذ'),
       );
       return;
     }
 
-    if (mode == BubbleActionMode.add && _hasUnresolvedConflicts()) {
-      final first = _amountConflict.firstWhere(
-        (segIndex) => _modeOf(segIndex) == BubbleActionMode.add,
-      );
+    bool conflicted(int segIndex) =>
+        _amountConflict.contains(segIndex) &&
+        _modeOf(segIndex) == BubbleActionMode.add &&
+        !_savedSegments.contains(segIndex) &&
+        (only == null || only.contains(segIndex));
+    if (mode == BubbleActionMode.add && _amountConflict.any(conflicted)) {
+      final first = _amountConflict.firstWhere(conflicted);
       await _openAmountConflictDialog(first);
-      if (_hasUnresolvedConflicts()) return;
+      if (_amountConflict.any(conflicted)) return;
     }
 
     if (drafts.isNotEmpty) {
       if (!await _confirmForbiddenPhrases(drafts)) return;
+      if (!mounted) return;
+      if (!await _confirmAmbiguousDestinations(drafts)) return;
       if (!mounted) return;
       setState(() => _isSending = true);
       bool proceed = false;
@@ -5143,8 +5170,6 @@ class _BubbleScreenState extends State<BubbleScreen> {
       ),
     );
 
-    // نص رسائل حركات الشركات (لكلمات «لازم تروح لمكتب» بتتبّع المصدر)
-    final traceMessages = <int, String>{};
     try {
       final existingIds = DatabaseService.transactionsBox.values
           .map((t) => t.id)
@@ -5162,12 +5187,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
           status: TransactionStatus.added,
           date: d.date,
           companyMovementType: _isCompanyAccount ? d.companyMovementType : null,
+          destination: _isCompanyAccount ? d.destination : null,
         );
 
         await DatabaseService.addTransaction(tx);
-        if (_isCompanyAccount) {
-          traceMessages[tx.id] = _segments[d.segIndex].lines.join('\n');
-        }
         _allTransactions.add(tx);
         _invalidateSearchIndex();
         if (!_knownBeneficiaryNames.contains(tx.beneficiary)) {
@@ -5192,6 +5215,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
           secondAmount: d.secondAmount,
           secondCurrency: d.secondCurrency,
           companyMovementType: d.companyMovementType,
+          destination: d.destination,
           date: d.date,
         );
         if (d.secondAmount == null &&
@@ -5202,9 +5226,6 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (done % 20 == 0) await yieldToUi();
       }
 
-      if (traceMessages.isNotEmpty) {
-        unawaited(TraceService.rememberMessages(traceMessages));
-      }
       if (saved > 0) {
         for (var i = 0; i < _selections.length; i++) {
           if (_needsTarget(i)) {
@@ -5617,23 +5638,238 @@ class _BubbleScreenState extends State<BubbleScreen> {
     );
   }
 
-  IconData _bubbleActionIconData(String key) {
-    switch (key) {
-      case 'zeros':
-        return Icons.exposure_zero_rounded;
-      case 'person':
-        return Icons.person_add_alt_1_rounded;
-      case 'clear':
-        return Icons.backspace_rounded;
-      case 'currency':
-        return Icons.currency_exchange_rounded;
-      case 'flash':
-        return Icons.bolt_rounded;
-      case 'check':
-        return Icons.task_alt_rounded;
-      default:
-        return Icons.tune_rounded;
+  // ====== الوجهة (لحركات الشركات) ======
+
+  DestinationDetection _destDetectionFor(int si) =>
+      _destDetected[si] ??= _destinations.detect(_segments[si].lines);
+
+  /// الوجهة المعتمدة للفقاعة: اختيارك، وإلا الوجهة الوحيدة المذكورة بالرسالة
+  /// (إذا انذكرت أكتر من وجهة ما منختار لحالنا).
+  String? _destinationForSegment(int si) {
+    final o = _destOverride[si];
+    if (o != null) return o.isEmpty ? null : o;
+    return _destDetectionFor(si).single;
+  }
+
+  void _setDestination(int si, String? name) {
+    setState(() => _destOverride[si] = name ?? '');
+  }
+
+  /// تأكيد قبل حفظ حركات شركة انذكر فيها أكتر من وجهة وما اخترت وحدة
+  Future<bool> _confirmAmbiguousDestinations(
+    List<_PendingTxDraft> drafts,
+  ) async {
+    if (!_isCompanyAccount || _destinations.isEmpty) return true;
+    final flagged = [
+      for (final d in drafts)
+        if (d.destination == null &&
+            !_destOverride.containsKey(d.segIndex) &&
+            _destDetectionFor(d.segIndex).ambiguous)
+          d,
+    ];
+    if (flagged.isEmpty) return true;
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) => Directionality(
+            textDirection: TextDirection.rtl,
+            child: AlertDialog(
+              icon: const Icon(
+                Icons.wrong_location_rounded,
+                color: Color(0xFFD97706),
+                size: 34,
+              ),
+              title: const Text('وجهة مو واضحة'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        flagged.length == 1
+                            ? 'في حركة انذكر فيها أكتر من وجهة وما اخترت وحدة:'
+                            : 'في ${flagged.length} حركات انذكر فيها أكتر من وجهة وما اخترت:',
+                      ),
+                      const SizedBox(height: 8),
+                      for (final d in flagged.take(6))
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(
+                            '• ${d.beneficiary}: ${_destDetectionFor(d.segIndex).names.join(' / ')}',
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'إذا حفظت هلق بتنحفظ بدون وجهة (وبتقدر تحددها بعدين من '
+                        'تفاصيل الحركة).',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('رجوع للاختيار'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('حفظ بدون وجهة'),
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _pickDestination(int si) async {
+    final picked = await showDestinationPicker(
+      context,
+      book: _destinations,
+      current: _destinationForSegment(si),
+      detected: _destDetectionFor(si).names,
+    );
+    if (picked == null || !mounted) return;
+    _setDestination(si, picked.isEmpty ? null : picked);
+  }
+
+  Widget _buildDestinationRow(BuildContext context, int si) {
+    if (!_isCompanyAccount ||
+        _modeOf(si) != BubbleActionMode.add ||
+        _destinations.isEmpty) {
+      return const SizedBox.shrink();
     }
+    final det = _destDetectionFor(si);
+    final manual = _destOverride.containsKey(si);
+    final chosen = _destinationForSegment(si);
+    final dest = _destinations.byName(chosen);
+    final ambiguous = !manual && det.ambiguous;
+    const amber = Color(0xFFD97706);
+    final color = ambiguous
+        ? amber
+        : (dest == null ? _muted(context) : destinationColor(dest));
+    final String title;
+    final details = <String>[];
+    if (ambiguous) {
+      title = 'انذكرت أكتر من وجهة — اختار';
+      details.add(det.names.join(' • '));
+    } else if (dest != null) {
+      title = dest.name;
+      details.add(dest.toOffice ? 'تابعة لمكتب' : 'مو تابعة لمكتب');
+      if (manual) {
+        details.add('اخترتها أنت');
+      } else {
+        final phrase = det.phraseOf(dest.name);
+        if (phrase != null && phrase != dest.name) details.add('من «$phrase»');
+      }
+    } else {
+      title = 'بدون وجهة';
+      details.add(manual ? 'اخترت بدون وجهة' : 'ما انذكرت وجهة');
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Material(
+            color: color.withValues(alpha: .08),
+            borderRadius: BorderRadius.circular(14),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => _pickDestination(si),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 7,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: color.withValues(alpha: .35)),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      ambiguous
+                          ? Icons.help_center_rounded
+                          : (dest?.toOffice ?? false)
+                          ? Icons.storefront_rounded
+                          : Icons.place_rounded,
+                      size: 20,
+                      color: _readable(context, color),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'الوجهة:',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: _muted(context),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w900,
+                              color: _readable(context, color),
+                            ),
+                          ),
+                          Text(
+                            details.join(' • '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: _muted(context),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(
+                      Icons.expand_more_rounded,
+                      color: _readable(context, color),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (ambiguous)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final n in det.names)
+                    ActionChip(
+                      avatar: const Icon(Icons.place_rounded, size: 16),
+                      label: Text(n),
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _setDestination(si, n),
+                    ),
+                  ActionChip(
+                    label: const Text('بدون وجهة'),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _setDestination(si, null),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Future<String?> _pickReadyName() async {
@@ -5663,30 +5899,89 @@ class _BubbleScreenState extends State<BubbleScreen> {
     );
   }
 
+  /// القيم يلي بتنحط بقوالب النسخ والحافظة
+  Map<String, String> _quickTemplateValues(int segIndex) {
+    final seg = _segments[segIndex];
+    final sel = _selections[segIndex];
+    final amount = _buildSelectedAmount(seg, sel, segIndex);
+    final currency = _buildSelectedCurrency(seg, sel) ?? '';
+    final second = _secondAmount[segIndex];
+    final at = seg.timestamp ?? DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    final name = _modeOf(segIndex) == BubbleActionMode.edit
+        ? (_editSearchQueries[segIndex] ??
+              _buildSelectedName(seg, sel, segIndex))
+        : _buildSelectedName(seg, sel, segIndex);
+    return {
+      '{الاسم}': name.trim(),
+      '{المبلغ}': amount == null ? '' : _fmtAmount(amount),
+      '{العملة}': currency,
+      '{المبلغ2}': second == null ? '' : _fmtAmount(second),
+      '{العملة2}': second == null
+          ? ''
+          : (_secondCurrency[segIndex] ?? currency),
+      '{الوجهة}': _isCompanyAccount
+          ? (_destinationForSegment(segIndex) ?? '')
+          : '',
+      '{الحساب}': widget.account.name,
+      '{التاريخ}': '${at.year}-${two(at.month)}-${two(at.day)}',
+      '{الوقت}': '${two(at.hour)}:${two(at.minute)}',
+    };
+  }
+
+  bool _quickActionVisible(BubbleQuickActionConfig a, BubbleActionMode mode) {
+    if (!a.enabled) return false;
+    final type = quickActionTypeOf(a.actionType);
+    if (type.companyOnly && !_isCompanyAccount) return false;
+    if (a.scope == 'office' && _isCompanyAccount) return false;
+    if (a.scope == 'company' && !_isCompanyAccount) return false;
+    if (a.modes.isNotEmpty && !a.modes.contains(mode.name)) return false;
+    return true;
+  }
+
   Future<void> _applyBubbleQuickAction(
     int segIndex,
     BubbleQuickActionConfig action,
   ) async {
+    if (segIndex >= _selections.length) return;
+    final value = action.value.trim();
     switch (action.actionType) {
       case 'appendZeros':
+      case 'removeZeros':
         final amount = _buildSelectedAmount(
           _segments[segIndex],
           _selections[segIndex],
           segIndex,
         );
         if (amount == null) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('حدد المبلغ أولًا')));
+          _snack('حدد المبلغ أولًا');
           return;
         }
-        final zeros = int.tryParse(action.value.trim()) ?? 2;
-        var multiplier = 1.0;
-        for (var i = 0; i < zeros.clamp(1, 6); i++) {
-          multiplier *= 10;
+        final zeros = (int.tryParse(value) ?? 3).clamp(1, 6);
+        var factor = 1.0;
+        for (var i = 0; i < zeros; i++) {
+          factor *= 10;
+        }
+        final next = action.actionType == 'appendZeros'
+            ? amount * factor
+            : amount / factor;
+        setState(() {
+          _amountOverride[segIndex] = next;
+          _amountConflict.remove(segIndex);
+          _amountCandidatesCache.remove(segIndex);
+          _selections[segIndex].amount = null;
+          _refreshStageForSegment(segIndex);
+        });
+        return;
+
+      case 'setAmount':
+        final v = double.tryParse(value.replaceAll(RegExp(r'[^0-9.]'), ''));
+        if (v == null || v <= 0) {
+          _snack('المبلغ بالزر مو صحيح: $value');
+          return;
         }
         setState(() {
-          _amountOverride[segIndex] = amount * multiplier;
+          _amountOverride[segIndex] = v;
           _amountConflict.remove(segIndex);
           _amountCandidatesCache.remove(segIndex);
           _selections[segIndex].amount = null;
@@ -5695,13 +5990,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
         return;
 
       case 'setName':
-        final picked =
-            action.value.trim().isEmpty ||
-                action.value.trim() == '@pick' ||
-                action.value.trim() == 'قائمة'
+        final picked = value.isEmpty || value == '@pick' || value == 'قائمة'
             ? await _pickReadyName()
-            : action.value.trim();
-        if (picked == null || picked.isEmpty) return;
+            : value;
+        if (picked == null || picked.isEmpty || !mounted) return;
         setState(() {
           _nameOverride[segIndex] = picked;
           _selections[segIndex].nameTokens.clear();
@@ -5711,6 +6003,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
         if (_needsTarget(segIndex)) {
           _requestCancelCandidates(segIndex);
         }
+        return;
+
+      case 'pasteName':
+        await _pasteName(segIndex);
         return;
 
       case 'clearStage':
@@ -5732,8 +6028,27 @@ class _BubbleScreenState extends State<BubbleScreen> {
         }
         return;
 
+      case 'clearAll':
+        setState(() {
+          _amountOverride.remove(segIndex);
+          _amountConflict.remove(segIndex);
+          _amountTextCandidate.remove(segIndex);
+          _amountCandidatesCache.remove(segIndex);
+          _secondAmount.remove(segIndex);
+          _secondCurrency.remove(segIndex);
+          _nameOverride.remove(segIndex);
+          _destOverride.remove(segIndex);
+          _destDetected.remove(segIndex);
+          _companyMovementOverrides.remove(segIndex);
+          _selections[segIndex] = _autoDetect(_segments[segIndex], segIndex);
+          _refreshStageForSegment(segIndex);
+          _invalidateCancelCandidates(segIndex);
+        });
+        if (_needsTarget(segIndex)) _requestCancelCandidates(segIndex);
+        _snack('رجعت الفقاعة متل ما انقرت أول مرة');
+        return;
+
       case 'setCurrency':
-        final value = action.value.trim();
         final currencyName =
             _currencyNameForToken(value) ??
             _currencyMap.values.firstWhere(
@@ -5741,9 +6056,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
               orElse: () => '',
             );
         if (currencyName.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('العملة "$value" غير موجودة في الإعدادات')),
-          );
+          _snack('العملة "$value" غير موجودة في الإعدادات');
           return;
         }
         setState(() {
@@ -5754,50 +6067,127 @@ class _BubbleScreenState extends State<BubbleScreen> {
           _refreshStageForSegment(segIndex);
         });
         return;
+
+      case 'setDestination':
+        if (!_isCompanyAccount) return;
+        if (value.isEmpty) {
+          await _pickDestination(segIndex);
+          return;
+        }
+        final d = _destinations.byName(value);
+        if (d == null) {
+          _snack('الوجهة «$value» مو موجودة بالإعدادات');
+          return;
+        }
+        _setDestination(segIndex, d.name);
+        return;
+
+      case 'setMovement':
+        if (!_isCompanyAccount) return;
+        final sent =
+            value.toLowerCase().startsWith('s') ||
+            value.contains('مرسل') ||
+            value.contains('ارسال') ||
+            value.contains('إرسال');
+        setState(
+          () => _companyMovementOverrides[segIndex] = sent
+              ? CompanyMovementType.sent
+              : CompanyMovementType.received,
+        );
+        return;
+
+      case 'setMode':
+        final v = value.toLowerCase();
+        final mode = v.startsWith('e') || value.contains('تعديل')
+            ? BubbleActionMode.edit
+            : (v.startsWith('c') || value.contains('لغ'))
+            ? BubbleActionMode.cancel
+            : BubbleActionMode.add;
+        if (_modeOf(segIndex) != mode) _setSegmentMode(segIndex, mode);
+        return;
+
+      case 'copySummary':
+        final text = fillQuickTemplate(
+          value.isEmpty ? defaultCopyTemplate : value,
+          _quickTemplateValues(segIndex),
+        );
+        if (text.isEmpty) {
+          _snack('ما في شي للنسخ بعد');
+          return;
+        }
+        await Clipboard.setData(ClipboardData(text: text));
+        _snack('✓ تم النسخ: $text');
+        return;
+
+      case 'copyMessage':
+        final text = _segments[segIndex].lines.join('\n').trim();
+        if (text.isEmpty) {
+          _snack('الرسالة فاضية');
+          return;
+        }
+        await Clipboard.setData(ClipboardData(text: text));
+        _snack('✓ تم نسخ نص الرسالة');
+        return;
+
+      case 'addToNotes':
+        if (!FloatingNotes.isSupported) {
+          _snack('الحافظة العائمة متوفرة على أندرويد بس');
+          return;
+        }
+        final text = fillQuickTemplate(
+          value.isEmpty ? defaultNoteTemplate : value,
+          _quickTemplateValues(segIndex),
+        );
+        if (text.isEmpty) {
+          _snack('ما في شي يضاف للحافظة بعد');
+          return;
+        }
+        final type = switch (_modeOf(segIndex)) {
+          BubbleActionMode.edit => FloatingNoteType.edit,
+          BubbleActionMode.cancel => FloatingNoteType.cancel,
+          BubbleActionMode.add => FloatingNoteType.add,
+        };
+        final id = await FloatingNotes.addNote(text, type);
+        _snack(id < 0 ? 'تعذّرت الإضافة للحافظة' : '📋 انضافت للحافظة: $text');
+        return;
+
+      case 'saveNow':
+        final mode = _modeOf(segIndex);
+        if (mode == BubbleActionMode.edit) {
+          _snack('للتعديل استعمل زر «تنفيذ التعديلات» تحت');
+          return;
+        }
+        await _sendForMode(mode, only: {segIndex});
+        return;
+
+      case 'deleteBubble':
+        await _confirmDeleteSegment(segIndex);
+        return;
     }
   }
 
   Widget _buildBubbleQuickActions(BuildContext context, int segIndex) {
     if (_bubbleQuickActions.isEmpty) return const SizedBox.shrink();
-    final cs = Theme.of(context).colorScheme;
+    final mode = _modeOf(segIndex);
+    final visible = [
+      for (final a in _bubbleQuickActions)
+        if (_quickActionVisible(a, mode)) a,
+    ];
+    if (visible.isEmpty) return const SizedBox.shrink();
+    final small = _prefs.quickActionsSize == 0;
     return Padding(
-      padding: const EdgeInsets.only(top: 10),
+      padding: EdgeInsets.only(top: small ? 8 : 10),
       child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: _bubbleQuickActions.map((action) {
-          final icon = Icon(_bubbleActionIconData(action.iconKey), size: 18);
-          final label = Text(
-            action.label,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontWeight: FontWeight.w800),
-          );
-          final child = action.iconAbove
-              ? Column(mainAxisSize: MainAxisSize.min, children: [icon, label])
-              : Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [icon, const SizedBox(width: 6), label],
-                );
-
-          return Tooltip(
-            message: action.label,
-            child: OutlinedButton(
-              onPressed: () => _applyBubbleQuickAction(segIndex, action),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: cs.primary,
-                side: BorderSide(color: cs.primary.withOpacity(.28)),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              child: child,
+        spacing: small ? 6 : 8,
+        runSpacing: small ? 6 : 8,
+        children: [
+          for (final a in visible)
+            QuickActionButton(
+              action: a,
+              size: _prefs.quickActionsSize,
+              onPressed: () => _applyBubbleQuickAction(segIndex, a),
             ),
-          );
-        }).toList(),
+        ],
       ),
     );
   }
@@ -7227,6 +7617,7 @@ class _BubbleScreenState extends State<BubbleScreen> {
         'المبلغ: ${_fmtAmount(summary.amount)} ${summary.currency}',
         if (summary.secondAmount != null)
           'المبلغ الثاني: ${_fmtAmount(summary.secondAmount!)} ${summary.secondCurrency ?? ''}',
+        if (summary.destination != null) 'الوجهة: ${summary.destination}',
         'التاريخ: ${_fmtDateTime(summary.date)}',
       ],
     );
@@ -8136,7 +8527,8 @@ class _BubbleScreenState extends State<BubbleScreen> {
                     ],
                   ),
                   _buildCompanyMovementSwitch(si),
-                  if (_prefs.showQuickActions)
+                  _buildDestinationRow(context, si),
+                  if (_prefs.showQuickActions && !_prefs.quickActionsBottom)
                     _buildBubbleQuickActions(context, si),
                   if (sel.forbiddenPhrases.isNotEmpty)
                     _buildForbiddenBanner(context, sel),
@@ -8223,6 +8615,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
                   // التعديل: البحث عن الحركة واختيار ما يُعدَّل
                   if (mode == BubbleActionMode.edit)
                     _buildEditPanel(context, si),
+
+                  // الأزرار السريعة أسفل الفقاعة (حسب الإعدادات)
+                  if (_prefs.showQuickActions && _prefs.quickActionsBottom)
+                    _buildBubbleQuickActions(context, si),
                 ],
               ),
             ),
@@ -8579,6 +8975,7 @@ class _SavedAddSummary {
   final double? secondAmount;
   final String? secondCurrency;
   final CompanyMovementType? companyMovementType;
+  final String? destination;
   final DateTime date;
 
   const _SavedAddSummary({
@@ -8589,6 +8986,7 @@ class _SavedAddSummary {
     this.secondAmount,
     this.secondCurrency,
     this.companyMovementType,
+    this.destination,
     required this.date,
   });
 }
@@ -8683,6 +9081,7 @@ class _PendingTxDraft {
   final double? secondAmount;
   final String? secondCurrency;
   final CompanyMovementType? companyMovementType;
+  final String? destination;
   final DateTime date;
 
   const _PendingTxDraft({
@@ -8693,6 +9092,7 @@ class _PendingTxDraft {
     this.secondAmount,
     this.secondCurrency,
     this.companyMovementType,
+    this.destination,
     required this.date,
   });
 }

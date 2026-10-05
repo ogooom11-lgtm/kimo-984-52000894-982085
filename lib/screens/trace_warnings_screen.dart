@@ -22,6 +22,7 @@ enum _Filter {
   edits,
   status,
   notReached,
+  route,
   broken,
 }
 
@@ -44,6 +45,8 @@ extension on _Filter {
         return 'الحالة';
       case _Filter.notReached:
         return 'ما راحت لمكتب';
+      case _Filter.route:
+        return 'المسار والوجهة';
       case _Filter.broken:
         return 'ربط مكسور';
     }
@@ -72,6 +75,9 @@ extension on _Filter {
         return w.kind == TraceWarningKind.companyCancelled;
       case _Filter.notReached:
         return w.kind == TraceWarningKind.notReached;
+      case _Filter.route:
+        return w.kind == TraceWarningKind.routeChanged ||
+            w.kind == TraceWarningKind.wrongOffice;
       case _Filter.broken:
         return w.kind == TraceWarningKind.brokenLink;
     }
@@ -331,13 +337,14 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
   // القوائم
   // ---------------------------------------------------------
 
-  /// حركات الشركات يلي ما وصلت لمكتب: «لازم تروح لمكتب» أولًا، بعدين آخر 7 أيام
+  /// حركات الشركات يلي ما وصلت لمكتب: يلي وجهتها تابعة لمكتب أولًا، بعدين
+  /// آخر 7 أيام. يلي وجهتها مو تابعة لمكتب ما منستناها فما بتطلع هون.
   List<int> _notReached(TraceResult r) {
     final since = DateTime.now().subtract(const Duration(days: 7));
     final must = <CompanyTrace>[];
     final recent = <CompanyTrace>[];
     for (final ct in r.company.values) {
-      if (ct.reached || ct.cancelled) continue;
+      if (ct.reached || ct.cancelled || ct.external) continue;
       if (ct.mustReach) {
         must.add(ct);
       } else if (ct.waitingSince.isAfter(since)) {
@@ -399,8 +406,8 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
                 : Icons.travel_explore_rounded,
             title: company ? 'كل الحركات وصلت' : 'ما في حركات مجهولة المصدر',
             text: company
-                ? 'ما في حركات استقبال بالشركات (آخر 7 أيام أو فيها كلمات '
-                      '«لازم تروح لمكتب») ناطرة مكتب.'
+                ? 'ما في حركات استقبال بالشركات (آخر 7 أيام أو وجهتها تابعة '
+                      'لمكتب) ناطرة مكتب.'
                 : 'كل حركات المكاتب الأخيرة إلها مصدر معروف.',
           ),
         ),
@@ -412,8 +419,9 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
           padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
           child: Text(
             company
-                ? 'حركات استقبال بالشركات لسا ما انربطت بحركة مكتب: يلي فيها '
-                      'كلمات «لازم تروح لمكتب» أولًا، وبعدين آخر 7 أيام.'
+                ? 'حركات استقبال بالشركات لسا ما انربطت بحركة مكتب: يلي وجهتها '
+                      'تابعة لمكتب أولًا، وبعدين آخر 7 أيام. (يلي وجهتها مو '
+                      'تابعة لمكتب ما بتطلع هون.)'
                 : 'حركات المكاتب الأخيرة بدون مصدر (حسب مدة التحذيرات '
                       'بالإعدادات): المحتملة (بدها اختيار) أولًا.',
             style: TextStyle(
@@ -441,7 +449,7 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
                 noteColor = const Color(0xFFB91C1C);
               } else if (ct.mustReach) {
                 note =
-                    'فيها «${ct.mustReachWord}» • ناطرة من ${traceDuration(waited)}';
+                    'وجهتها «${ct.destination}» • ناطرة من ${traceDuration(waited)}';
                 noteColor = const Color(0xFFD97706);
               } else if (ct.officeIds.isNotEmpty) {
                 note = 'انلغت من المكتب • ناطرة من ${traceDuration(waited)}';
@@ -804,6 +812,28 @@ class _WarningCard extends StatelessWidget {
               label: 'رجوع للتلقائي',
               color: cs.primary,
               onPressed: () => TraceService.resetToAuto(officeId),
+            ),
+          );
+        }
+      case TraceWarningKind.routeChanged:
+      case TraceWarningKind.wrongOffice:
+        if (officeId != null) {
+          buttons.add(
+            TraceActionButton(
+              icon: Icons.swap_horiz_rounded,
+              label: 'تغيير المصدر',
+              color: TraceUi.company,
+              onPressed: () => showTraceChooser(context, officeId),
+            ),
+          );
+        }
+        if (companyId != null) {
+          buttons.add(
+            TraceActionButton(
+              icon: Icons.place_rounded,
+              label: 'فتح حركة الشركة',
+              color: TraceUi.destExternal,
+              onPressed: () => openTraceTx(context, companyId),
             ),
           );
         }

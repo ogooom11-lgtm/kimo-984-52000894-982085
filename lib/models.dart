@@ -131,6 +131,10 @@ class TransactionModel extends HiveObject {
   @HiveField(12)
   CompanyMovementType? companyMovementType;
 
+  /// وجهة حركة الشركة (اسم الوجهة كما هو بالإعدادات) — لحركات الشركات بس.
+  @HiveField(13)
+  String? destination;
+
   TransactionModel({
     required this.id,
     required this.accountId,
@@ -145,6 +149,7 @@ class TransactionModel extends HiveObject {
     this.secondAmount,
     this.secondCurrency,
     this.companyMovementType,
+    this.destination,
   });
 
   double get totalAmount => amount + (secondAmount ?? 0.0);
@@ -215,6 +220,30 @@ class BubbleQuickActionConfig {
   @HiveField(5)
   bool iconAbove;
 
+  /// لون الزر (ARGB). null = لون التطبيق.
+  @HiveField(6)
+  int? colorValue;
+
+  /// false = الزر مخفي مؤقتًا (بدون حذف).
+  @HiveField(7)
+  bool enabled;
+
+  /// شكل الزر: outlined / filled / tonal / text
+  @HiveField(8)
+  String style;
+
+  /// بأي فقاعات بيظهر: add / edit / cancel (فاضية = بالكل).
+  @HiveField(9)
+  List<String> modes;
+
+  /// نوع الحساب: '' = الكل، 'office' = حسابات المكاتب، 'company' = الشركات.
+  @HiveField(10)
+  String scope;
+
+  /// العرض: '' = أيقونة ونص، 'icon' = أيقونة بس، 'text' = نص بس.
+  @HiveField(11)
+  String display;
+
   BubbleQuickActionConfig({
     required this.id,
     required this.label,
@@ -222,7 +251,80 @@ class BubbleQuickActionConfig {
     required this.actionType,
     this.value = '',
     this.iconAbove = false,
-  });
+    this.colorValue,
+    this.enabled = true,
+    this.style = 'outlined',
+    List<String>? modes,
+    this.scope = '',
+    this.display = '',
+  }) : modes = modes ?? <String>[];
+
+  BubbleQuickActionConfig copy({
+    int? id,
+    String? label,
+    String? iconKey,
+    String? actionType,
+    String? value,
+    bool? iconAbove,
+    int? colorValue,
+    bool clearColor = false,
+    bool? enabled,
+    String? style,
+    List<String>? modes,
+    String? scope,
+    String? display,
+  }) => BubbleQuickActionConfig(
+    id: id ?? this.id,
+    label: label ?? this.label,
+    iconKey: iconKey ?? this.iconKey,
+    actionType: actionType ?? this.actionType,
+    value: value ?? this.value,
+    iconAbove: iconAbove ?? this.iconAbove,
+    colorValue: clearColor ? null : (colorValue ?? this.colorValue),
+    enabled: enabled ?? this.enabled,
+    style: style ?? this.style,
+    modes: List<String>.of(modes ?? this.modes),
+    scope: scope ?? this.scope,
+    display: display ?? this.display,
+  );
+
+  Map<String, dynamic> toMap() => {
+    'id': id,
+    'label': label,
+    'iconKey': iconKey,
+    'actionType': actionType,
+    'value': value,
+    'iconAbove': iconAbove,
+    if (colorValue != null) 'color': colorValue,
+    'enabled': enabled,
+    'style': style,
+    'modes': List<String>.of(modes),
+    'scope': scope,
+    'display': display,
+  };
+
+  static BubbleQuickActionConfig fromMap(Map<dynamic, dynamic> m, {int? id}) {
+    final rawModes = m['modes'];
+    final color = m['color'];
+    return BubbleQuickActionConfig(
+      id: m['id'] is num
+          ? (m['id'] as num).toInt()
+          : (id ?? DateTime.now().millisecondsSinceEpoch),
+      label: m['label']?.toString() ?? '',
+      iconKey: m['iconKey']?.toString() ?? 'flash',
+      actionType: m['actionType']?.toString() ?? 'clearStage',
+      value: m['value']?.toString() ?? '',
+      iconAbove: m['iconAbove'] == true,
+      colorValue: color is num ? color.toInt() : null,
+      enabled: m['enabled'] != false,
+      style: m['style']?.toString() ?? 'outlined',
+      modes: rawModes is List
+          ? [for (final x in rawModes) x.toString()]
+          : <String>[],
+      scope: m['scope']?.toString() ?? '',
+      display: m['display']?.toString() ?? '',
+    );
+  }
 }
 
 /// الإعدادات
@@ -272,6 +374,15 @@ class Settings extends HiveObject {
   @HiveField(13)
   List<String> editKeywords;
 
+  /// الوجهات (لحركات الشركات): اختصار ← اسم الوجهة (متل العملات).
+  @HiveField(14)
+  Map<String, String> destinationMap;
+
+  /// معلومات كل وجهة: اسم الوجهة ← {'office': bool, 'accounts': [id...]}.
+  /// كل وجهة لازم يكون إلها مدخل هون (حتى لو بدون اختصارات).
+  @HiveField(15)
+  Map<String, dynamic> destinationInfo;
+
   Settings({
     required this.nameKeywords,
     required this.amountKeywords,
@@ -287,6 +398,8 @@ class Settings extends HiveObject {
     this.forbiddenPhrases = const [],
     this.bubbleUiPrefs = const {},
     this.editKeywords = const ['تعديل'],
+    this.destinationMap = const {},
+    this.destinationInfo = const {},
   });
 }
 

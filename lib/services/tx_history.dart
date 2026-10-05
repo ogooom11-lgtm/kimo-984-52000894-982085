@@ -23,6 +23,7 @@ enum TxField {
   cancelledAt,
   accountId,
   companyMovementType,
+  destination,
 }
 
 extension TxFieldInfo on TxField {
@@ -279,6 +280,7 @@ List<Object?> txSnapshot(TransactionModel t) => [
   t.cancelledAt,
   t.accountId,
   t.companyMovementType?.name,
+  t.destination,
 ];
 
 /// التواريخ تُقارن بالميلي ثانية (Hive يحفظها بهذه الدقة)
@@ -303,6 +305,7 @@ bool _sameValue(TxField f, Object? x, Object? y) {
     case TxField.currency:
     case TxField.secondCurrency:
     case TxField.notes:
+    case TxField.destination:
       return _text(x) == _text(y);
     case TxField.date:
     case TxField.receivedAt:
@@ -381,6 +384,7 @@ enum TxRowKind {
   receivedAt,
   cancelledAt,
   notes,
+  destination,
   deleted,
   restored,
   link,
@@ -753,6 +757,23 @@ class TxHistoryFormatter {
           label: 'تم تعديل تاريخ الإلغاء',
           from: from,
           to: to,
+        ),
+      );
+    }
+
+    // الوجهة (حركات الشركات)
+    final dest = by[TxField.destination];
+    if (dest != null) {
+      final from = _text(dest.oldValue);
+      final to = _text(dest.newValue);
+      out.add(
+        TxChangeRow(
+          kind: TxRowKind.destination,
+          label: from.isEmpty
+              ? 'تم تحديد الوجهة'
+              : (to.isEmpty ? 'تم حذف الوجهة' : 'تم تعديل الوجهة'),
+          from: from.isEmpty ? 'بدون وجهة' : from,
+          to: to.isEmpty ? 'بدون وجهة' : to,
         ),
       );
     }

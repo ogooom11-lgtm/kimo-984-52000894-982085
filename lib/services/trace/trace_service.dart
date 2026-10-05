@@ -4,8 +4,8 @@
 //  • تحسب «مين مصدر كل حركة مكتب» بالخلفية (Isolate) وتعيد الحساب تلقائيًا
 //    مع أي تغيير بالحركات أو الحسابات أو سجل التعديلات أو الإعدادات.
 //  • تحفظ قرارات المستخدم (تأكيد/تغيير/مجهول/«مو هي»/تجاهل تحذير) بصندوق
-//    مستقل (tx_links) مع إعدادات التتبّع ونص رسائل حركات الشركات (للكلمات
-//    يلي لازم تروح لمكتب). الصندوق كله داخل النسخة الاحتياطية.
+//    مستقل (tx_links) مع إعدادات التتبّع. الصندوق كله داخل النسخة
+//    الاحتياطية. (ما منحتفظ بنص الرسائل: الوجهة بتنسجل مع الحركة نفسها.)
 //  • كل قرار يدوي بينسجل بسجل الحركة («مسار الحركة»).
 // -------------------------------------------------------------
 
@@ -29,13 +29,13 @@ Future<TraceResult> _runInIsolate(
   List<TransactionModel> txs,
   Map<int, Account> accounts,
   Map<int, List<TxHistoryEntry>> keyEdits,
-  Map<int, String> messages,
+  Map<String, Destination> destinations,
 ) => Isolate.run(
   () => engine.run(
     transactions: txs,
     accounts: accounts,
     keyEdits: keyEdits,
-    messages: messages,
+    destinations: destinations,
   ),
 );
 
@@ -46,6 +46,8 @@ class TraceService {
   static const String _rejectedKey = '__rejected__';
   static const String _dismissedKey = '__dismissed__';
   static const String _decisionPrefix = 'd:';
+
+  /// نص رسائل حركات الشركات (نسخة قديمة) — ما عاد ينحفظ، ومنمسحه.
   static const String _messagePrefix = 'm:';
   static const int _maxDismissed = 4000;
 
@@ -75,8 +77,8 @@ class TraceService {
   static Listenable? _sources;
 
   static TraceDecisions _decisions = const TraceDecisions();
-  static Map<int, String> _messages = {};
   static Map<int, TransactionModel>? _txIndex;
+  static DestinationBook? _destinations;
 
   static Box<dynamic>? get _box =>
       Hive.isBoxOpen(DatabaseService.txLinksBoxName)
@@ -103,10 +105,10 @@ class TraceService {
     sources.addListener(schedule);
     _sources = sources;
     // «ما راحت لمكتب» بتعتمد على الوقت: منعيد الحساب كل 5 دقائق إذا في
-    // كلمات «لازم تروح لمكتب»، وإلا كل ساعة (لمدة التحذيرات بس)
+    // وجهات تابعة لمكتب، وإلا كل ساعة (لمدة التحذيرات بس)
     _ticker = Timer.periodic(const Duration(minutes: 5), (_) {
       _ticks++;
-      if (prefs.value.mustReachWords.isNotEmpty || _ticks % 12 == 0) {
+      if (destinations.items.any((d) => d.toOffice) || _ticks % 12 == 0) {
         schedule();
       }
     });
@@ -134,6 +136,7 @@ class TraceService {
   /// أعد الحساب بعد لحظة (التغييرات المتلاحقة بتندمج)
   static void schedule({bool immediate = false}) {
     _txIndex = null;
+    _destinations = null;
     if (!_started) return;
     _debounce?.cancel();
     _debounce = Timer(
@@ -182,6 +185,7 @@ class TraceService {
     secondAmount: t.secondAmount,
     secondCurrency: t.secondCurrency,
     companyMovementType: t.companyMovementType,
+    destination: t.destination,
   );
 
   static Future<TraceResult?> _run() async {
@@ -209,23 +213,18 @@ class TraceService {
         for (final e in TxHistoryService.keyEdits.entries)
           e.key: List<TxHistoryEntry>.of(e.value),
       };
-      // نص الرسائل بيلزم بس لكلمات «لازم تروح لمكتب»، وللحركات الأخيرة بس
-      final p = prefs.value;
-      final messages = <int, String>{};
-      if (p.mustReachWords.isNotEmpty && _messages.isNotEmpty) {
-        final from = p.warnDays > 0
-            ? DateTime.now().subtract(Duration(days: p.warnDays + 2))
-            : null;
-        for (final t in txs) {
-          final m = _messages[t.id];
-          if (m == null) continue;
-          if (from != null && t.date.isBefore(from)) continue;
-          messages[t.id] = m;
-        }
-      }
+      final destinations = Map<String, Destination>.of(
+        DestinationBook.fromSettings(settings).byKey,
+      );
       if (!kIsWeb && !_isolateFailed) {
         try {
-          return await _runInIsolate(engine, txs, accounts, edits, messages);
+          return await _runInIsolate(
+            engine,
+            txs,
+            accounts,
+            edits,
+            destinations,
+          );
         } catch (e) {
           debugPrint('Trace isolate failed, running inline: $e');
           _isolateFailed = true;
@@ -235,7 +234,7 @@ class TraceService {
         transactions: txs,
         accounts: accounts,
         keyEdits: edits,
-        messages: messages,
+        destinations: destinations,
       );
     } catch (e, s) {
       debugPrint('Trace compute error: $e\n$s');
@@ -252,18 +251,18 @@ class TraceService {
     if (box == null) return;
     prefs.value = TracePrefs.fromMap(box.get(_prefsKey));
     final byOffice = <int, TraceDecision>{};
-    final messages = <int, String>{};
+    final oldMessages = <dynamic>[];
     for (final key in box.keys) {
       final k = '$key';
       if (k.startsWith(_decisionPrefix)) {
         final d = TraceDecision.fromMap(box.get(key));
         if (d != null) byOffice[d.officeId] = d;
       } else if (k.startsWith(_messagePrefix)) {
-        final id = int.tryParse(k.substring(_messagePrefix.length));
-        final v = box.get(key);
-        if (id != null && v != null) messages[id] = '$v';
+        oldMessages.add(key);
       }
     }
+    // نص الرسائل المحفوظ من نسخة سابقة: ما عاد إله لزوم
+    if (oldMessages.isNotEmpty) unawaited(box.deleteAll(oldMessages));
     final rejected = <int, Set<int>>{};
     final rawRejected = box.get(_rejectedKey);
     if (rawRejected is Map) {
@@ -288,7 +287,6 @@ class TraceService {
       rejected: rejected,
       dismissed: dismissed,
     );
-    _messages = messages;
   }
 
   static void _setDecisions({
@@ -322,6 +320,14 @@ class TraceService {
     return null;
   }
 
+  /// الوجهات من الإعدادات (بتتحدث مع أي تغيير بالإعدادات)
+  static DestinationBook get destinations =>
+      _destinations ??= DestinationBook.fromSettings(
+        Hive.isBoxOpen(DatabaseService.settingsBoxName)
+            ? DatabaseService.getSettings()
+            : null,
+      );
+
   static Account? accountById(int id) {
     for (final a in DatabaseService.accountsBox.values) {
       if (a.id == id) return a;
@@ -340,9 +346,6 @@ class TraceService {
             '${traceAmount(t.amount)} ${t.currency}'
         .trim();
   }
-
-  /// نص رسالة حركة الشركة كما وصلت (إن حُفظ)
-  static String? messageOf(int txId) => _messages[txId];
 
   static String _currentSourceLabel(int officeId) {
     final t = result.value?.office[officeId];
@@ -530,22 +533,6 @@ class TraceService {
     }
   }
 
-  /// حفظ نص رسائل حركات الشركات (للبحث عن كلمات «لازم تروح لمكتب»)
-  static Future<void> rememberMessages(Map<int, String> byTxId) async {
-    if (byTxId.isEmpty) return;
-    final updates = <String, dynamic>{};
-    byTxId.forEach((id, text) {
-      final t = text.trim();
-      if (t.isEmpty) return;
-      final v = t.length > 800 ? t.substring(0, 800) : t;
-      _messages[id] = v;
-      updates['$_messagePrefix$id'] = v;
-    });
-    if (updates.isEmpty) return;
-    await _box?.putAll(updates);
-    schedule();
-  }
-
   static Future<void> setPrefs(TracePrefs p) async {
     prefs.value = p;
     await _box?.put(_prefsKey, p.toMap());
@@ -560,7 +547,10 @@ class TraceService {
   static Map<String, dynamic> exportAll() {
     final box = _box;
     if (box == null) return const {};
-    return <String, dynamic>{for (final k in box.keys) '$k': box.get(k)};
+    return <String, dynamic>{
+      for (final k in box.keys)
+        if (!'$k'.startsWith(_messagePrefix)) '$k': box.get(k),
+    };
   }
 
   /// يستبدل بيانات التتبّع بما في النسخة. نسخة قديمة بدونها: منمسح القرارات
@@ -573,7 +563,7 @@ class TraceService {
     if (raw is Map && raw.isNotEmpty) {
       final m = <String, dynamic>{};
       raw.forEach((k, v) {
-        if (v != null) m['$k'] = v;
+        if (v != null && !'$k'.startsWith(_messagePrefix)) m['$k'] = v;
       });
       await box.putAll(m);
     } else if (keepPrefs != null) {

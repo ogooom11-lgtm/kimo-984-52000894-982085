@@ -3,8 +3,10 @@ import 'package:flutter/services.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/destinations.dart';
 import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
+import '../widgets/destination_picker.dart';
 import 'settings_screen.dart';
 import 'transaction_history_screen.dart';
 
@@ -37,6 +39,12 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
 
   bool _isSaving = false;
   CompanyMovementType _companyMovement = CompanyMovementType.received;
+
+  /// وجهة حركة الشركة (null = بدون) — تنكشف من النص الخام إلا إذا اخترتها
+  DestinationBook _destBook = DestinationBook.empty;
+  String? _destination;
+  bool _destinationManual = false;
+  List<String> _destDetected = const [];
 
   // ===== ألوان متوافقة مع الوضع الفاتح والداكن =====
   ColorScheme get _cs => Theme.of(context).colorScheme;
@@ -98,6 +106,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
 
   void _loadCurrencies() {
     final s = DatabaseService.getSettings();
+    _destBook = DestinationBook.fromSettings(s);
     _currencies = (s?.currencyMap.values.toList() ?? []).toSet().toList()
       ..sort();
 
@@ -120,6 +129,110 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     _selectedSecondCurrency = t.secondCurrency;
     _date = t.date;
     _companyMovement = t.companyMovementType ?? CompanyMovementType.received;
+    _destination = t.destination;
+    _destinationManual = true;
+  }
+
+  /// كشف الوجهة من النص الخام (إذا ما اخترتها أنت)
+  void _detectDestination() {
+    if (!widget.account.type.isCompany || _destBook.isEmpty) return;
+    final det = _destBook.detect(_rawController.text.split('\n'));
+    _destDetected = det.names;
+    if (!_destinationManual) _destination = det.single;
+  }
+
+  Future<void> _pickDestination() async {
+    final picked = await showDestinationPicker(
+      context,
+      book: _destBook,
+      current: _destination,
+      detected: _destDetected,
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _destination = picked.isEmpty ? null : picked;
+      _destinationManual = true;
+    });
+  }
+
+  Widget _buildDestinationPicker() {
+    final name = _destination?.trim() ?? '';
+    if (_destBook.isEmpty && name.isEmpty) return const SizedBox.shrink();
+    final d = _destBook.byName(name);
+    final color = name.isEmpty
+        ? (_isDark ? Colors.white70 : Colors.black54)
+        : destinationColor(d);
+    final ambiguous = !_destinationManual && _destDetected.length > 1;
+    final subtitle = ambiguous
+        ? 'انذكرت أكتر من وجهة: ${_destDetected.join('، ')} — اختار'
+        : (name.isEmpty
+              ? 'اضغط للاختيار'
+              : (d == null
+                    ? 'ما عادت موجودة بالإعدادات'
+                    : '${d.toOffice ? 'تابعة لمكتب' : 'مو تابعة لمكتب'}'
+                          '${_destinationManual ? '' : ' • من النص'}'));
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('الوجهة', style: TextStyle(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Material(
+            color: color.withValues(alpha: _isDark ? .16 : .07),
+            borderRadius: BorderRadius.circular(16),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: _pickDestination,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: (ambiguous ? Colors.orange : color).withValues(
+                      alpha: .4,
+                    ),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(destinationIcon(d), color: color),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name.isEmpty ? 'بدون وجهة' : name,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w900,
+                              color: color,
+                            ),
+                          ),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: ambiguous
+                                  ? Colors.orange.shade800
+                                  : (_isDark ? Colors.white60 : Colors.black54),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(Icons.expand_more_rounded, color: color),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   List<String> get _draggableParts {
@@ -320,6 +433,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         tx.date = _date;
         if (widget.account.type.isCompany) {
           tx.companyMovementType = _companyMovement;
+          tx.destination = _destination;
         }
         TxHistoryService.annotate([tx.id], 'تعديل يدوي');
         await tx.save();
@@ -349,6 +463,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           companyMovementType: widget.account.type.isCompany
               ? _companyMovement
               : null,
+          destination: widget.account.type.isCompany ? _destination : null,
         );
 
         await DatabaseService.addTransaction(tx);
@@ -491,6 +606,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                 })
                 .toList(),
           ),
+          _buildDestinationPicker(),
         ],
       ),
     );
@@ -531,7 +647,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
             controller: _rawController,
             minLines: 4,
             maxLines: 7,
-            onChanged: (_) => setState(() {}),
+            onChanged: (_) => setState(_detectDestination),
             decoration: InputDecoration(
               hintText:
                   'ألصق النص هنا...\nثم اسحب الكلمات أو السطور إلى الحقول أدناه',
@@ -555,7 +671,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                       tooltip: 'مسح النص',
                       onPressed: () {
                         _rawController.clear();
-                        setState(() {});
+                        setState(_detectDestination);
                       },
                       icon: const Icon(Icons.close_rounded),
                     ),

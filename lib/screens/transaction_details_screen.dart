@@ -16,6 +16,9 @@ import '../models.dart';
 import 'transaction_history_screen.dart';
 import '../utils/web_saver.dart' as web_saver;
 import '../utils/amount_format.dart';
+import '../services/trace/trace_service.dart';
+import '../services/tx_history_service.dart';
+import '../widgets/destination_picker.dart';
 import '../widgets/trace_widgets.dart';
 
 class TransactionDetailsScreen extends StatefulWidget {
@@ -779,6 +782,7 @@ class _TransactionDetailsScreenState extends State<TransactionDetailsScreen> {
             },
           ),
           _buildAddedStatusBubble(context, tx),
+          _buildDestinationBubble(context, tx),
           if (tx.notes.trim().isNotEmpty) ...[
             const SizedBox(height: 12),
             _buildInfoBubble(
@@ -790,6 +794,67 @@ class _TransactionDetailsScreenState extends State<TransactionDetailsScreen> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  /// وجهة حركة الشركة (اضغط للتغيير)
+  Widget _buildDestinationBubble(BuildContext context, TransactionModel tx) {
+    if (!widget.account.type.isCompany) return const SizedBox.shrink();
+    final book = TraceService.destinations;
+    final name = tx.destination?.trim() ?? '';
+    if (name.isEmpty && book.isEmpty) return const SizedBox.shrink();
+    final d = book.byName(name);
+    final String value;
+    if (name.isEmpty) {
+      value = 'بدون وجهة — اضغط للتحديد';
+    } else if (d == null) {
+      value = '$name (ما عادت موجودة بالإعدادات)';
+    } else if (!d.toOffice) {
+      value = '${d.name} • مو تابعة لمكتب';
+    } else {
+      final offices = [
+        for (final id in d.officeIds)
+          if (TraceService.accountById(id) case final a?) a.name,
+      ];
+      value =
+          '${d.name} • تابعة لمكتب'
+          '${offices.isEmpty ? '' : ' (${offices.join('، ')})'}';
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () => _changeDestination(tx),
+        child: _buildInfoBubble(
+          context,
+          title: 'الوجهة',
+          value: value,
+          icon: destinationIcon(d),
+          color: destinationColor(d),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _changeDestination(TransactionModel tx) async {
+    final picked = await showDestinationPicker(
+      context,
+      book: TraceService.destinations,
+      current: tx.destination,
+    );
+    if (picked == null || !mounted) return;
+    final next = picked.isEmpty ? null : picked;
+    if ((tx.destination ?? '') == (next ?? '')) return;
+    TxHistoryService.annotate([tx.id], 'تعديل الوجهة');
+    tx.destination = next;
+    await tx.save();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          next == null ? 'صارت الحركة بدون وجهة' : 'صارت الوجهة «$next»',
+        ),
       ),
     );
   }

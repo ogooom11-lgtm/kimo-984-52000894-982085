@@ -75,13 +75,14 @@ class TransactionModelAdapter extends TypeAdapter<TransactionModel> {
       secondAmount: fields[10] as double?,
       secondCurrency: fields[11] as String?,
       companyMovementType: fields[12] as CompanyMovementType?,
+      destination: fields[13] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, TransactionModel obj) {
     writer
-      ..writeByte(13)
+      ..writeByte(14)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -107,7 +108,9 @@ class TransactionModelAdapter extends TypeAdapter<TransactionModel> {
       ..writeByte(11)
       ..write(obj.secondCurrency)
       ..writeByte(12)
-      ..write(obj.companyMovementType);
+      ..write(obj.companyMovementType)
+      ..writeByte(13)
+      ..write(obj.destination);
   }
 
   @override
@@ -171,13 +174,23 @@ class SettingsAdapter extends TypeAdapter<Settings> {
       editKeywords: fields[13] is List
           ? (fields[13] as List).map((e) => e.toString()).toList()
           : const <String>['تعديل'],
+      destinationMap: fields[14] is Map
+          ? (fields[14] as Map).map(
+              (key, value) => MapEntry(key.toString(), value.toString()),
+            )
+          : const <String, String>{},
+      destinationInfo: fields[15] is Map
+          ? (fields[15] as Map).map(
+              (key, value) => MapEntry(key.toString(), value),
+            )
+          : const <String, dynamic>{},
     );
   }
 
   @override
   void write(BinaryWriter writer, Settings obj) {
     writer
-      ..writeByte(14)
+      ..writeByte(16)
       ..writeByte(0)
       ..write(obj.nameKeywords)
       ..writeByte(1)
@@ -205,7 +218,11 @@ class SettingsAdapter extends TypeAdapter<Settings> {
       ..writeByte(12)
       ..write(obj.bubbleUiPrefs)
       ..writeByte(13)
-      ..write(obj.editKeywords);
+      ..write(obj.editKeywords)
+      ..writeByte(14)
+      ..write(obj.destinationMap)
+      ..writeByte(15)
+      ..write(obj.destinationInfo);
   }
 
   @override
@@ -239,13 +256,21 @@ class BubbleQuickActionConfigAdapter
       actionType: fields[3]?.toString() ?? 'clearStage',
       value: fields[4]?.toString() ?? '',
       iconAbove: fields[5] == true,
+      colorValue: fields[6] is num ? (fields[6] as num).toInt() : null,
+      enabled: fields[7] != false,
+      style: fields[8]?.toString() ?? 'outlined',
+      modes: fields[9] is List
+          ? (fields[9] as List).map((e) => e.toString()).toList()
+          : <String>[],
+      scope: fields[10]?.toString() ?? '',
+      display: fields[11]?.toString() ?? '',
     );
   }
 
   @override
   void write(BinaryWriter writer, BubbleQuickActionConfig obj) {
     writer
-      ..writeByte(6)
+      ..writeByte(12)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -257,7 +282,19 @@ class BubbleQuickActionConfigAdapter
       ..writeByte(4)
       ..write(obj.value)
       ..writeByte(5)
-      ..write(obj.iconAbove);
+      ..write(obj.iconAbove)
+      ..writeByte(6)
+      ..write(obj.colorValue)
+      ..writeByte(7)
+      ..write(obj.enabled)
+      ..writeByte(8)
+      ..write(obj.style)
+      ..writeByte(9)
+      ..write(obj.modes)
+      ..writeByte(10)
+      ..write(obj.scope)
+      ..writeByte(11)
+      ..write(obj.display);
   }
 
   @override
