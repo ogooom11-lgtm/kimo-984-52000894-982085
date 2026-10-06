@@ -565,6 +565,260 @@ class TraceMatchChips extends StatelessWidget {
 }
 
 // =============================================================
+// توحيد المبلغ (لما يكون مبلغ حركة المكتب غير مبلغ حركة الشركة)
+// =============================================================
+
+/// المبلغ مختلف بين حركة المكتب وحركة الشركة؟ (القيم الحالية)
+bool traceAmountsDiffer(int officeId, int companyId) {
+  final o = TraceService.txById(officeId);
+  final c = TraceService.txById(companyId);
+  if (o == null || c == null) return false;
+  return (o.amount - c.amount).abs() >= 0.005;
+}
+
+/// يسأل للتأكيد وبعدين بيعدّل المبلغ. [officeTakesCompany] = حركة المكتب
+/// بتاخد مبلغ حركة الشركة (وإلا العكس). بيرجع true إذا انعدل.
+Future<bool> confirmTraceAmountFix(
+  BuildContext context, {
+  required int officeId,
+  required int companyId,
+  required bool officeTakesCompany,
+}) async {
+  final o = TraceService.txById(officeId);
+  final c = TraceService.txById(companyId);
+  if (o == null || c == null) {
+    _snack(context, 'الحركة ما عادت موجودة');
+    return false;
+  }
+  final target = officeTakesCompany ? o : c;
+  final source = officeTakesCompany ? c : o;
+  final currencyDiffers =
+      TraceService.result.value
+          ?.evaluatePair(officeId, companyId)
+          ?.currencySame ==
+      false;
+  var link = true;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => Directionality(
+      textDirection: TextDirection.rtl,
+      child: StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final cs = Theme.of(ctx).colorScheme;
+          final color = officeTakesCompany ? TraceUi.office : TraceUi.company;
+          return AlertDialog(
+            icon: Icon(Icons.edit_note_rounded, color: color, size: 34),
+            title: Text(
+              officeTakesCompany
+                  ? 'تعديل مبلغ حركة المكتب'
+                  : 'تعديل مبلغ حركة الشركة',
+              textAlign: TextAlign.center,
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${TraceUi.accountTitle(target)} • «${target.beneficiary}»',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text.rich(
+                    TextSpan(
+                      style: const TextStyle(fontSize: 15, height: 1.6),
+                      children: [
+                        const TextSpan(text: 'المبلغ رح يتغيّر من '),
+                        TextSpan(
+                          text:
+                              '${traceAmount(target.amount)} ${target.currency}'
+                                  .trim(),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFFDC2626),
+                            decoration: TextDecoration.lineThrough,
+                          ),
+                        ),
+                        const TextSpan(text: ' لـ '),
+                        TextSpan(
+                          text:
+                              '${traceAmount(source.amount)} ${target.currency}'
+                                  .trim(),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF059669),
+                          ),
+                        ),
+                        TextSpan(
+                          text:
+                              ' — متل ${officeTakesCompany ? 'حركة' : 'حركة المكتب'} '
+                              '${TraceUi.accountTitle(source)}.',
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (currencyDiffers) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '⚠️ العملة كمان مختلفة (${o.currency} / ${c.currency}) — '
+                      'العملة ما رح تتغير.',
+                      style: const TextStyle(
+                        color: Color(0xFFD97706),
+                        fontWeight: FontWeight.w700,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: link,
+                    onChanged: (v) => setLocal(() => link = v ?? true),
+                    title: const Text(
+                      'وأكّد إنها مصدر الحركة (ربط الحركتين)',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  Text(
+                    'التعديل بينسجل بسجل تعديلات الحركة، وفيك تتراجع عنه من '
+                    '«سجل العمليات».',
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.4,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: color),
+                onPressed: () => Navigator.pop(ctx, true),
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('تعديل المبلغ'),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+  if (ok != true) return false;
+  final value = await TraceService.alignAmount(
+    officeId,
+    companyId,
+    officeTakesCompany: officeTakesCompany,
+    link: link,
+  );
+  if (!context.mounted) return value != null;
+  if (value == null) {
+    _snack(context, 'تعذّر التعديل: الحركة ما عادت موجودة');
+    return false;
+  }
+  _snack(
+    context,
+    'تم تعديل مبلغ ${officeTakesCompany ? 'حركة المكتب' : 'حركة الشركة'} '
+    'لـ ${traceAmount(value)}${link ? ' وتأكيد المصدر' : ''}',
+  );
+  return true;
+}
+
+/// صندوق «المبلغ مختلف» مع زرّين: مبلغ المكتب متل الشركة، أو العكس
+class TraceAmountFix extends StatelessWidget {
+  final int officeId;
+  final int companyId;
+
+  /// بعد التعديل (مثلًا سكّر القائمة)
+  final VoidCallback? onDone;
+
+  const TraceAmountFix({
+    super.key,
+    required this.officeId,
+    required this.companyId,
+    this.onDone,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final o = TraceService.txById(officeId);
+    final c = TraceService.txById(companyId);
+    if (o == null || c == null || (o.amount - c.amount).abs() < 0.005) {
+      return const SizedBox.shrink();
+    }
+    const red = Color(0xFFDC2626);
+    Future<void> fix(bool officeTakesCompany) async {
+      final done = await confirmTraceAmountFix(
+        context,
+        officeId: officeId,
+        companyId: companyId,
+        officeTakesCompany: officeTakesCompany,
+      );
+      if (done) onDone?.call();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: TraceUi.tint(context, red, .06),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: red.withValues(alpha: .22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.price_change_rounded, size: 18, color: red),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'المبلغ مختلف: بالشركة ${traceAmount(c.amount)} '
+                  'وبالمكتب ${traceAmount(o.amount)}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12.5,
+                    color: red,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              TraceActionButton(
+                icon: Icons.edit_rounded,
+                label: 'خلّي مبلغ المكتب ${traceAmount(c.amount)}',
+                color: TraceUi.office,
+                onPressed: () => fix(true),
+              ),
+              TraceActionButton(
+                icon: Icons.edit_rounded,
+                label: 'خلّي مبلغ الشركة ${traceAmount(o.amount)}',
+                color: TraceUi.company,
+                onPressed: () => fix(false),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================
 // بطاقة مسار الحركة
 // =============================================================
 
@@ -902,6 +1156,10 @@ class TracePathCard extends StatelessWidget {
             const SizedBox(height: 10),
             _possibleBox(context, ot),
           ],
+          if (!compact && isOffice && ot.status.linked && ot.link != null)
+            TraceAmountFix(officeId: tx.id, companyId: ot.link!.companyId),
+          if (!compact && !isOffice && ct?.activeOfficeId != null)
+            TraceAmountFix(officeId: ct!.activeOfficeId!, companyId: tx.id),
           if (warnings.isNotEmpty) ...[
             const SizedBox(height: 12),
             for (final w in warnings) TraceWarningLine(warning: w, result: r),
@@ -938,6 +1196,7 @@ class TracePathCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           TraceMatchChips(m: top),
+          TraceAmountFix(officeId: tx.id, companyId: top.companyId),
           const SizedBox(height: 10),
           Wrap(
             spacing: 8,
@@ -1764,6 +2023,19 @@ class _ChooserSheetState extends State<_ChooserSheet> {
                                     )
                                   : null,
                             ),
+                            if (!o.match.amountSame)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                child: TraceAmountFix(
+                                  officeId: isOffice ? widget.txId : o.txId,
+                                  companyId: isOffice ? o.txId : widget.txId,
+                                  onDone: () {
+                                    if (mounted) Navigator.pop(context);
+                                  },
+                                ),
+                              ),
                             Padding(
                               padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
                               child: Row(

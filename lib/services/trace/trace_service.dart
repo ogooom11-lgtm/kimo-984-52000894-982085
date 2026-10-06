@@ -18,6 +18,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../../database_service.dart';
 import '../../models.dart';
 import '../detection/receive_matching.dart' show CurrencyMatcher;
+import '../operation_log_service.dart';
 import '../tx_history_service.dart';
 import 'trace_engine.dart';
 
@@ -405,6 +406,50 @@ class TraceService {
       );
     }
     schedule(immediate: true);
+  }
+
+  /// توحيد المبلغ بين حركة مكتب وحركة شركة (من «مسار الحركة»):
+  /// [officeTakesCompany] = true يعني حركة المكتب بتاخد مبلغ حركة الشركة، وإلا
+  /// العكس. [link] = كمان تأكيد الربط بين الحركتين. بيرجع المبلغ الجديد، أو
+  /// null إذا وحدة من الحركتين ما عادت موجودة.
+  static Future<double?> alignAmount(
+    int officeId,
+    int companyId, {
+    required bool officeTakesCompany,
+    bool link = true,
+  }) async {
+    final o = txById(officeId);
+    final c = txById(companyId);
+    if (o == null || c == null) return null;
+    final target = officeTakesCompany ? o : c;
+    final source = officeTakesCompany ? c : o;
+    final value = source.amount;
+    if ((target.amount - value).abs() >= 0.005) {
+      final before = OperationLogService.snapshot(target);
+      TxHistoryService.annotate([target.id], 'توحيد المبلغ من مسار الحركة');
+      target.amount = value;
+      await target.save();
+      await OperationLogService.log(
+        kind: OperationKind.manualEdit,
+        title:
+            'تعديل مبلغ «${target.beneficiary}» ليصير متل '
+            '${officeTakesCompany ? 'حركة الشركة' : 'حركة المكتب'}',
+        subtitle: 'من مسار الحركة',
+        records: [
+          OperationTxRecord(
+            txId: target.id,
+            before: before,
+            after: OperationLogService.snapshot(target),
+          ),
+        ],
+      );
+    }
+    if (link) {
+      await linkManually(officeId, companyId);
+    } else {
+      schedule(immediate: true);
+    }
+    return value;
   }
 
   /// المصدر «مجهول» (قرار يدوي)

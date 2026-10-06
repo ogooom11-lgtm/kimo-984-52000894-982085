@@ -18,6 +18,7 @@ import 'screens/transaction_watch_screen.dart';
 import 'services/share_import/share_import_controller.dart';
 import 'services/trace/trace_service.dart';
 import 'services/tx_history_service.dart';
+import 'widgets/app_messages.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,6 +36,9 @@ void main() async {
     Hive.registerAdapter(ParsedTextAdapter());
 
     await DatabaseService.init();
+
+    // شكل ومكان رسائل النجاح والخطأ (من الإعدادات)
+    AppMessages.load();
 
     // سجل تعديلات الحركات: يراقب كل تغيير على الحركات من أي شاشة
     try {
@@ -71,6 +75,9 @@ class MyApp extends StatelessWidget {
         darkTheme: AppTheme.dark,
         themeMode: ThemeMode.system,
         debugShowCheckedModeBanner: false,
+        // كل رسائل النجاح والخطأ بتنعرض بشكل موحّد وبالمكان المختار
+        builder: (context, child) =>
+            StyledScaffoldMessenger(child: child ?? const SizedBox.shrink()),
         home: const StartupSignatureScreen(),
       ),
     );

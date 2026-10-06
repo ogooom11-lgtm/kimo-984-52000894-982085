@@ -641,6 +641,8 @@ class _WarningCard extends StatelessWidget {
             ..._candidates(context, ot)
           else if (companyId != null) ...[
             TraceTxTile(txId: companyId, dense: true),
+            if (officeId != null)
+              TraceAmountFix(officeId: officeId, companyId: companyId),
             const SizedBox(height: 8),
           ],
           _actions(context, dismissed, ot),
@@ -682,6 +684,7 @@ class _WarningCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 TraceMatchChips(m: m),
+                TraceAmountFix(officeId: officeId, companyId: m.companyId),
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 8,

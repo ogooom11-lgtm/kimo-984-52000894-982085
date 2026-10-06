@@ -24,8 +24,10 @@ import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
 import '../widgets/destination_picker.dart'
     show kDestExternalColor, kDestOfficeColor;
+import '../widgets/app_messages.dart';
 import '../widgets/quick_action_defs.dart';
 import 'clipboard_settings_screen.dart';
+import 'messages_settings_screen.dart';
 import 'trace_warnings_screen.dart';
 
 // =============================================================
@@ -76,6 +78,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       _accountsListenable,
       TraceService.prefs,
       TraceService.activeCount,
+      AppMessages.prefs,
     ]);
   }
 
@@ -125,6 +128,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     final tp = TraceService.prefs.value;
     final warnCount = TraceService.activeCount.value;
     final dests = _store.destinationBook;
+    final msgPrefs = AppMessages.prefs.value;
 
     return [
       _HubGroup(
@@ -241,6 +245,24 @@ class _SettingsScreenState extends State<SettingsScreen>
             count: warnCount == 0 ? null : warnCount,
             searchText: 'تحذيرات تنبيه مصدر شركة مكتب اسم مبلغ ما راحت',
             onTap: () => _open(const TraceWarningsScreen()),
+          ),
+        ],
+      ),
+      _HubGroup(
+        title: 'الرسائل',
+        icon: Icons.chat_rounded,
+        tiles: [
+          _HubTile(
+            icon: Icons.mark_chat_read_rounded,
+            color: _kGreen,
+            title: 'رسائل النجاح والخطأ',
+            subtitle:
+                '${msgPrefs.top ? 'فوق الشاشة' : 'تحت الشاشة'} • '
+                '${const ['قصيرة', 'عادية', 'طويلة'][msgPrefs.duration]} • '
+                '${const ['ملوّنة', 'ناعمة', 'داكنة'][msgPrefs.style]}',
+            searchText:
+                'رساله رسائل نجاح خطا تنبيه اشعار فقاعه مكان فوق تحت مده لون شكل',
+            onTap: () => _open(const MessagesSettingsScreen()),
           ),
         ],
       ),
