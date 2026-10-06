@@ -14,6 +14,14 @@
 import '../../models.dart';
 import '../tx_history.dart';
 
+/// مصدر تعديلات «التوحيد» من «مسار الحركة» (بيظهر بسجل الحركة)
+const String kTraceAlignNameSource = 'توحيد الاسم من مسار الحركة';
+const String kTraceAlignAmountSource = 'توحيد المبلغ من مسار الحركة';
+
+/// التعديل انعمل من «مسار الحركة» (توحيد الاسم/المبلغ مع الحركة التانية)؟
+bool isTraceAlignSource(String? source) =>
+    source == kTraceAlignNameSource || source == kTraceAlignAmountSource;
+
 enum TraceEventKind {
   /// وصلت (للمكتب/للشركة)
   arrived,
@@ -266,6 +274,7 @@ List<TraceTxEvent> traceTxEvents(
     }
 
     if (!includeEdits) continue;
+    final aligned = isTraceAlignSource(e.source);
     for (final r in formatter.rows(e)) {
       switch (r.kind) {
         case TxRowKind.status:
@@ -308,11 +317,12 @@ List<TraceTxEvent> traceTxEvents(
         case TxRowKind.date:
         case TxRowKind.receivedAt:
         case TxRowKind.cancelledAt:
+          final label = _colloquial[r.label] ?? r.label;
           rest.add(
             TraceTxEvent(
               TraceEventKind.edited,
               e.at,
-              _colloquial[r.label] ?? r.label,
+              aligned ? '$label (توحيد من المسار)' : label,
               detail: _fromTo(r),
             ),
           );

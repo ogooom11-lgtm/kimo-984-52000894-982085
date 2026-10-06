@@ -8,6 +8,9 @@
 //  • أسماء الحسابات قابلة للضغط وبتفتح الحساب مع تحديد الحركة.
 //  • TraceTxEvents: أحداث كل حركة بالمسار (وصلت/تسلّمت/التغت/انعدلت…) كل
 //    حدث بسطر لحالو مع تاريخه.
+//  • TraceNameFix / TraceAmountFix: لما الاسم/المبلغ مختلف بين حركة المكتب
+//    وحركة الشركة: زر «خلّي اسم/مبلغ المكتب متل الشركة» أو العكس، مع رسالة
+//    تأكيد.
 // -------------------------------------------------------------
 
 import 'dart:async';
@@ -689,6 +692,7 @@ Future<bool> confirmTraceAmountFix(
           ?.evaluatePair(officeId, companyId)
           ?.currencySame ==
       false;
+  final confirmed = TraceService.isConfirmedPair(officeId, companyId);
   var link = true;
   final ok = await showDialog<bool>(
     context: context,
@@ -765,15 +769,10 @@ Future<bool> confirmTraceAmountFix(
                     ),
                   ],
                   const SizedBox(height: 6),
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
+                  _alignLinkOption(
+                    confirmed: confirmed,
                     value: link,
-                    onChanged: (v) => setLocal(() => link = v ?? true),
-                    title: const Text(
-                      'وأكّد إنها مصدر الحركة (ربط الحركتين)',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
+                    onChanged: (v) => setLocal(() => link = v),
                   ),
                   Text(
                     'التعديل بينسجل بسجل تعديلات الحركة، وفيك تتراجع عنه من '
@@ -805,11 +804,12 @@ Future<bool> confirmTraceAmountFix(
     ),
   );
   if (ok != true) return false;
+  final linkNow = link && !confirmed;
   final value = await TraceService.alignAmount(
     officeId,
     companyId,
     officeTakesCompany: officeTakesCompany,
-    link: link,
+    link: linkNow,
   );
   if (!context.mounted) return value != null;
   if (value == null) {
@@ -819,9 +819,45 @@ Future<bool> confirmTraceAmountFix(
   _snack(
     context,
     'تم تعديل مبلغ ${officeTakesCompany ? 'حركة المكتب' : 'حركة الشركة'} '
-    'لـ ${traceAmount(value)}${link ? ' وتأكيد المصدر' : ''}',
+    'لـ ${traceAmount(value)}${linkNow ? ' وتأكيد المصدر' : ''}',
   );
   return true;
+}
+
+/// بحوار التوحيد: «وأكّد إنها مصدر الحركة»، أو سطر «الربط مؤكد» إذا الربط
+/// بين الحركتين مؤكد من قبل.
+Widget _alignLinkOption({
+  required bool confirmed,
+  required bool value,
+  required ValueChanged<bool> onChanged,
+}) {
+  if (confirmed) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Icon(Icons.verified_rounded, size: 18, color: Color(0xFF7C3AED)),
+          SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'الربط بين الحركتين مؤكد من قبل',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  return CheckboxListTile(
+    contentPadding: EdgeInsets.zero,
+    controlAffinity: ListTileControlAffinity.leading,
+    value: value,
+    onChanged: (v) => onChanged(v ?? true),
+    title: const Text(
+      'وأكّد إنها مصدر الحركة (ربط الحركتين)',
+      style: TextStyle(fontWeight: FontWeight.w700),
+    ),
+  );
 }
 
 /// صندوق «المبلغ مختلف» مع زرّين: مبلغ المكتب متل الشركة، أو العكس
@@ -902,6 +938,445 @@ class TraceAmountFix extends StatelessWidget {
                 color: TraceUi.company,
                 onPressed: () => fix(false),
               ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================
+// توحيد الاسم (لما يكون اسم حركة المكتب غير اسم حركة الشركة)
+// =============================================================
+
+const Color _nameFixColor = Color(0xFFD97706);
+final RegExp _nameSpaceRe = RegExp(r'\s+');
+
+/// الاسم مختلف بين حركة المكتب وحركة الشركة؟ (القيم الحالية وبنفس مقارنة
+/// التتبّع: الهمزات والمسافات و«عبد الله/عبدالله» ما بتفرق)
+bool traceNamesDiffer(int officeId, int companyId) {
+  final o = TraceService.txById(officeId);
+  final c = TraceService.txById(companyId);
+  if (o == null || c == null) return false;
+  return _namesDiffer(o.beneficiary, c.beneficiary);
+}
+
+bool _namesDiffer(String a, String b) =>
+    TraceEngine.keysOf(a).join(' ') != TraceEngine.keysOf(b).join(' ');
+
+/// وصف الفرق بين اسمين متشابهين («كلمة زيادة: «علي»»…) أو null
+String? traceNameDiffNote(String a, String b) =>
+    similarNameNote(TraceEngine.keysOf(a), TraceEngine.keysOf(b));
+
+/// كلمات [name] مع تمييز الكلمات يلي مو موجودة بـ [other] (بلون [hi]).
+/// [underline] = خط تحت الكلمة المميزة (وإلا بتورث زخرفة النص).
+List<InlineSpan> _nameDiffSpans(
+  String name,
+  String other,
+  Color hi, {
+  bool underline = true,
+}) {
+  final words = [
+    for (final w in name.trim().split(_nameSpaceRe))
+      if (w.isNotEmpty) w,
+  ];
+  if (words.isEmpty) {
+    return const [
+      TextSpan(
+        text: 'بلا اسم',
+        style: TextStyle(fontStyle: FontStyle.italic),
+      ),
+    ];
+  }
+  final otherKeys = <String>{
+    ...TraceEngine.keysOf(other),
+    for (final w in other.trim().split(_nameSpaceRe)) ...TraceEngine.keysOf(w),
+  };
+  final present = [
+    for (final w in words)
+      TraceEngine.keysOf(w).isEmpty ||
+          TraceEngine.keysOf(w).any(otherKeys.contains),
+  ];
+  // «عبد الله» هون و«عبدالله» هونيك
+  for (var i = 0; i + 1 < words.length; i++) {
+    final pair = TraceEngine.keysOf('${words[i]} ${words[i + 1]}');
+    if (pair.length == 1 && otherKeys.contains(pair.first)) {
+      present[i] = true;
+      present[i + 1] = true;
+    }
+  }
+  final hiStyle = TextStyle(
+    color: hi,
+    fontWeight: FontWeight.w900,
+    decoration: underline ? TextDecoration.underline : null,
+    decorationColor: hi.withValues(alpha: .6),
+  );
+  return [
+    for (var i = 0; i < words.length; i++) ...[
+      if (i > 0) const TextSpan(text: ' '),
+      TextSpan(text: words[i], style: present[i] ? null : hiStyle),
+    ],
+  ];
+}
+
+/// يسأل للتأكيد وبعدين بيعدّل الاسم. [officeTakesCompany] = حركة المكتب
+/// بتاخد اسم حركة الشركة (وإلا العكس). بيرجع true إذا انعدل.
+Future<bool> confirmTraceNameFix(
+  BuildContext context, {
+  required int officeId,
+  required int companyId,
+  required bool officeTakesCompany,
+}) async {
+  final o = TraceService.txById(officeId);
+  final c = TraceService.txById(companyId);
+  if (o == null || c == null) {
+    _snack(context, 'الحركة ما عادت موجودة');
+    return false;
+  }
+  final target = officeTakesCompany ? o : c;
+  final source = officeTakesCompany ? c : o;
+  final oldName = target.beneficiary.trim();
+  final newName = source.beneficiary.trim();
+  if (newName.isEmpty) {
+    _snack(
+      context,
+      'اسم ${officeTakesCompany ? 'حركة الشركة' : 'حركة المكتب'} فاضي',
+    );
+    return false;
+  }
+  final note = traceNameDiffNote(o.beneficiary, c.beneficiary);
+  final amountDiffers = (o.amount - c.amount).abs() >= 0.005;
+  final confirmed = TraceService.isConfirmedPair(officeId, companyId);
+  var link = true;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => Directionality(
+      textDirection: TextDirection.rtl,
+      child: StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final cs = Theme.of(ctx).colorScheme;
+          final color = officeTakesCompany ? TraceUi.office : TraceUi.company;
+          const red = Color(0xFFDC2626);
+          const green = Color(0xFF059669);
+          Widget nameBox(
+            String label,
+            String name,
+            String other,
+            Color tone, {
+            bool strike = false,
+          }) {
+            return Container(
+              margin: const EdgeInsets.only(top: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: TraceUi.tint(ctx, tone, .07),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: tone.withValues(alpha: .3)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: tone,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text.rich(
+                      TextSpan(
+                        children: _nameDiffSpans(
+                          name,
+                          other,
+                          tone,
+                          underline: !strike,
+                        ),
+                      ),
+                      style: TextStyle(
+                        fontSize: 15,
+                        height: 1.4,
+                        fontWeight: FontWeight.w700,
+                        color: strike
+                            ? cs.onSurface.withValues(alpha: .7)
+                            : cs.onSurface,
+                        decoration: strike ? TextDecoration.lineThrough : null,
+                        decorationColor: tone,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return AlertDialog(
+            icon: Icon(
+              Icons.drive_file_rename_outline_rounded,
+              color: color,
+              size: 34,
+            ),
+            title: Text(
+              officeTakesCompany
+                  ? 'تعديل اسم حركة المكتب'
+                  : 'تعديل اسم حركة الشركة',
+              textAlign: TextAlign.center,
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '${TraceUi.accountTitle(target)} • '
+                            '${traceAmount(target.amount)} ${target.currency}'
+                        .trim(),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'الاسم رح يتغيّر:',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                  ),
+                  nameBox('قبل', oldName, newName, red, strike: true),
+                  nameBox('بعد', newName, oldName, green),
+                  const SizedBox(height: 6),
+                  Text(
+                    'متل ${officeTakesCompany ? 'حركة' : 'حركة المكتب'} '
+                    '${TraceUi.accountTitle(source)}.',
+                    style: const TextStyle(fontSize: 14, height: 1.4),
+                  ),
+                  if (note != null) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Icon(
+                            Icons.info_outline_rounded,
+                            size: 15,
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            note,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              height: 1.4,
+                              fontWeight: FontWeight.w600,
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (amountDiffers) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '⚠️ المبلغ كمان مختلف (بالشركة ${traceAmount(c.amount)} '
+                      'وبالمكتب ${traceAmount(o.amount)}) — المبلغ ما رح '
+                      'يتغيّر، فيك توحّده من صندوق «المبلغ مختلف».',
+                      style: const TextStyle(
+                        color: Color(0xFFD97706),
+                        fontWeight: FontWeight.w700,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  _alignLinkOption(
+                    confirmed: confirmed,
+                    value: link,
+                    onChanged: (v) => setLocal(() => link = v),
+                  ),
+                  Text(
+                    'التعديل بينسجل بسجل تعديلات الحركة، وفيك تتراجع عنه من '
+                    '«سجل العمليات».',
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.4,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: color),
+                onPressed: () => Navigator.pop(ctx, true),
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('تعديل الاسم'),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+  if (ok != true) return false;
+  final linkNow = link && !confirmed;
+  final value = await TraceService.alignName(
+    officeId,
+    companyId,
+    officeTakesCompany: officeTakesCompany,
+    link: linkNow,
+  );
+  if (!context.mounted) return value != null;
+  if (value == null) {
+    _snack(context, 'تعذّر التعديل: الحركة ما عادت موجودة');
+    return false;
+  }
+  _snack(
+    context,
+    'تم تعديل اسم ${officeTakesCompany ? 'حركة المكتب' : 'حركة الشركة'} '
+    'لـ «$value»${linkNow ? ' وتأكيد المصدر' : ''}',
+  );
+  return true;
+}
+
+/// صندوق «الاسم مختلف» مع زرّين: اسم المكتب متل الشركة، أو العكس
+class TraceNameFix extends StatelessWidget {
+  final int officeId;
+  final int companyId;
+
+  /// بعد التعديل (مثلًا سكّر القائمة)
+  final VoidCallback? onDone;
+
+  const TraceNameFix({
+    super.key,
+    required this.officeId,
+    required this.companyId,
+    this.onDone,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final o = TraceService.txById(officeId);
+    final c = TraceService.txById(companyId);
+    if (o == null || c == null || !_namesDiffer(o.beneficiary, c.beneficiary)) {
+      return const SizedBox.shrink();
+    }
+    const color = _nameFixColor;
+    final cs = Theme.of(context).colorScheme;
+    final note = traceNameDiffNote(o.beneficiary, c.beneficiary);
+    Future<void> fix(bool officeTakesCompany) async {
+      final done = await confirmTraceNameFix(
+        context,
+        officeId: officeId,
+        companyId: companyId,
+        officeTakesCompany: officeTakesCompany,
+      );
+      if (done) onDone?.call();
+    }
+
+    Widget line(String label, Color tone, String name, String other) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 5),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              constraints: const BoxConstraints(minWidth: 52),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: TraceUi.tint(context, tone, .12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: tone,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text.rich(
+                TextSpan(children: _nameDiffSpans(name, other, color)),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.35,
+                  fontWeight: FontWeight.w700,
+                  color: cs.onSurface,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: TraceUi.tint(context, color, .06),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: .25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.badge_rounded, size: 18, color: color),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  note == null ? 'الاسم مختلف' : 'الاسم مختلف • $note',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12.5,
+                    color: color,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          line('الشركة', TraceUi.company, c.beneficiary, o.beneficiary),
+          line('المكتب', TraceUi.office, o.beneficiary, c.beneficiary),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (c.beneficiary.trim().isNotEmpty)
+                TraceActionButton(
+                  icon: Icons.edit_rounded,
+                  label: 'خلّي اسم المكتب متل الشركة',
+                  color: TraceUi.office,
+                  onPressed: () => fix(true),
+                ),
+              if (o.beneficiary.trim().isNotEmpty)
+                TraceActionButton(
+                  icon: Icons.edit_rounded,
+                  label: 'خلّي اسم الشركة متل المكتب',
+                  color: TraceUi.company,
+                  onPressed: () => fix(false),
+                ),
             ],
           ),
         ],
@@ -1249,10 +1724,15 @@ class TracePathCard extends StatelessWidget {
             const SizedBox(height: 10),
             _possibleBox(context, ot),
           ],
-          if (!compact && isOffice && ot.status.linked && ot.link != null)
+          if (!compact && isOffice && ot.status.linked && ot.link != null) ...[
+            TraceNameFix(officeId: tx.id, companyId: ot.link!.companyId),
             TraceAmountFix(officeId: tx.id, companyId: ot.link!.companyId),
-          if (!compact && !isOffice && ct?.activeOfficeId != null)
-            TraceAmountFix(officeId: ct!.activeOfficeId!, companyId: tx.id),
+          ],
+          if (ct?.activeOfficeId case final activeId?
+              when !compact && !isOffice) ...[
+            TraceNameFix(officeId: activeId, companyId: tx.id),
+            TraceAmountFix(officeId: activeId, companyId: tx.id),
+          ],
           if (warnings.isNotEmpty) ...[
             const SizedBox(height: 12),
             for (final w in warnings) TraceWarningLine(warning: w, result: r),
@@ -1289,6 +1769,7 @@ class TracePathCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           TraceMatchChips(m: top),
+          TraceNameFix(officeId: tx.id, companyId: top.companyId),
           TraceAmountFix(officeId: tx.id, companyId: top.companyId),
           const SizedBox(height: 10),
           Wrap(
@@ -2242,6 +2723,13 @@ class _ChooserSheetState extends State<_ChooserSheet> {
       if (ot != null)
         for (final m in ot.candidates) m.companyId,
     };
+    // صندوق «الاسم مختلف» بس للحركات يلي ممكن تكون هي نفسها (مو لكل حركات
+    // الفترة)
+    final plausible = <int>{
+      ...candidateIds,
+      ...current,
+      ...?r.company[widget.txId]?.possibleOfficeIds,
+    };
     final q = _q.trim().toLowerCase();
     final all = r.optionsFor(widget.txId);
     final options = [
@@ -2342,6 +2830,20 @@ class _ChooserSheetState extends State<_ChooserSheet> {
                                     )
                                   : null,
                             ),
+                            if (o.match.nameFit != TraceNameFit.different ||
+                                plausible.contains(o.txId))
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                child: TraceNameFix(
+                                  officeId: isOffice ? widget.txId : o.txId,
+                                  companyId: isOffice ? o.txId : widget.txId,
+                                  onDone: () {
+                                    if (mounted) Navigator.pop(context);
+                                  },
+                                ),
+                              ),
                             if (!o.match.amountSame)
                               Padding(
                                 padding: const EdgeInsets.symmetric(

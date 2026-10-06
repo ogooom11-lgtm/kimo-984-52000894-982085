@@ -21,6 +21,8 @@ import '../detection/receive_matching.dart' show CurrencyMatcher;
 import '../operation_log_service.dart';
 import '../tx_history_service.dart';
 import 'trace_engine.dart';
+import 'trace_timeline.dart'
+    show kTraceAlignAmountSource, kTraceAlignNameSource;
 
 export 'trace_engine.dart';
 
@@ -426,7 +428,7 @@ class TraceService {
     final value = source.amount;
     if ((target.amount - value).abs() >= 0.005) {
       final before = OperationLogService.snapshot(target);
-      TxHistoryService.annotate([target.id], 'توحيد المبلغ من مسار الحركة');
+      TxHistoryService.annotate([target.id], kTraceAlignAmountSource);
       target.amount = value;
       await target.save();
       await OperationLogService.log(
@@ -444,12 +446,100 @@ class TraceService {
         ],
       );
     }
-    if (link) {
+    await _afterAlign(officeId, companyId, link: link, amount: true);
+    return value;
+  }
+
+  /// توحيد الاسم بين حركة مكتب وحركة شركة (من «مسار الحركة»):
+  /// [officeTakesCompany] = true يعني حركة المكتب بتاخد اسم حركة الشركة، وإلا
+  /// العكس. [link] = كمان تأكيد الربط بين الحركتين. بيرجع الاسم الجديد، أو
+  /// null إذا وحدة من الحركتين ما عادت موجودة أو الاسم يلي رح ناخده فاضي.
+  static Future<String?> alignName(
+    int officeId,
+    int companyId, {
+    required bool officeTakesCompany,
+    bool link = true,
+  }) async {
+    final o = txById(officeId);
+    final c = txById(companyId);
+    if (o == null || c == null) return null;
+    final target = officeTakesCompany ? o : c;
+    final source = officeTakesCompany ? c : o;
+    final value = source.beneficiary.trim();
+    if (value.isEmpty) return null;
+    final old = target.beneficiary.trim();
+    if (old != value) {
+      final before = OperationLogService.snapshot(target);
+      TxHistoryService.annotate([target.id], kTraceAlignNameSource);
+      target.beneficiary = value;
+      await target.save();
+      await OperationLogService.log(
+        kind: OperationKind.manualEdit,
+        title:
+            'تعديل اسم «$old» لـ «$value» متل '
+            '${officeTakesCompany ? 'حركة الشركة' : 'حركة المكتب'}',
+        subtitle: 'من مسار الحركة',
+        records: [
+          OperationTxRecord(
+            txId: target.id,
+            before: before,
+            after: OperationLogService.snapshot(target),
+          ),
+        ],
+      );
+    }
+    await _afterAlign(officeId, companyId, link: link, name: true);
+    return value;
+  }
+
+  /// الربط بين حركة المكتب وحركة الشركة مؤكد يدويًا؟
+  static bool isConfirmedPair(int officeId, int companyId) {
+    final d = _decisions.byOffice[officeId];
+    return d != null &&
+        d.kind == TraceDecisionKind.link &&
+        d.companyId == companyId;
+  }
+
+  /// بعد توحيد الاسم/المبلغ: إذا الربط مؤكد من قبل منقبل القيمة الجديدة بقيم
+  /// التأكيد بس (بلا تحذير «انعدلت بعد ما أكدت الربط» بسببها، وبلا تأكيد
+  /// جديد بالسجل)، وإلا منأكد الربط إذا المستخدم طلب.
+  static Future<void> _afterAlign(
+    int officeId,
+    int companyId, {
+    required bool link,
+    bool name = false,
+    bool amount = false,
+  }) async {
+    final d = _decisions.byOffice[officeId];
+    final o = txById(officeId);
+    final c = txById(companyId);
+    if (d != null &&
+        o != null &&
+        c != null &&
+        isConfirmedPair(officeId, companyId)) {
+      String? patch(String? snap, TransactionModel t) => snap == null
+          ? null
+          : (traceSnapPatch(snap, t, name: name, amount: amount) ??
+                traceSnapOf(t));
+      final nd = TraceDecision(
+        officeId: officeId,
+        kind: d.kind,
+        companyId: companyId,
+        at: d.at,
+        officeSnap: patch(d.officeSnap, o),
+        companySnap: patch(d.companySnap, c),
+      );
+      _setDecisions(
+        byOffice: Map<int, TraceDecision>.of(_decisions.byOffice)
+          ..[officeId] = nd,
+      );
+      await _box?.put('$_decisionPrefix$officeId', nd.toMap());
+      schedule(immediate: true);
+    } else if (link) {
       await linkManually(officeId, companyId);
     } else {
       schedule(immediate: true);
     }
-    return value;
   }
 
   /// المصدر «مجهول» (قرار يدوي)

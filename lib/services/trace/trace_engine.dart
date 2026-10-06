@@ -287,6 +287,22 @@ String traceSnapOf(TransactionModel t) =>
     '${TraceEngine.keysOf(t.beneficiary).join(' ')}|'
     '${t.amount.toStringAsFixed(2)}|${normalizeText(t.currency)}';
 
+/// [snap] (قيم وقت التأكيد) بعد ما ناخد منها [name] و/أو [amount] من قيم
+/// الحركة [t] الحالية، والباقي متل ما هو. لما نوحّد قيمة من «مسار الحركة»
+/// لحركتين ربطهن مؤكد: القيمة الجديدة بتصير مقبولة، وأي تعديل تاني بعد
+/// التأكيد بيضل يطلع تحذير. null = الصيغة مو مفهومة.
+String? traceSnapPatch(
+  String snap,
+  TransactionModel t, {
+  bool name = false,
+  bool amount = false,
+}) {
+  final old = snap.split('|');
+  final cur = traceSnapOf(t).split('|');
+  if (old.length != 3 || cur.length != 3) return null;
+  return [name ? cur[0] : old[0], amount ? cur[1] : old[1], old[2]].join('|');
+}
+
 // =============================================================
 // النتائج
 // =============================================================
