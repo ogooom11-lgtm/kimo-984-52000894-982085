@@ -2363,7 +2363,19 @@ class _BubbleScreenState extends State<BubbleScreen> {
 
     bool inList(WordListKind k) => SettingsWords.contains(settings, k, word);
 
+    // الوجهة (حركات الشركات): الكلمة جزء من اسم/اختصار وجهة معروفة؟
+    final destHit = _destHitAt(segIndex, lineIndex, tokenIndex);
+    final canPickDest =
+        _isCompanyAccount && _modeOf(segIndex) == BubbleActionMode.add;
+    final showDest = _isCompanyAccount || destHit != null;
+    final destIsAlias =
+        destHit != null &&
+        destinationKey(destHit.phrase) != destinationKey(destHit.name);
+    final chosenDest = canPickDest ? _destinationForSegment(segIndex) : null;
+
     final roles = <String>[
+      if (destHit != null)
+        destIsAlias ? 'اختصار وجهة: ${destHit.name}' : 'وجهة: ${destHit.name}',
       if (inList(WordListKind.forbidden)) 'ممنوعة',
       if (sel.forbiddenPhraseTokens.contains(_TokPos(lineIndex, tokenIndex)))
         'ضمن جملة ممنوعة',
@@ -2483,6 +2495,48 @@ class _BubbleScreenState extends State<BubbleScreen> {
                       ],
                     ),
                     const SizedBox(height: 12),
+                    if (showDest) ...[
+                      if (destHit == null) ...[
+                        tile(
+                          'destNew',
+                          Icons.add_location_alt_rounded,
+                          'تحديد كاسم وجهة',
+                          kDestOfficeColor,
+                          subtitle: canPickDest
+                              ? 'وجهة جديدة بالإعدادات، وبتنختار لهالحركة'
+                              : 'وجهة جديدة بالإعدادات ← الوجهات',
+                        ),
+                        if (_destinations.isNotEmpty)
+                          tile(
+                            'destAlias',
+                            Icons.alt_route_rounded,
+                            'تحديد كاختصار لوجهة',
+                            kDestExternalColor,
+                            subtitle:
+                                'كلمة تانية لنفس الوجهة، متل «اسطنبول» ← «تركيا»',
+                          ),
+                      ] else ...[
+                        if (canPickDest && chosenDest != destHit.name)
+                          tile(
+                            'destUse',
+                            Icons.where_to_vote_rounded,
+                            'اختيار «${destHit.name}» كوجهة لهالحركة',
+                            destinationColor(
+                              _destinations.byName(destHit.name),
+                            ),
+                          ),
+                        if (destIsAlias)
+                          tile(
+                            'destRemove',
+                            Icons.wrong_location_rounded,
+                            'إزالة «${destHit.phrase}» من اختصارات '
+                                '«${destHit.name}»',
+                            kDestExternalColor,
+                            remove: true,
+                          ),
+                      ],
+                      const Divider(height: 14),
+                    ],
                     tile(
                       'forbidden',
                       Icons.block_rounded,
@@ -2667,6 +2721,33 @@ class _BubbleScreenState extends State<BubbleScreen> {
       case 'copy':
         await Clipboard.setData(ClipboardData(text: word));
         _snack('تم نسخ «$word»');
+        return;
+      case 'destNew':
+      case 'destAlias':
+        await _defineDestinationFromWord(
+          segIndex,
+          tokenIndex,
+          tokensThisLine,
+          alias: action == 'destAlias',
+        );
+        return;
+      case 'destUse':
+        final hit = destHit;
+        if (hit == null) return;
+        _setDestination(segIndex, hit.name);
+        _snack('تم اختيار «${hit.name}» كوجهة لهالحركة');
+        return;
+      case 'destRemove':
+        final hit = destHit;
+        if (hit == null) return;
+        final removed = await SettingsWords.removeDestinationAlias(hit.phrase);
+        if (!mounted) return;
+        if (removed) setState(_reloadSettings);
+        _snack(
+          removed
+              ? 'تمت إزالة «${hit.phrase}» من اختصارات «${hit.name}»'
+              : 'ما لقينا الاختصار «${hit.phrase}» بالإعدادات',
+        );
         return;
     }
 
@@ -3573,6 +3654,9 @@ class _BubbleScreenState extends State<BubbleScreen> {
     final compact = _prefs.compact;
     final fontSize = _prefs.tokenFontSize;
     final iconSize = (fontSize + 1).clamp(12.0, 20.0);
+    final destMark = selected
+        ? null
+        : _destTokenMark(segIndex, lineIndex, tokenIndex);
 
     void openActions() => _showWordActions(
       segIndex,
@@ -3639,6 +3723,10 @@ class _BubbleScreenState extends State<BubbleScreen> {
               if (!selected && isLocked) ...[
                 const SizedBox(width: 6),
                 Icon(Icons.touch_app, size: iconSize - 2, color: color),
+              ],
+              if (destMark != null) ...[
+                const SizedBox(width: 5),
+                Icon(Icons.place_rounded, size: iconSize - 2, color: destMark),
               ],
             ],
           ),
@@ -5655,6 +5743,59 @@ class _BubbleScreenState extends State<BubbleScreen> {
     setState(() => _destOverride[si] = name ?? '');
   }
 
+  /// الوجهة المذكورة عند الكلمة (إذا الكلمة جزء من اسم/اختصار وجهة)
+  DestinationHit? _destHitAt(int si, int li, int ti) {
+    if (_destinations.isEmpty) return null;
+    for (final h in _destDetectionFor(si).hits) {
+      if (h.line == li && ti >= h.start && ti < h.start + h.length) return h;
+    }
+    return null;
+  }
+
+  /// لون علامة 📍 على كلمة من وجهة (حركات الشركات بوضع الإضافة)، أو null
+  Color? _destTokenMark(int si, int li, int ti) {
+    if (!_isCompanyAccount || _modeOf(si) != BubbleActionMode.add) {
+      return null;
+    }
+    final h = _destHitAt(si, li, ti);
+    if (h == null) return null;
+    return destinationColor(_destinations.byName(h.name));
+  }
+
+  /// الضغط المطوّل على كلمة ← «تحديد كاسم وجهة» / «تحديد كاختصار لوجهة»:
+  /// بتنحفظ بالإعدادات فورًا، وبتنختار لهالحركة (حركات الشركات بالإضافة).
+  Future<void> _defineDestinationFromWord(
+    int segIndex,
+    int tokenIndex,
+    List<String> tokensThisLine, {
+    required bool alias,
+  }) async {
+    final options = destinationPhraseOptions(tokensThisLine, tokenIndex);
+    if (options.isEmpty) {
+      _snack('هالكلمة ما بتنفع كوجهة (فيها أرقام)');
+      return;
+    }
+    final res = await showDestinationWordSheet(
+      context,
+      options: options,
+      book: _destinations,
+      aliasFirst: alias,
+      suggestedDestination: _destinationForSegment(segIndex),
+    );
+    if (res == null || !mounted) return;
+    final pick = _isCompanyAccount && _modeOf(segIndex) == BubbleActionMode.add;
+    setState(() {
+      _reloadSettings();
+      if (pick) _destOverride[segIndex] = res.destination;
+    });
+    final picked = pick ? ' واخترناها لهالحركة' : '';
+    _snack(
+      res.created
+          ? 'تم حفظ «${res.destination}» كوجهة جديدة$picked'
+          : 'تم حفظ «${res.phrase}» كاختصار لـ«${res.destination}»$picked',
+    );
+  }
+
   /// تأكيد قبل حفظ حركات شركة انذكر فيها أكتر من وجهة وما اخترت وحدة
   Future<bool> _confirmAmbiguousDestinations(
     List<_PendingTxDraft> drafts,
@@ -5737,10 +5878,25 @@ class _BubbleScreenState extends State<BubbleScreen> {
   }
 
   Widget _buildDestinationRow(BuildContext context, int si) {
-    if (!_isCompanyAccount ||
-        _modeOf(si) != BubbleActionMode.add ||
-        _destinations.isEmpty) {
+    if (!_isCompanyAccount || _modeOf(si) != BubbleActionMode.add) {
       return const SizedBox.shrink();
+    }
+    if (_destinations.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Row(
+          children: [
+            Icon(Icons.touch_app_rounded, size: 15, color: _muted(context)),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'لتحديد وجهة: اضغط مطوّلًا على اسمها بالرسالة ← «تحديد كاسم وجهة»',
+                style: TextStyle(fontSize: 11.5, color: _muted(context)),
+              ),
+            ),
+          ],
+        ),
+      );
     }
     final det = _destDetectionFor(si);
     final manual = _destOverride.containsKey(si);

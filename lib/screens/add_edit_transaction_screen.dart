@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/destinations.dart';
+import '../services/detection/text_tokens.dart'
+    show stripEdgePunct, tokensFromLine;
 import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
 import '../widgets/destination_picker.dart';
@@ -155,9 +157,74 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     });
   }
 
+  /// سحب كلمة من النص لخانة الوجهة: إذا معروفة بتنختار، وإلا بتتحدد كوجهة
+  /// جديدة أو كاختصار لوجهة موجودة (وبتنحفظ بالإعدادات).
+  Future<void> _onDestinationDrop(String data) async {
+    final text = data.trim();
+    if (text.isEmpty) return;
+    final det = _destBook.detect([text]);
+    if (det.single case final known?) {
+      setState(() {
+        _destination = known;
+        _destinationManual = true;
+      });
+      return;
+    }
+    if (det.ambiguous) {
+      final picked = await showDestinationPicker(
+        context,
+        book: _destBook,
+        current: _destination,
+        detected: det.names,
+      );
+      if (picked == null || !mounted) return;
+      setState(() {
+        _destination = picked.isEmpty ? null : picked;
+        _destinationManual = true;
+      });
+      return;
+    }
+    final tokens = tokensFromLine(text);
+    final options = <String>[];
+    for (final o in [
+      if (tokens.length > 1 && tokens.length <= 4)
+        tokens.map(stripEdgePunct).join(' '),
+      ...destinationPhraseOptions(tokens, 0),
+    ]) {
+      final k = destinationKey(o);
+      if (k.isNotEmpty && !options.any((e) => destinationKey(e) == k)) {
+        options.add(o);
+      }
+    }
+    if (options.isEmpty) return;
+    final res = await showDestinationWordSheet(
+      context,
+      options: options,
+      book: _destBook,
+      suggestedDestination: _destination,
+    );
+    if (res == null || !mounted) return;
+    setState(() {
+      _destBook = DestinationBook.fromSettings(DatabaseService.getSettings());
+      _destination = res.destination;
+      _destinationManual = true;
+      _detectDestination();
+    });
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            res.created
+                ? 'تم حفظ «${res.destination}» كوجهة جديدة'
+                : 'تم حفظ «${res.phrase}» كاختصار لـ«${res.destination}»',
+          ),
+        ),
+      );
+  }
+
   Widget _buildDestinationPicker() {
     final name = _destination?.trim() ?? '';
-    if (_destBook.isEmpty && name.isEmpty) return const SizedBox.shrink();
     final d = _destBook.byName(name);
     final color = name.isEmpty
         ? (_isDark ? Colors.white70 : Colors.black54)
@@ -166,7 +233,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     final subtitle = ambiguous
         ? 'انذكرت أكتر من وجهة: ${_destDetected.join('، ')} — اختار'
         : (name.isEmpty
-              ? 'اضغط للاختيار'
+              ? 'اضغط للاختيار، أو اسحب كلمة من النص لهون'
               : (d == null
                     ? 'ما عادت موجودة بالإعدادات'
                     : '${d.toOffice ? 'تابعة لمكتب' : 'مو تابعة لمكتب'}'
@@ -178,59 +245,81 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         children: [
           const Text('الوجهة', style: TextStyle(fontWeight: FontWeight.w900)),
           const SizedBox(height: 8),
-          Material(
-            color: color.withValues(alpha: _isDark ? .16 : .07),
-            borderRadius: BorderRadius.circular(16),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: _pickDestination,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: (ambiguous ? Colors.orange : color).withValues(
-                      alpha: .4,
-                    ),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Icon(destinationIcon(d), color: color),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            name.isEmpty ? 'بدون وجهة' : name,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w900,
-                              color: color,
-                            ),
-                          ),
-                          Text(
-                            subtitle,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: ambiguous
-                                  ? Colors.orange.shade800
-                                  : (_isDark ? Colors.white60 : Colors.black54),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Icon(Icons.expand_more_rounded, color: color),
-                  ],
-                ),
+          DragTarget<String>(
+            onWillAcceptWithDetails: (details) =>
+                details.data.trim().isNotEmpty,
+            onAcceptWithDetails: (details) => _onDestinationDrop(details.data),
+            builder: (context, candidates, rejected) => AnimatedScale(
+              scale: candidates.isNotEmpty ? 1.02 : 1,
+              duration: const Duration(milliseconds: 160),
+              child: _destinationBox(
+                name: name,
+                d: d,
+                color: candidates.isNotEmpty ? kDestOfficeColor : color,
+                ambiguous: ambiguous,
+                subtitle: candidates.isNotEmpty
+                    ? 'اترك الكلمة هون لتصير وجهة'
+                    : subtitle,
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _destinationBox({
+    required String name,
+    required Destination? d,
+    required Color color,
+    required bool ambiguous,
+    required String subtitle,
+  }) {
+    return Material(
+      color: color.withValues(alpha: _isDark ? .16 : .07),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: _pickDestination,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: (ambiguous ? Colors.orange : color).withValues(alpha: .4),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(destinationIcon(d), color: color),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name.isEmpty ? 'بدون وجهة' : name,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        color: color,
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: ambiguous
+                            ? Colors.orange.shade800
+                            : (_isDark ? Colors.white60 : Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.expand_more_rounded, color: color),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -4,6 +4,7 @@
 
 import '../database_service.dart';
 import '../models.dart';
+import 'destinations.dart' show destinationKey;
 import 'detection/text_tokens.dart';
 
 enum WordListKind {
@@ -194,6 +195,86 @@ class SettingsWords {
     if (w.isEmpty || value <= 0) return false;
     final s = load();
     s.amountWordValues = {...s.amountWordValues, w: value};
+    await DatabaseService.saveSettings(s);
+    return true;
+  }
+
+  // ---------------- الوجهات (من الضغط المطوّل على كلمة) ----------------
+
+  /// اسم الوجهة يلي إلها هالاسم أو الاختصار (أو null)
+  static String? destinationOwnerOf(Settings s, String text) {
+    final k = destinationKey(text);
+    if (k.isEmpty) return null;
+    for (final n in s.destinationInfo.keys) {
+      if (destinationKey(n) == k) return n.trim();
+    }
+    for (final e in s.destinationMap.entries) {
+      if (destinationKey(e.key) == k || destinationKey(e.value) == k) {
+        return e.value.trim();
+      }
+    }
+    return null;
+  }
+
+  /// وجهة جديدة. يعيد رسالة خطأ أو null إذا انحفظت.
+  static Future<String?> addDestination(
+    String name, {
+    bool toOffice = false,
+  }) async {
+    final n = name.trim();
+    if (destinationKey(n).isEmpty) return 'اكتب اسم الوجهة';
+    final s = load();
+    final owner = destinationOwnerOf(s, n);
+    if (owner != null) {
+      return destinationKey(owner) == destinationKey(n)
+          ? '«$n» موجودة مسبقًا كوجهة'
+          : '«$n» موجود مسبقًا كاختصار لـ«$owner»';
+    }
+    s.destinationInfo = {
+      ...s.destinationInfo,
+      n: <String, dynamic>{'office': toOffice},
+    };
+    await DatabaseService.saveSettings(s);
+    return null;
+  }
+
+  /// اختصار لوجهة موجودة. يعيد رسالة خطأ أو null إذا انحفظ.
+  static Future<String?> addDestinationAlias(
+    String destination,
+    String alias,
+  ) async {
+    final a = alias.trim();
+    final d = destination.trim();
+    if (destinationKey(a).isEmpty) return 'اكتب الاختصار';
+    if (destinationKey(d).isEmpty) return 'اختار الوجهة';
+    final s = load();
+    final owner = destinationOwnerOf(s, a);
+    if (owner != null) {
+      return destinationKey(owner) == destinationKey(a)
+          ? '«$a» اسم وجهة لحالها'
+          : '«$a» موجود مسبقًا ضمن «$owner»';
+    }
+    s.destinationMap = {...s.destinationMap, a: d};
+    await DatabaseService.saveSettings(s);
+    return null;
+  }
+
+  /// يشيل اختصار وجهة (اسم الوجهة نفسه ما بينشال من هون)
+  static Future<bool> removeDestinationAlias(String alias) async {
+    final k = destinationKey(alias);
+    if (k.isEmpty) return false;
+    final s = load();
+    final next = <String, String>{};
+    var removed = false;
+    s.destinationMap.forEach((key, v) {
+      if (destinationKey(key) == k) {
+        removed = true;
+      } else {
+        next[key] = v;
+      }
+    });
+    if (!removed) return false;
+    s.destinationMap = next;
     await DatabaseService.saveSettings(s);
     return true;
   }

@@ -12,13 +12,9 @@ import 'package:share_plus/share_plus.dart';
 
 import '../database_service.dart';
 import '../models.dart';
+import '../services/all_stats_prefs.dart';
 import '../services/period_stats.dart';
-
-enum AllStatsPeriod { daily, monthly, yearly }
-
-enum AccountSortMode { priority, name, operations, trend, amount }
-
-enum _QuickMetricType { added, received, cancelled, unreceived }
+import 'all_stats_customize_screen.dart';
 
 class AllAccountsStatsScreen extends StatefulWidget {
   const AllAccountsStatsScreen({super.key});
@@ -34,24 +30,79 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   static const double _maxCanvasWidth = 900.0;
 
   DateTime _anchor = DateTime.now();
-  AllStatsPeriod _period = AllStatsPeriod.daily;
-  AccountSortMode _sortMode = AccountSortMode.priority;
-  AccountType _accountTypeFilter = AccountType.office;
+
+  /// التخصيص (محفوظ — الصفحة بترجع متل ما تركتها)
+  AllStatsPrefs _prefs = AllStatsPrefsStore.load();
 
   bool _busy = false;
 
-  bool _showHeader = true;
-  bool _showQuickStats = true;
-  bool _showGlobalCards = false;
-  bool _showAccountCards = false;
-  bool _showCurrencyRows = true;
-  bool _showDeltaStrip = true;
-  bool _showAddedCard = true;
-  bool _showReceivedCard = true;
-  bool _showCancelledCard = true;
-  bool _showUnreceivedCard = true;
-  bool _hidePeriodBarInExport = false;
-  bool _showAccountsInsideQuickCards = true;
+  /// أثناء حفظ/مشاركة الصورة
+  bool _exporting = false;
+
+  AllStatsPeriod get _period => _prefs.period;
+  set _period(AllStatsPeriod v) => _update(_prefs.copyWith(period: v));
+
+  AccountSortMode get _sortMode => _prefs.sortMode;
+  set _sortMode(AccountSortMode v) => _update(_prefs.copyWith(sortMode: v));
+
+  AccountType get _accountTypeFilter => _prefs.accountType;
+  set _accountTypeFilter(AccountType v) =>
+      _update(_prefs.copyWith(accountType: v));
+
+  bool get _showHeader =>
+      _prefs.showHeader && !(_exporting && _prefs.hideHeaderInExport);
+  bool get _showQuickStats => _prefs.showQuickStats;
+  bool get _showGlobalCards => _prefs.showGlobalCards;
+  bool get _showAccountCards => _prefs.showAccountCards;
+  bool get _showCurrencyRows => _prefs.showCurrencyRows;
+  bool get _showDeltaStrip => _prefs.showDelta;
+  bool get _showAccountsInsideQuickCards => _prefs.showAccountsInQuick;
+
+  /// الأقسام الظاهرة بالترتيب المختار (حسب نوع الحسابات)
+  List<StatsMetric> get _metrics => _prefs.visibleMetrics(_accountTypeFilter);
+
+  void _update(AllStatsPrefs p) {
+    _prefs = p;
+    AllStatsPrefsStore.save(p);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    AllStatsPrefsStore.prefs.addListener(_onPrefsChanged);
+  }
+
+  @override
+  void dispose() {
+    AllStatsPrefsStore.prefs.removeListener(_onPrefsChanged);
+    super.dispose();
+  }
+
+  void _onPrefsChanged() {
+    final p = AllStatsPrefsStore.prefs.value;
+    if (!mounted || identical(p, _prefs)) return;
+    setState(() => _prefs = p);
+  }
+
+  Future<void> _openCustomize() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            AllStatsCustomizeScreen(initialType: _accountTypeFilter),
+      ),
+    );
+    if (mounted) setState(() => _prefs = AllStatsPrefsStore.prefs.value);
+  }
+
+  int _compareManual(_AccountStats a, _AccountStats b) {
+    final order = _prefs.orderFor(_accountTypeFilter);
+    final ia = order.indexOf(a.account.id);
+    final ib = order.indexOf(b.account.id);
+    if (ia >= 0 && ib >= 0) return ia.compareTo(ib);
+    if (ia >= 0) return -1;
+    if (ib >= 0) return 1;
+    return a.account.name.compareTo(b.account.name);
+  }
 
   // ==========================
   // Date helpers
@@ -180,6 +231,8 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         return 'حسب التغير';
       case AccountSortMode.amount:
         return 'حسب المبالغ';
+      case AccountSortMode.manual:
+        return 'ترتيب يدوي';
     }
   }
 
@@ -231,22 +284,22 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     return out;
   }
 
+  /// 1250000 → 1.250.000 ، 1250.5 → 1.250,5 (بدون ,00)
   String _formatAmount(double v) {
-    final s = v.toStringAsFixed(2);
-    final parts = s.split('.');
-    final intPart = parts[0];
-    final dec = parts.length > 1 ? parts[1] : '00';
-
-    final rev = intPart.split('').reversed.toList();
-    final out = <String>[];
-    for (int i = 0; i < rev.length; i++) {
-      out.add(rev[i]);
-      if ((i + 1) % 3 == 0 && i != rev.length - 1) {
-        out.add(',');
-      }
+    if (!v.isFinite) return '0';
+    final fixed = v.abs().toStringAsFixed(2);
+    final dot = fixed.indexOf('.');
+    final intPart = dot < 0 ? fixed : fixed.substring(0, dot);
+    final dec = dot < 0
+        ? ''
+        : fixed.substring(dot + 1).replaceFirst(RegExp(r'0+$'), '');
+    final b = StringBuffer();
+    for (var i = 0; i < intPart.length; i++) {
+      if (i > 0 && (intPart.length - i) % 3 == 0) b.write('.');
+      b.write(intPart[i]);
     }
-
-    return '${out.reversed.join()}.$dec';
+    final s = dec.isEmpty ? b.toString() : '$b,$dec';
+    return v < 0 ? '-$s' : s;
   }
 
   // ==========================
@@ -708,115 +761,46 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   // Quick cards with accounts inside
   // ==========================
 
-  int _metricNowCount(_AccountStats s, _QuickMetricType type) {
+  int _metricNowCount(_AccountStats s, StatsMetric type) {
     switch (type) {
-      case _QuickMetricType.added:
+      case StatsMetric.added:
         return s.addedNow.length;
-      case _QuickMetricType.received:
+      case StatsMetric.received:
         return s.receivedNow.length;
-      case _QuickMetricType.cancelled:
+      case StatsMetric.cancelled:
         return s.cancelledNow.length;
-      case _QuickMetricType.unreceived:
+      case StatsMetric.unreceived:
         return s.unreceivedNow.length;
     }
   }
 
-  int _metricPrevCount(_AccountStats s, _QuickMetricType type) {
+  int _metricPrevCount(_AccountStats s, StatsMetric type) {
     switch (type) {
-      case _QuickMetricType.added:
+      case StatsMetric.added:
         return s.addedPrev.length;
-      case _QuickMetricType.received:
+      case StatsMetric.received:
         return s.receivedPrev.length;
-      case _QuickMetricType.cancelled:
+      case StatsMetric.cancelled:
         return s.cancelledPrev.length;
-      case _QuickMetricType.unreceived:
+      case StatsMetric.unreceived:
         return s.unreceivedPrev.length;
     }
   }
 
   bool get _isCompanyStatsView => _accountTypeFilter == AccountType.company;
 
-  String _metricLabel(_QuickMetricType type) {
-    if (_isCompanyStatsView) {
-      switch (type) {
-        case _QuickMetricType.added:
-          return 'إرسال';
-        case _QuickMetricType.received:
-          return 'استقبال';
-        case _QuickMetricType.cancelled:
-          return 'إلغاء مرسل';
-        case _QuickMetricType.unreceived:
-          return 'إلغاء استقبال';
-      }
-    }
+  String _metricLabel(StatsMetric type) =>
+      _prefs.labelOf(type, _accountTypeFilter);
 
-    switch (type) {
-      case _QuickMetricType.added:
-        return "مضافة";
-      case _QuickMetricType.received:
-        return "مستلمة";
-      case _QuickMetricType.cancelled:
-        return "ملغاة";
-      case _QuickMetricType.unreceived:
-        return "غير مستلمة";
-    }
-  }
+  IconData _metricIcon(StatsMetric type) =>
+      statsMetricIcon(type, company: _isCompanyStatsView);
 
-  IconData _metricIcon(_QuickMetricType type) {
-    if (_isCompanyStatsView) {
-      switch (type) {
-        case _QuickMetricType.added:
-          return Icons.outbox_rounded;
-        case _QuickMetricType.received:
-          return Icons.move_to_inbox_rounded;
-        case _QuickMetricType.cancelled:
-          return Icons.cancel_rounded;
-        case _QuickMetricType.unreceived:
-          return Icons.cancel_rounded;
-      }
-    }
-
-    switch (type) {
-      case _QuickMetricType.added:
-        return Icons.add_circle_outline_rounded;
-      case _QuickMetricType.received:
-        return Icons.check_circle_outline_rounded;
-      case _QuickMetricType.cancelled:
-        return Icons.cancel_outlined;
-      case _QuickMetricType.unreceived:
-        return Icons.hourglass_empty_rounded;
-    }
-  }
-
-  List<Color> _metricGradient(_QuickMetricType type) {
-    if (_isCompanyStatsView) {
-      switch (type) {
-        case _QuickMetricType.added:
-          return const [Color(0xFF4338CA), Color(0xFF7C3AED)];
-        case _QuickMetricType.received:
-          return const [Color(0xFF0F766E), Color(0xFF14B8A6)];
-        case _QuickMetricType.cancelled:
-          return const [Color(0xFFBE123C), Color(0xFFF43F5E)];
-        case _QuickMetricType.unreceived:
-          return const [Color(0xFF9A3412), Color(0xFFF97316)];
-      }
-    }
-
-    switch (type) {
-      case _QuickMetricType.added:
-        return const [Color(0xFF1E88E5), Color(0xFF42A5F5)];
-      case _QuickMetricType.received:
-        return const [Color(0xFF2E7D32), Color(0xFF66BB6A)];
-      case _QuickMetricType.cancelled:
-        return const [Color(0xFFC62828), Color(0xFFEF5350)];
-      case _QuickMetricType.unreceived:
-        return const [Color(0xFF6A1B9A), Color(0xFFAB47BC)];
-    }
-  }
+  List<Color> _metricGradient(StatsMetric type) =>
+      _prefs.gradientOf(type, _accountTypeFilter);
 
   List<_QuickAccountEntry> _topAccountsForMetric(
     List<_AccountStats> stats,
-    _QuickMetricType type,
+    StatsMetric type,
   ) {
     final items = stats
         .map(
@@ -826,7 +810,10 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
             prevCount: _metricPrevCount(s, type),
           ),
         )
-        .where((e) => e.nowCount > 0 || e.prevCount > 0)
+        .where(
+          (e) =>
+              e.nowCount > 0 || (!_prefs.hideZeroAccounts && e.prevCount > 0),
+        )
         .toList();
 
     items.sort((a, b) {
@@ -845,9 +832,12 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   }
 
   Widget _quickAccountCountBox(int count) {
+    final compact = _prefs.compact;
     return Container(
-      constraints: const BoxConstraints(minWidth: 54),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      constraints: BoxConstraints(minWidth: compact ? 40 : 54),
+      padding: compact
+          ? const EdgeInsets.symmetric(horizontal: 8, vertical: 6)
+          : const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(.10),
         borderRadius: BorderRadius.circular(16),
@@ -856,10 +846,10 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
       child: Text(
         "$count",
         textAlign: TextAlign.center,
-        style: const TextStyle(
+        style: TextStyle(
           color: Colors.white,
           fontWeight: FontWeight.w900,
-          fontSize: 16,
+          fontSize: compact ? 14 : 16,
         ),
       ),
     );
@@ -869,7 +859,9 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     final (icon, pct, _, diff) = _deltaParts(now, prev);
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: _prefs.compact
+          ? const EdgeInsets.symmetric(horizontal: 8, vertical: 6)
+          : const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(.10),
         borderRadius: BorderRadius.circular(16),
@@ -903,13 +895,16 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     );
   }
 
-  Widget _quickAccountRow(_QuickAccountEntry entry) {
+  Widget _quickAccountRow(_QuickAccountEntry entry, {bool narrow = false}) {
+    final compact = _prefs.compact || narrow;
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      margin: EdgeInsets.only(bottom: compact ? 6 : 10),
+      padding: compact
+          ? const EdgeInsets.fromLTRB(10, 6, 10, 6)
+          : const EdgeInsets.fromLTRB(12, 10, 12, 10),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(.08),
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(compact ? 14 : 18),
         border: Border.all(color: Colors.white.withOpacity(.16)),
       ),
       child: Row(
@@ -918,16 +913,18 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
             child: Text(
               entry.name,
               textAlign: TextAlign.right,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.w900,
-                fontSize: 15,
+                fontSize: compact ? 13.5 : 15,
               ),
             ),
           ),
-          const SizedBox(width: 10),
-          _quickAccountTrendBox(entry.nowCount, entry.prevCount),
-          const SizedBox(width: 10),
+          if (_showDeltaStrip && !narrow) ...[
+            SizedBox(width: compact ? 6 : 10),
+            _quickAccountTrendBox(entry.nowCount, entry.prevCount),
+          ],
+          SizedBox(width: compact ? 6 : 10),
           _quickAccountCountBox(entry.nowCount),
         ],
       ),
@@ -941,105 +938,213 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     required List<Color> gradient,
     required IconData icon,
     required List<_QuickAccountEntry> accounts,
+    Map<String, double> totals = const {},
+
+    /// بطاقة ضيقة (عمودين على شاشة صغيرة): خطوط أصغر وبدون تفاصيل زايدة
+    bool narrow = false,
   }) {
     final (trendIcon, pct, _, diffLabel) = _deltaParts(count, yesterday);
+    final compact = _prefs.compact;
+    final horizontal = compact && !narrow;
+    final limit = _prefs.quickAccountsLimit;
+    final shownAccounts = limit > 0 && accounts.length > limit
+        ? accounts.take(limit).toList()
+        : accounts;
+    final moreAccounts = accounts.length - shownAccounts.length;
+    final currencies = totals.keys.toList()
+      ..sort((a, b) => (totals[b] ?? 0).compareTo(totals[a] ?? 0));
+    final labelSize = narrow ? (compact ? 15.0 : 18.0) : 24.0;
+    final countSize = narrow ? (compact ? 28.0 : 34.0) : 44.0;
+    final small = compact || narrow;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.all(small ? 12 : 16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topRight,
           end: Alignment.bottomLeft,
           colors: gradient,
         ),
-        borderRadius: BorderRadius.circular(30),
+        borderRadius: BorderRadius.circular(small ? 22 : 30),
         boxShadow: [
           BoxShadow(
             color: gradient.last.withOpacity(0.28),
-            blurRadius: 18,
-            offset: const Offset(0, 10),
+            blurRadius: small ? 12 : 18,
+            offset: Offset(0, small ? 6 : 10),
           ),
         ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(
-            child: Container(
-              padding: const EdgeInsets.all(11),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.12),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white.withOpacity(.14)),
-              ),
-              child: Icon(icon, color: Colors.white),
-            ),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            label,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w900,
-              fontSize: 24,
-              height: 1.2,
-            ),
-          ),
-          const SizedBox(height: 18),
-          Text(
-            "$count",
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w900,
-              fontSize: 44,
-              height: 1,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.12),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(color: Colors.white.withOpacity(.16)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(trendIcon, size: 16, color: Colors.white),
-                  const SizedBox(width: 6),
-                  Text(
-                    pct,
+          if (horizontal)
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(.14)),
+                  ),
+                  child: Icon(icon, color: Colors.white, size: 20),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 13,
                       fontWeight: FontWeight.w900,
+                      fontSize: 17,
+                      height: 1.2,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    diffLabel,
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w800,
-                    ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  "$count",
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 30,
+                    height: 1,
                   ),
-                ],
+                ),
+              ],
+            )
+          else ...[
+            Center(
+              child: Container(
+                padding: EdgeInsets.all(small ? 8 : 11),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(.12),
+                  borderRadius: BorderRadius.circular(small ? 12 : 16),
+                  border: Border.all(color: Colors.white.withOpacity(.14)),
+                ),
+                child: Icon(icon, color: Colors.white, size: small ? 20 : 24),
               ),
             ),
-          ),
+            SizedBox(height: small ? 8 : 14),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+                fontSize: labelSize,
+                height: 1.2,
+              ),
+            ),
+            SizedBox(height: small ? 10 : 18),
+            Text(
+              "$count",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+                fontSize: countSize,
+                height: 1,
+              ),
+            ),
+          ],
+          if (_showDeltaStrip) ...[
+            SizedBox(height: small ? 8 : 12),
+            Center(
+              child: Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: small ? 10 : 14,
+                  vertical: small ? 5 : 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(.12),
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(color: Colors.white.withOpacity(.16)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(trendIcon, size: 16, color: Colors.white),
+                    const SizedBox(width: 6),
+                    Text(
+                      pct,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    if (!narrow) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        diffLabel,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (_prefs.quickShowAmounts) ...[
+            SizedBox(height: small ? 8 : 12),
+            if (currencies.isEmpty)
+              const Text(
+                "لا يوجد مبالغ",
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12.5,
+                ),
+              )
+            else
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final c in currencies)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(.14),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(.18),
+                        ),
+                      ),
+                      child: Text(
+                        '${_formatAmount(totals[c] ?? 0)} $c',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+          ],
           if (_showAccountsInsideQuickCards) ...[
-            const SizedBox(height: 18),
+            SizedBox(height: small ? 12 : 18),
             Container(height: 1.2, color: Colors.white.withOpacity(.22)),
-            const SizedBox(height: 14),
+            SizedBox(height: small ? 10 : 14),
             if (accounts.isEmpty)
               Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 16,
+                padding: EdgeInsets.symmetric(
+                  vertical: small ? 10 : 16,
                   horizontal: 12,
                 ),
                 decoration: BoxDecoration(
@@ -1057,15 +1162,29 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                   ),
                 ),
               )
-            else
-              ...accounts.map(_quickAccountRow),
+            else ...[
+              for (final e in shownAccounts)
+                _quickAccountRow(e, narrow: narrow),
+              if (moreAccounts > 0)
+                Text(
+                  moreAccounts == 1
+                      ? '+ حساب تاني'
+                      : '+ $moreAccounts حسابات تانية',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12.5,
+                  ),
+                ),
+            ],
           ],
         ],
       ),
     );
   }
 
-  String _categoryTitle(_QuickMetricType type, [String? accountName]) {
+  String _categoryTitle(StatsMetric type, [String? accountName]) {
     final label = _metricLabel(type);
     return accountName == null
         ? '$label — كل الحسابات'
@@ -1073,77 +1192,96 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   }
 
   Widget _buildQuickStats(List<_AccountStats> stats, _GlobalData g) {
-    final cards = <Widget>[];
-
-    if (_showAddedCard) {
-      cards.add(
-        _quickSummaryCard(
-          label: _metricLabel(_QuickMetricType.added),
-          count: g.addedCount,
-          yesterday: g.yesterdayAddedCount,
-          gradient: _metricGradient(_QuickMetricType.added),
-          icon: _metricIcon(_QuickMetricType.added),
-          accounts: _topAccountsForMetric(stats, _QuickMetricType.added),
-        ),
-      );
-    }
-
-    if (_showReceivedCard) {
-      cards.add(
-        _quickSummaryCard(
-          label: _metricLabel(_QuickMetricType.received),
-          count: g.receivedCount,
-          yesterday: g.yesterdayReceivedCount,
-          gradient: _metricGradient(_QuickMetricType.received),
-          icon: _metricIcon(_QuickMetricType.received),
-          accounts: _topAccountsForMetric(stats, _QuickMetricType.received),
-        ),
-      );
-    }
-
-    if (_showCancelledCard) {
-      cards.add(
-        _quickSummaryCard(
-          label: _metricLabel(_QuickMetricType.cancelled),
-          count: g.cancelledCount,
-          yesterday: g.yesterdayCancelledCount,
-          gradient: _metricGradient(_QuickMetricType.cancelled),
-          icon: _metricIcon(_QuickMetricType.cancelled),
-          accounts: _topAccountsForMetric(stats, _QuickMetricType.cancelled),
-        ),
-      );
-    }
-
-    if (_showUnreceivedCard) {
-      cards.add(
-        _quickSummaryCard(
-          label: _metricLabel(_QuickMetricType.unreceived),
-          count: g.unreceivedCount,
-          yesterday: g.yesterdayUnreceivedCount,
-          gradient: _metricGradient(_QuickMetricType.unreceived),
-          icon: _metricIcon(_QuickMetricType.unreceived),
-          accounts: _topAccountsForMetric(stats, _QuickMetricType.unreceived),
-        ),
-      );
-    }
-
-    if (cards.isEmpty) return const SizedBox.shrink();
+    final metrics = _metrics;
+    if (metrics.isEmpty) return const SizedBox.shrink();
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        final isWide = width >= 760;
-        final cardWidth = isWide ? (width - 12) / 2 : width;
+        final cols = _prefs.columns == 0
+            ? (width >= 760 ? 2 : 1)
+            : _prefs.columns;
+        final cardWidth = cols <= 1 ? width : (width - 12 * (cols - 1)) / cols;
+        // عمودين على شاشة موبايل: بطاقات ضيقة
+        final narrow = cardWidth < 250;
 
         return Wrap(
           spacing: 12,
           runSpacing: 12,
-          children: cards
-              .map((card) => SizedBox(width: cardWidth, child: card))
-              .toList(),
+          children: [
+            for (final m in metrics)
+              SizedBox(
+                width: cardWidth,
+                child: _quickSummaryCard(
+                  label: _metricLabel(m),
+                  count: g.countOf(m),
+                  yesterday: g.prevCountOf(m),
+                  gradient: _metricGradient(m),
+                  icon: _metricIcon(m),
+                  accounts: _topAccountsForMetric(stats, m),
+                  totals: g.totalsOf(m),
+                  narrow: narrow,
+                ),
+              ),
+          ],
         );
       },
     );
+  }
+
+  Widget _hiddenAccountsNote(ColorScheme cs, int hiddenCount) {
+    return Material(
+      color: cs.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: _openCustomize,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              Icon(
+                Icons.visibility_off_rounded,
+                size: 18,
+                color: cs.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  hiddenCount == 1
+                      ? 'في حساب مخفي — ما بينحسب هون'
+                      : 'في $hiddenCount حسابات مخفية — ما بتنحسب هون',
+                  style: TextStyle(
+                    color: cs.onSurfaceVariant,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ),
+              Text(
+                'تخصيص',
+                style: TextStyle(
+                  color: cs.primary,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _export({required bool alsoShare}) async {
+    if (_busy) return;
+    setState(() => _exporting = true);
+    await Future.delayed(const Duration(milliseconds: 100));
+    try {
+      await _saveAndMaybeShare(alsoShare: alsoShare);
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
   }
 
   // ==========================
@@ -1489,6 +1627,18 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                               Navigator.pop(context);
                             },
                           ),
+                          actionTile(
+                            title: 'ترتيب يدوي',
+                            subtitle: 'حسب الترتيب يلي حددته بـ«تخصيص الصفحة»',
+                            icon: Icons.low_priority_rounded,
+                            selected: _sortMode == AccountSortMode.manual,
+                            onTap: () {
+                              setState(
+                                () => _sortMode = AccountSortMode.manual,
+                              );
+                              Navigator.pop(context);
+                            },
+                          ),
                         ],
                       ),
                     ),
@@ -1525,356 +1675,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
           ),
         ],
       ),
-    );
-  }
-
-  Future<void> _openDisplayOptions() async {
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        return Directionality(
-          textDirection: TextDirection.rtl,
-          child: StatefulBuilder(
-            builder: (context, setSheet) {
-              final cs = Theme.of(context).colorScheme;
-
-              void sync(void Function() fn) {
-                setState(fn);
-                setSheet(() {});
-              }
-
-              Widget sectionTitle(String title, IconData icon) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: cs.primary.withOpacity(.10),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(icon, size: 18, color: cs.primary),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 15.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              Widget optionTile({
-                required String title,
-                required String subtitle,
-                required bool value,
-                required ValueChanged<bool> onChanged,
-                required IconData icon,
-                Color? iconColor,
-              }) {
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: cs.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(
-                      color: value
-                          ? cs.primary.withOpacity(.28)
-                          : cs.outlineVariant.withOpacity(.18),
-                    ),
-                  ),
-                  child: SwitchListTile.adaptive(
-                    value: value,
-                    onChanged: onChanged,
-                    secondary: Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: (iconColor ?? cs.primary).withOpacity(.10),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(icon, color: iconColor ?? cs.primary),
-                    ),
-                    title: Text(
-                      title,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 14.5,
-                      ),
-                    ),
-                    subtitle: Text(
-                      subtitle,
-                      style: TextStyle(
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12.5,
-                      ),
-                    ),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                );
-              }
-
-              return SafeArea(
-                top: false,
-                child: Container(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(context).size.height * 0.88,
-                  ),
-                  decoration: BoxDecoration(
-                    color: cs.surface,
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(28),
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(.18),
-                        blurRadius: 30,
-                        offset: const Offset(0, -10),
-                      ),
-                    ],
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topRight,
-                                end: Alignment.bottomLeft,
-                                colors: [
-                                  cs.primary.withOpacity(.12),
-                                  cs.secondary.withOpacity(.08),
-                                ],
-                              ),
-                              borderRadius: BorderRadius.circular(22),
-                              border: Border.all(
-                                color: cs.primary.withOpacity(.14),
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.all(12),
-                                  decoration: BoxDecoration(
-                                    color: cs.primary.withOpacity(.12),
-                                    borderRadius: BorderRadius.circular(16),
-                                  ),
-                                  child: Icon(
-                                    Icons.tune_rounded,
-                                    color: cs.primary,
-                                    size: 22,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                const Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        'خيارات العرض والتصدير',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 17,
-                                        ),
-                                      ),
-                                      SizedBox(height: 4),
-                                      Text(
-                                        'فعّل أو أخفِ الأقسام بالطريقة التي تناسبك',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 12.5,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 18),
-
-                          sectionTitle(
-                            'العرض العام',
-                            Icons.dashboard_customize_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار الهيدر',
-                            subtitle: 'عنوان الصفحة والفترة المختارة في الأعلى',
-                            value: _showHeader,
-                            onChanged: (v) => sync(() => _showHeader = v),
-                            icon: Icons.view_headline_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار الملخص السريع',
-                            subtitle: 'البطاقات الكبيرة في أعلى الشاشة',
-                            value: _showQuickStats,
-                            onChanged: (v) => sync(() => _showQuickStats = v),
-                            icon: Icons.space_dashboard_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار بطاقات كل الحسابات',
-                            subtitle: 'البطاقات الإجمالية العامة',
-                            value: _showGlobalCards,
-                            onChanged: (v) => sync(() => _showGlobalCards = v),
-                            icon: Icons.widgets_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار بطاقات الحسابات',
-                            subtitle: 'تفاصيل كل حساب على حدة',
-                            value: _showAccountCards,
-                            onChanged: (v) => sync(() => _showAccountCards = v),
-                            icon: Icons.account_balance_wallet_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار الحسابات داخل الفقاعات',
-                            subtitle:
-                                'يعرض أسماء الحسابات داخل الملخص السريع نفسه',
-                            value: _showAccountsInsideQuickCards,
-                            onChanged: (v) =>
-                                sync(() => _showAccountsInsideQuickCards = v),
-                            icon: Icons.bubble_chart_rounded,
-                          ),
-
-                          const SizedBox(height: 8),
-                          sectionTitle(
-                            'تفاصيل البطاقات',
-                            Icons.auto_awesome_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار صفوف العملات',
-                            subtitle: 'يعرض تفاصيل العملات داخل كل بطاقة',
-                            value: _showCurrencyRows,
-                            onChanged: (v) => sync(() => _showCurrencyRows = v),
-                            icon: Icons.payments_rounded,
-                          ),
-                          optionTile(
-                            title: 'إظهار شريط التغير',
-                            subtitle:
-                                'السهم والنسبة والفرق مقارنة بالفترة السابقة',
-                            value: _showDeltaStrip,
-                            onChanged: (v) => sync(() => _showDeltaStrip = v),
-                            icon: Icons.trending_up_rounded,
-                          ),
-
-                          const SizedBox(height: 8),
-                          sectionTitle('الأقسام', Icons.filter_alt_rounded),
-                          optionTile(
-                            title:
-                                'قسم ' + _metricLabel(_QuickMetricType.added),
-                            subtitle:
-                                'عرض أو إخفاء بطاقات ' +
-                                _metricLabel(_QuickMetricType.added),
-                            value: _showAddedCard,
-                            onChanged: (v) => sync(() => _showAddedCard = v),
-                            icon: Icons.add_circle_rounded,
-                            iconColor: const Color(0xFF1E88E5),
-                          ),
-                          optionTile(
-                            title:
-                                'قسم ' +
-                                _metricLabel(_QuickMetricType.received),
-                            subtitle:
-                                'عرض أو إخفاء بطاقات ' +
-                                _metricLabel(_QuickMetricType.received),
-                            value: _showReceivedCard,
-                            onChanged: (v) => sync(() => _showReceivedCard = v),
-                            icon: Icons.check_circle_rounded,
-                            iconColor: const Color(0xFF2E7D32),
-                          ),
-                          optionTile(
-                            title:
-                                'قسم ' +
-                                _metricLabel(_QuickMetricType.cancelled),
-                            subtitle:
-                                'عرض أو إخفاء بطاقات ' +
-                                _metricLabel(_QuickMetricType.cancelled),
-                            value: _showCancelledCard,
-                            onChanged: (v) =>
-                                sync(() => _showCancelledCard = v),
-                            icon: Icons.cancel_rounded,
-                            iconColor: const Color(0xFFC62828),
-                          ),
-                          optionTile(
-                            title:
-                                'قسم ' +
-                                _metricLabel(_QuickMetricType.unreceived),
-                            subtitle:
-                                'عرض أو إخفاء بطاقات ' +
-                                _metricLabel(_QuickMetricType.unreceived),
-                            value: _showUnreceivedCard,
-                            onChanged: (v) =>
-                                sync(() => _showUnreceivedCard = v),
-                            icon: Icons.hourglass_bottom_rounded,
-                            iconColor: const Color(0xFF6A1B9A),
-                          ),
-
-                          const SizedBox(height: 8),
-                          sectionTitle('التصدير', Icons.ios_share_rounded),
-                          optionTile(
-                            title: 'إخفاء الهيدر عند التصدير',
-                            subtitle:
-                                'عند حفظ الصورة أو مشاركتها يتم إخفاء الهيدر',
-                            value: _hidePeriodBarInExport,
-                            onChanged: (v) =>
-                                sync(() => _hidePeriodBarInExport = v),
-                            icon: Icons.image_rounded,
-                          ),
-
-                          const SizedBox(height: 16),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: FilledButton.icon(
-                                  onPressed: () {
-                                    sync(() {
-                                      _showHeader = true;
-                                      _showQuickStats = true;
-                                      _showGlobalCards = false;
-                                      _showAccountCards = false;
-                                      _showCurrencyRows = true;
-                                      _showDeltaStrip = true;
-                                      _showAddedCard = true;
-                                      _showReceivedCard = true;
-                                      _showCancelledCard = true;
-                                      _showUnreceivedCard = true;
-                                      _hidePeriodBarInExport = false;
-                                      _showAccountsInsideQuickCards = true;
-                                    });
-                                  },
-                                  icon: const Icon(Icons.restart_alt_rounded),
-                                  label: const Text('إعادة الافتراضي'),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        );
-      },
     );
   }
 
@@ -1968,9 +1768,14 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     return ValueListenableBuilder(
       valueListenable: DatabaseService.accountsBox.listenable(),
       builder: (context, Box<Account> accountsBox, _) {
-        final accounts = accountsBox.values
+        final allOfType = accountsBox.values
             .where((a) => a.type == _accountTypeFilter)
             .toList();
+        // الحسابات المخفية بالتخصيص ما بتنعرض وما بتنحسب
+        final accounts = allOfType
+            .where((a) => !_prefs.isHidden(a.id))
+            .toList();
+        final hiddenCount = allOfType.length - accounts.length;
 
         return ValueListenableBuilder(
           valueListenable: DatabaseService.transactionsBox.listenable(),
@@ -1997,11 +1802,12 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                   return bDiff.compareTo(aDiff);
                 case AccountSortMode.amount:
                   return b.totalAmountNow.compareTo(a.totalAmountNow);
+                case AccountSortMode.manual:
+                  return _compareManual(a, b);
               }
             });
 
             final global = _GlobalData.fromStats(stats);
-            final exportHideHeaderLine = _hidePeriodBarInExport;
 
             return Directionality(
               textDirection: TextDirection.rtl,
@@ -2035,33 +1841,13 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                       icon: const Icon(Icons.calendar_month_rounded),
                     ),
                     IconButton(
-                      tooltip: 'الخيارات',
-                      onPressed: _openDisplayOptions,
+                      tooltip: 'تخصيص الصفحة',
+                      onPressed: _openCustomize,
                       icon: const Icon(Icons.tune_rounded),
                     ),
                     IconButton(
                       tooltip: _busy ? 'جارٍ التنفيذ...' : 'حفظ الصورة',
-                      onPressed: _busy
-                          ? null
-                          : () async {
-                              final prevHeader = _showHeader;
-                              if (exportHideHeaderLine) {
-                                setState(() {
-                                  _showHeader = false;
-                                });
-                                await Future.delayed(
-                                  const Duration(milliseconds: 100),
-                                );
-                              }
-
-                              await _saveAndMaybeShare(alsoShare: false);
-
-                              if (mounted) {
-                                setState(() {
-                                  _showHeader = prevHeader;
-                                });
-                              }
-                            },
+                      onPressed: _busy ? null : () => _export(alsoShare: false),
                       icon: _busy
                           ? const SizedBox(
                               width: 18,
@@ -2072,27 +1858,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                     ),
                     IconButton(
                       tooltip: _busy ? 'جارٍ التنفيذ...' : 'حفظ ومشاركة',
-                      onPressed: _busy
-                          ? null
-                          : () async {
-                              final prevHeader = _showHeader;
-                              if (exportHideHeaderLine) {
-                                setState(() {
-                                  _showHeader = false;
-                                });
-                                await Future.delayed(
-                                  const Duration(milliseconds: 100),
-                                );
-                              }
-
-                              await _saveAndMaybeShare(alsoShare: true);
-
-                              if (mounted) {
-                                setState(() {
-                                  _showHeader = prevHeader;
-                                });
-                              }
-                            },
+                      onPressed: _busy ? null : () => _export(alsoShare: true),
                       icon: _busy
                           ? const SizedBox(
                               width: 18,
@@ -2136,222 +1902,68 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                   if (_showHeader)
                                     _buildHeader(
                                       cs,
-                                      'إحصائيات ${_accountTypeFilter.label}',
+                                      _prefs.title.isNotEmpty
+                                          ? _prefs.title
+                                          : 'إحصائيات ${_accountTypeFilter.label}',
                                       "${_periodLabel()} — ${_formatPeriodDate()}",
                                     ),
 
                                   if (_showHeader) const SizedBox(height: 12),
+
+                                  if (hiddenCount > 0 && !_exporting) ...[
+                                    _hiddenAccountsNote(cs, hiddenCount),
+                                    const SizedBox(height: 12),
+                                  ],
 
                                   if (_showQuickStats) ...[
                                     _buildQuickStats(stats, global),
                                     const SizedBox(height: 14),
                                   ],
 
-                                  if (_showGlobalCards) ...[
-                                    if (_showAddedCard)
+                                  if (_showGlobalCards)
+                                    for (final m in _metrics) ...[
                                       _categoryCard(
-                                        title: _categoryTitle(
-                                          _QuickMetricType.added,
-                                        ),
-                                        count: global.addedCount,
-                                        totals: global.totalsAdded,
-                                        prevTotals: global.prevTotalsAdded,
-                                        icon: _metricIcon(
-                                          _QuickMetricType.added,
-                                        ),
-                                        gradient: _metricGradient(
-                                          _QuickMetricType.added,
-                                        ),
+                                        title: _categoryTitle(m),
+                                        count: global.countOf(m),
+                                        totals: global.totalsOf(m),
+                                        prevTotals: global.prevTotalsOf(m),
+                                        icon: _metricIcon(m),
+                                        gradient: _metricGradient(m),
                                         cs: cs,
-                                        yesterday: global.yesterdayAddedCount,
-                                        countsByCurrency: global.countsAdded,
+                                        yesterday: global.prevCountOf(m),
+                                        countsByCurrency: global.countsOf(m),
                                         showAmountIndicators: true,
                                       ),
-                                    if (_showAddedCard)
                                       const SizedBox(height: 14),
-
-                                    if (_showReceivedCard)
-                                      _categoryCard(
-                                        title: _categoryTitle(
-                                          _QuickMetricType.received,
-                                        ),
-                                        count: global.receivedCount,
-                                        totals: global.totalsReceived,
-                                        prevTotals: global.prevTotalsReceived,
-                                        icon: _metricIcon(
-                                          _QuickMetricType.received,
-                                        ),
-                                        gradient: _metricGradient(
-                                          _QuickMetricType.received,
-                                        ),
-                                        cs: cs,
-                                        yesterday:
-                                            global.yesterdayReceivedCount,
-                                        countsByCurrency: global.countsReceived,
-                                        showAmountIndicators: true,
-                                      ),
-                                    if (_showReceivedCard)
-                                      const SizedBox(height: 14),
-
-                                    if (_showCancelledCard)
-                                      _categoryCard(
-                                        title: _categoryTitle(
-                                          _QuickMetricType.cancelled,
-                                        ),
-                                        count: global.cancelledCount,
-                                        totals: global.totalsCancelled,
-                                        prevTotals: global.prevTotalsCancelled,
-                                        icon: _metricIcon(
-                                          _QuickMetricType.cancelled,
-                                        ),
-                                        gradient: _metricGradient(
-                                          _QuickMetricType.cancelled,
-                                        ),
-                                        cs: cs,
-                                        yesterday:
-                                            global.yesterdayCancelledCount,
-                                        countsByCurrency:
-                                            global.countsCancelled,
-                                        showAmountIndicators: true,
-                                      ),
-                                    if (_showCancelledCard)
-                                      const SizedBox(height: 14),
-
-                                    if (_showUnreceivedCard)
-                                      _categoryCard(
-                                        title: _categoryTitle(
-                                          _QuickMetricType.unreceived,
-                                        ),
-                                        count: global.unreceivedCount,
-                                        totals: global.totalsUnreceived,
-                                        prevTotals: global.prevTotalsUnreceived,
-                                        icon: _metricIcon(
-                                          _QuickMetricType.unreceived,
-                                        ),
-                                        gradient: _metricGradient(
-                                          _QuickMetricType.unreceived,
-                                        ),
-                                        cs: cs,
-                                        yesterday:
-                                            global.yesterdayUnreceivedCount,
-                                        countsByCurrency:
-                                            global.countsUnreceived,
-                                        showAmountIndicators: true,
-                                      ),
-                                    if (_showUnreceivedCard)
-                                      const SizedBox(height: 14),
-                                  ],
+                                    ],
 
                                   if (_showGlobalCards && _showAccountCards)
                                     const SizedBox(height: 18),
 
                                   if (_showAccountCards)
-                                    ...stats.expand((s) {
-                                      final widgets = <Widget>[];
-
-                                      if (_showAddedCard) {
-                                        widgets.add(
+                                    for (final s in stats)
+                                      if (!_prefs.hideZeroAccounts ||
+                                          s.totalNow > 0) ...[
+                                        for (final m in _metrics) ...[
                                           _categoryCard(
                                             title: _categoryTitle(
-                                              _QuickMetricType.added,
+                                              m,
                                               s.account.name,
                                             ),
-                                            count: s.addedNow.length,
-                                            totals: s.totalsAddedNow,
-                                            prevTotals: s.totalsAddedPrev,
-                                            icon: Icons.add_circle_rounded,
-                                            gradient: const [
-                                              Color(0xFF1E88E5),
-                                              Color(0xFF42A5F5),
-                                            ],
+                                            count: s.nowOf(m).length,
+                                            totals: s.totalsNowOf(m),
+                                            prevTotals: s.totalsPrevOf(m),
+                                            icon: _metricIcon(m),
+                                            gradient: _metricGradient(m),
                                             cs: cs,
-                                            yesterday: s.addedPrev.length,
-                                            countsByCurrency: s.countsAddedNow,
+                                            yesterday: s.prevOf(m).length,
+                                            countsByCurrency: s.countsNowOf(m),
                                             showAmountIndicators: true,
                                           ),
-                                        );
-                                        widgets.add(const SizedBox(height: 12));
-                                      }
-
-                                      if (_showReceivedCard) {
-                                        widgets.add(
-                                          _categoryCard(
-                                            title: _categoryTitle(
-                                              _QuickMetricType.received,
-                                              s.account.name,
-                                            ),
-                                            count: s.receivedNow.length,
-                                            totals: s.totalsReceivedNow,
-                                            prevTotals: s.totalsReceivedPrev,
-                                            icon: Icons.check_circle_rounded,
-                                            gradient: const [
-                                              Color(0xFF2E7D32),
-                                              Color(0xFF66BB6A),
-                                            ],
-                                            cs: cs,
-                                            yesterday: s.receivedPrev.length,
-                                            countsByCurrency:
-                                                s.countsReceivedNow,
-                                            showAmountIndicators: true,
-                                          ),
-                                        );
-                                        widgets.add(const SizedBox(height: 12));
-                                      }
-
-                                      if (_showCancelledCard) {
-                                        widgets.add(
-                                          _categoryCard(
-                                            title: _categoryTitle(
-                                              _QuickMetricType.cancelled,
-                                              s.account.name,
-                                            ),
-                                            count: s.cancelledNow.length,
-                                            totals: s.totalsCancelledNow,
-                                            prevTotals: s.totalsCancelledPrev,
-                                            icon: Icons.cancel_rounded,
-                                            gradient: const [
-                                              Color(0xFFC62828),
-                                              Color(0xFFEF5350),
-                                            ],
-                                            cs: cs,
-                                            yesterday: s.cancelledPrev.length,
-                                            countsByCurrency:
-                                                s.countsCancelledNow,
-                                            showAmountIndicators: true,
-                                          ),
-                                        );
-                                        widgets.add(const SizedBox(height: 12));
-                                      }
-
-                                      if (_showUnreceivedCard) {
-                                        widgets.add(
-                                          _categoryCard(
-                                            title: _categoryTitle(
-                                              _QuickMetricType.unreceived,
-                                              s.account.name,
-                                            ),
-                                            count: s.unreceivedNow.length,
-                                            totals: s.totalsUnreceivedNow,
-                                            prevTotals: s.totalsUnreceivedPrev,
-                                            icon:
-                                                Icons.hourglass_bottom_rounded,
-                                            gradient: const [
-                                              Color(0xFF6A1B9A),
-                                              Color(0xFFAB47BC),
-                                            ],
-                                            cs: cs,
-                                            yesterday: s.unreceivedPrev.length,
-                                            countsByCurrency:
-                                                s.countsUnreceivedNow,
-                                            showAmountIndicators: true,
-                                          ),
-                                        );
-                                        widgets.add(const SizedBox(height: 12));
-                                      }
-
-                                      widgets.add(const SizedBox(height: 18));
-                                      return widgets;
-                                    }),
+                                          const SizedBox(height: 12),
+                                        ],
+                                        const SizedBox(height: 18),
+                                      ],
                                 ],
                               ),
                             ),
@@ -2447,6 +2059,71 @@ class _AccountStats {
     required this.countsCancelledNow,
     required this.countsUnreceivedNow,
   });
+
+  List<TransactionModel> nowOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return addedNow;
+      case StatsMetric.received:
+        return receivedNow;
+      case StatsMetric.cancelled:
+        return cancelledNow;
+      case StatsMetric.unreceived:
+        return unreceivedNow;
+    }
+  }
+
+  List<TransactionModel> prevOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return addedPrev;
+      case StatsMetric.received:
+        return receivedPrev;
+      case StatsMetric.cancelled:
+        return cancelledPrev;
+      case StatsMetric.unreceived:
+        return unreceivedPrev;
+    }
+  }
+
+  Map<String, double> totalsNowOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return totalsAddedNow;
+      case StatsMetric.received:
+        return totalsReceivedNow;
+      case StatsMetric.cancelled:
+        return totalsCancelledNow;
+      case StatsMetric.unreceived:
+        return totalsUnreceivedNow;
+    }
+  }
+
+  Map<String, double> totalsPrevOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return totalsAddedPrev;
+      case StatsMetric.received:
+        return totalsReceivedPrev;
+      case StatsMetric.cancelled:
+        return totalsCancelledPrev;
+      case StatsMetric.unreceived:
+        return totalsUnreceivedPrev;
+    }
+  }
+
+  Map<String, int> countsNowOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return countsAddedNow;
+      case StatsMetric.received:
+        return countsReceivedNow;
+      case StatsMetric.cancelled:
+        return countsCancelledNow;
+      case StatsMetric.unreceived:
+        return countsUnreceivedNow;
+    }
+  }
 
   int get totalNow =>
       addedNow.length +
@@ -2549,6 +2226,71 @@ class _GlobalData {
     required this.totalAmountNow,
     required this.totalAmountPrev,
   });
+
+  int countOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return addedCount;
+      case StatsMetric.received:
+        return receivedCount;
+      case StatsMetric.cancelled:
+        return cancelledCount;
+      case StatsMetric.unreceived:
+        return unreceivedCount;
+    }
+  }
+
+  int prevCountOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return yesterdayAddedCount;
+      case StatsMetric.received:
+        return yesterdayReceivedCount;
+      case StatsMetric.cancelled:
+        return yesterdayCancelledCount;
+      case StatsMetric.unreceived:
+        return yesterdayUnreceivedCount;
+    }
+  }
+
+  Map<String, double> totalsOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return totalsAdded;
+      case StatsMetric.received:
+        return totalsReceived;
+      case StatsMetric.cancelled:
+        return totalsCancelled;
+      case StatsMetric.unreceived:
+        return totalsUnreceived;
+    }
+  }
+
+  Map<String, double> prevTotalsOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return prevTotalsAdded;
+      case StatsMetric.received:
+        return prevTotalsReceived;
+      case StatsMetric.cancelled:
+        return prevTotalsCancelled;
+      case StatsMetric.unreceived:
+        return prevTotalsUnreceived;
+    }
+  }
+
+  Map<String, int> countsOf(StatsMetric m) {
+    switch (m) {
+      case StatsMetric.added:
+        return countsAdded;
+      case StatsMetric.received:
+        return countsReceived;
+      case StatsMetric.cancelled:
+        return countsCancelled;
+      case StatsMetric.unreceived:
+        return countsUnreceived;
+    }
+  }
 
   static _GlobalData fromStats(List<_AccountStats> stats) {
     Map<String, double> mergeD(List<Map<String, double>> maps) {

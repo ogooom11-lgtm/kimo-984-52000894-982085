@@ -17,6 +17,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
+import '../services/all_stats_prefs.dart';
 import '../services/destinations.dart';
 import '../services/detection/text_tokens.dart' show normalizeArabic;
 import '../services/settings_words.dart';
@@ -26,6 +27,7 @@ import '../widgets/destination_picker.dart'
     show kDestExternalColor, kDestOfficeColor;
 import '../widgets/app_messages.dart';
 import '../widgets/quick_action_defs.dart';
+import 'all_stats_customize_screen.dart';
 import 'clipboard_settings_screen.dart';
 import 'messages_settings_screen.dart';
 import 'trace_warnings_screen.dart';
@@ -99,6 +101,8 @@ class _SettingsScreenState extends State<SettingsScreen>
   Future<void> _open(Widget page) async {
     FocusScope.of(context).unfocus();
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+    // ملخصات الصفحات (الرسائل، الإحصائيات…) ممكن تكون تغيّرت
+    if (mounted) setState(() {});
   }
 
   _WordSpec _spec(WordListKind kind) => _specOf(kind);
@@ -129,6 +133,8 @@ class _SettingsScreenState extends State<SettingsScreen>
     final warnCount = TraceService.activeCount.value;
     final dests = _store.destinationBook;
     final msgPrefs = AppMessages.prefs.value;
+    final statsPrefs = AllStatsPrefsStore.load();
+    final statsHidden = statsPrefs.hiddenAccounts.length;
 
     return [
       _HubGroup(
@@ -263,6 +269,30 @@ class _SettingsScreenState extends State<SettingsScreen>
             searchText:
                 'رساله رسائل نجاح خطا تنبيه اشعار فقاعه مكان فوق تحت مده لون شكل',
             onTap: () => _open(const MessagesSettingsScreen()),
+          ),
+        ],
+      ),
+      _HubGroup(
+        title: 'الإحصائيات',
+        icon: Icons.insights_rounded,
+        tiles: [
+          _HubTile(
+            icon: Icons.dashboard_customize_rounded,
+            color: _kIndigo,
+            title: 'صفحة إحصائيات كل الحسابات',
+            subtitle: statsPrefs.customizedCount == 0
+                ? 'ترتيب الأقسام، الألوان، الأسماء، الحسابات والشكل'
+                : [
+                    'معدّلة',
+                    if (statsHidden > 0) '$statsHidden حساب مخفي',
+                    if (statsPrefs.sortMode == AccountSortMode.manual)
+                      'ترتيب يدوي',
+                    if (statsPrefs.compact) 'مضغوطة',
+                  ].join(' • '),
+            searchText:
+                'احصائيات احصاءات بطاقات اقسام الوان لون اسماء ترتيب حسابات '
+                'مخفيه اخفاء شكل اعمده مضغوط ملخص عنوان تصدير صوره',
+            onTap: () => _open(const AllStatsCustomizeScreen()),
           ),
         ],
       ),

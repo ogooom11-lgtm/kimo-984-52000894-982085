@@ -6,7 +6,11 @@
 //  • showTraceReasons: صفحة «ليش؟» (أسباب اختيار المصدر والمرشحين المرفوضين).
 //  • showTraceChooser: اختيار/تغيير المصدر (أو ربط حركة شركة بحركة مكتب).
 //  • أسماء الحسابات قابلة للضغط وبتفتح الحساب مع تحديد الحركة.
+//  • TraceTxEvents: أحداث كل حركة بالمسار (وصلت/تسلّمت/التغت/انعدلت…) كل
+//    حدث بسطر لحالو مع تاريخه.
 // -------------------------------------------------------------
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 
@@ -14,6 +18,7 @@ import '../models.dart';
 import '../screens/account_screen.dart';
 import '../screens/transaction_details_screen.dart';
 import '../services/trace/trace_service.dart';
+import '../services/trace/trace_timeline.dart';
 import '../services/tx_history_service.dart';
 import 'destination_picker.dart' show kDestExternalColor, kDestOfficeColor;
 
@@ -209,6 +214,84 @@ class TraceUi {
 
   static String txLine(TransactionModel t) =>
       '${t.beneficiary} • ${traceAmount(t.amount)} ${t.currency}'.trim();
+
+  static const Color delivered = Color(0xFF059669);
+  static const Color cancelled = Color(0xFFDC2626);
+
+  /// اسم حدث الوصول («وصلت للمكتب» / «وصلت للشركة» / «انبعتت من الشركة»)
+  static String arrivalLabel(TransactionModel t) =>
+      traceArrivalLabel(t, isCompany: isCompanyTx(t));
+
+  /// التسليم/الإلغاء مع تاريخه («التغت: 2026-10-02 09:10») أو null
+  static (String, Color)? statusWhen(TransactionModel t) {
+    String at(DateTime? d) => d == null ? '' : ': ${when(d)}';
+    if (isCompanyTx(t)) {
+      if (!t.isCompanyCancelled) return null;
+      return ('التغت بالشركة${at(t.cancelledAt)}', cancelled);
+    }
+    switch (t.status) {
+      case TransactionStatus.added:
+        return null;
+      case TransactionStatus.received:
+        return ('تسلّمت${at(t.receivedAt)}', delivered);
+      case TransactionStatus.cancelled:
+        return ('التغت${at(t.cancelledAt)}', cancelled);
+    }
+  }
+
+  static Color eventColor(TraceEventKind k) {
+    switch (k) {
+      case TraceEventKind.arrived:
+        return office;
+      case TraceEventKind.sent:
+        return company;
+      case TraceEventKind.delivered:
+        return delivered;
+      case TraceEventKind.cancelled:
+        return cancelled;
+      case TraceEventKind.reopened:
+        return const Color(0xFFD97706);
+      case TraceEventKind.deleted:
+        return unknownColor;
+      case TraceEventKind.restored:
+        return const Color(0xFF0D9488);
+      case TraceEventKind.edited:
+        return const Color(0xFF7C3AED);
+      case TraceEventKind.moved:
+        return const Color(0xFF8D6E63);
+      case TraceEventKind.destination:
+        return destOffice;
+      case TraceEventKind.linked:
+        return const Color(0xFF0284C7);
+    }
+  }
+
+  static IconData eventIcon(TraceEventKind k) {
+    switch (k) {
+      case TraceEventKind.arrived:
+        return Icons.call_received_rounded;
+      case TraceEventKind.sent:
+        return Icons.call_made_rounded;
+      case TraceEventKind.delivered:
+        return Icons.check_circle_rounded;
+      case TraceEventKind.cancelled:
+        return Icons.cancel_rounded;
+      case TraceEventKind.reopened:
+        return Icons.undo_rounded;
+      case TraceEventKind.deleted:
+        return Icons.delete_outline_rounded;
+      case TraceEventKind.restored:
+        return Icons.restore_from_trash_rounded;
+      case TraceEventKind.edited:
+        return Icons.edit_rounded;
+      case TraceEventKind.moved:
+        return Icons.drive_file_move_rounded;
+      case TraceEventKind.destination:
+        return Icons.place_rounded;
+      case TraceEventKind.linked:
+        return Icons.link_rounded;
+    }
+  }
 
   static String when(DateTime d) => TxHistoryFormatter.dateTime(d);
 
@@ -480,12 +563,21 @@ class TraceTxTile extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    TraceUi.when(t.date),
+                    '${TraceUi.arrivalLabel(t)}: ${TraceUi.when(t.date)}',
                     style: TextStyle(
                       fontSize: 11.5,
                       color: cs.onSurfaceVariant,
                     ),
                   ),
+                  if (TraceUi.statusWhen(t) case (final text, final c))
+                    Text(
+                      text,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w800,
+                        color: c,
+                      ),
+                    ),
                   if (note != null) ...[
                     const SizedBox(height: 3),
                     Text(
@@ -1148,6 +1240,7 @@ class TracePathCard extends StatelessWidget {
               stop: stops[i],
               first: i == 0,
               last: i == stops.length - 1,
+              compact: compact,
             ),
           if (!compact &&
               isOffice &&
@@ -1335,7 +1428,15 @@ class _StopRow extends StatelessWidget {
   final bool first;
   final bool last;
 
-  const _StopRow({required this.stop, required this.first, required this.last});
+  /// صفحة السجل: أحداث الحالة بس (التعديلات معروضة بالسجل نفسه)
+  final bool compact;
+
+  const _StopRow({
+    required this.stop,
+    required this.first,
+    required this.last,
+    this.compact = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1427,13 +1528,7 @@ class _StopRow extends StatelessWidget {
                       color: cs.onSurface,
                     ),
                   ),
-                  Text(
-                    TraceUi.when(t.date),
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
+                  TraceTxEvents(txId: t.id, includeEdits: !compact),
                 ] else if (stop.placeholderLine != null) ...[
                   const SizedBox(height: 4),
                   Text(
@@ -1519,6 +1614,230 @@ class _StopRow extends StatelessWidget {
                   content,
                 ],
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================
+// أحداث الحركة: كل تغيير بسطر لحالو مع تاريخه
+// =============================================================
+
+/// «وصلت للمكتب • 2026-10-01 14:20»، «التغت • 2026-10-02 09:10 (بعد 19 ساعة
+/// من الوصول)»، «انعدل المبلغ من 900 إلى 1.000 دولار»…
+class TraceTxEvents extends StatefulWidget {
+  final int txId;
+
+  /// مع التعديلات (الاسم/المبلغ/الوجهة…)، وإلا الحالة بس
+  final bool includeEdits;
+
+  const TraceTxEvents({
+    super.key,
+    required this.txId,
+    this.includeEdits = true,
+  });
+
+  @override
+  State<TraceTxEvents> createState() => _TraceTxEventsState();
+}
+
+class _TraceTxEventsState extends State<TraceTxEvents> {
+  /// التعديلات الظاهرة قبل «كل التغييرات» (أحداث الحالة بتبين دايمًا)
+  static const int _collapsedEdits = 3;
+
+  List<TxHistoryEntry> _history = const [];
+  Timer? _debounce;
+  bool _expanded = false;
+  int _loadSeq = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    TxHistoryService.revision.addListener(_onHistory);
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant TraceTxEvents oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.txId != widget.txId) {
+      _history = const [];
+      _expanded = false;
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    TxHistoryService.revision.removeListener(_onHistory);
+    super.dispose();
+  }
+
+  void _onHistory() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 400), _load);
+  }
+
+  Future<void> _load() async {
+    final seq = ++_loadSeq;
+    List<TxHistoryEntry> entries;
+    try {
+      entries = await TxHistoryService.entriesFor(widget.txId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || seq != _loadSeq) return;
+    setState(() => _history = entries);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = TraceService.txById(widget.txId);
+    if (t == null) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    final all = traceTxEvents(
+      t,
+      isCompany: TraceUi.isCompanyTx(t),
+      history: _history,
+      includeEdits: widget.includeEdits,
+      formatter: const TxHistoryFormatter(
+        accountNameOf: TraceService.accountName,
+      ),
+    );
+    final edits = [
+      for (final e in all)
+        if (!e.kind.isStatus) e,
+    ];
+    var shown = all;
+    final collapsible = edits.length > _collapsedEdits;
+    if (collapsible && !_expanded) {
+      final keep = edits.sublist(edits.length - _collapsedEdits).toSet();
+      shown = [
+        for (final e in all)
+          if (e.kind.isStatus || keep.contains(e)) e,
+      ];
+    }
+    final hidden = all.length - shown.length;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+      decoration: BoxDecoration(
+        color: TraceUi.tint(context, cs.onSurface, .035),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final e in shown) _row(context, e, t.date),
+          if (collapsible)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  textStyle: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                onPressed: () => setState(() => _expanded = !_expanded),
+                icon: Icon(
+                  _expanded
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  _expanded
+                      ? 'إخفاء التعديلات القديمة'
+                      : 'كل التغييرات (+$hidden)',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _row(BuildContext context, TraceTxEvent e, DateTime start) {
+    final cs = Theme.of(context).colorScheme;
+    final color = TraceUi.eventColor(e.kind);
+    final at = e.at;
+    String? gap;
+    if (at != null &&
+        (e.kind == TraceEventKind.delivered ||
+            e.kind == TraceEventKind.cancelled) &&
+        !at.isBefore(start)) {
+      gap = 'بعد ${traceDuration(at.difference(start))} من الوصول';
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 22,
+            height: 22,
+            decoration: BoxDecoration(
+              color: TraceUi.tint(context, color, .14),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(TraceUi.eventIcon(e.kind), size: 13, color: color),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: e.label,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w900,
+                          color: e.kind.isStatus ? color : cs.onSurface,
+                        ),
+                      ),
+                      TextSpan(
+                        text:
+                            '  •  ${at == null ? 'الوقت مو معروف' : TraceUi.when(at)}',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (e.detail != null)
+                  Text(
+                    e.detail!,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.35,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                if (gap != null)
+                  Text(
+                    gap,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: color,
+                    ),
+                  ),
+              ],
             ),
           ),
         ],
