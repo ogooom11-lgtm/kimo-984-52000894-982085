@@ -1,10 +1,12 @@
 // lib/widgets/trace_widgets.dart
 // -------------------------------------------------------------
 // واجهة «مسار الحركة»:
-//  • TracePathCard: بطاقة المسار بصفحة التفاصيل (شركة ABC ← مكتب X، مع
-//    السلسلة إذا انلغت من مكتب وراحت لمكتب تاني) + التحذيرات + الأزرار.
+//  • TracePathCard: بطاقة المسار بصفحة التفاصيل (شركة ABC ← مكتب X، أو
+//    شركة ABC ← إرسال شركة XYZ، مع السلسلة إذا انلغت وراحت لمكان تاني) +
+//    التحذيرات + الأزرار.
 //  • showTraceReasons: صفحة «ليش؟» (أسباب اختيار المصدر والمرشحين المرفوضين).
-//  • showTraceChooser: اختيار/تغيير المصدر (أو ربط حركة شركة بحركة مكتب).
+//  • showTraceChooser: اختيار/تغيير المصدر (أو ربط حركة استقبال بحركة مكتب
+//    أو إرسال بشركة تانية).
 //  • أسماء الحسابات قابلة للضغط وبتفتح الحساب مع تحديد الحركة.
 //  • TraceTxEvents: أحداث كل حركة بالمسار (وصلت/تسلّمت/التغت/انعدلت…) كل
 //    حدث بسطر لحالو مع تاريخه.
@@ -35,6 +37,9 @@ class TraceUi {
   static const Color company = Color(0xFF0F766E);
   static const Color office = Color(0xFF4F46E5);
   static const Color unknownColor = Color(0xFF64748B);
+
+  /// حركة إرسال بشركة (بدور الوجهة)
+  static const Color sent = Color(0xFF5E35B1);
 
   static Color statusColor(TraceStatus s) {
     switch (s) {
@@ -186,6 +191,30 @@ class TraceUi {
 
   static bool isCompanyTx(TransactionModel t) =>
       TraceService.accountById(t.accountId)?.type.isCompany ?? false;
+
+  /// حركة «إرسال» بحساب شركة بدور الوجهة (مصدرها استقبال بشركة تانية)
+  static bool isSentDest(TransactionModel t) =>
+      TraceService.prefs.value.sentAsDest &&
+      isCompanyTx(t) &&
+      TraceEngine.movementOf(t).isSent;
+
+  /// تسمية طرفي الربط لحركة الوجهة [officeId]: (المصدر، الوجهة) =
+  /// («الشركة»، «المكتب») أو («الاستقبال»، «الإرسال»)
+  static (String, String) pairSides(int officeId) =>
+      TraceService.isSentDest(officeId)
+      ? ('الاستقبال', 'الإرسال')
+      : ('الشركة', 'المكتب');
+
+  /// لون طرف الوجهة [officeId]: المكتب، أو الإرسال
+  static Color destColor(int officeId) =>
+      TraceService.isSentDest(officeId) ? sent : office;
+
+  /// لون وأيقونة الحركة: مكتب / شركة (استقبال) / إرسال (بدور الوجهة)
+  static (Color, IconData) txLook(TransactionModel t) {
+    if (!isCompanyTx(t)) return (office, Icons.storefront_rounded);
+    if (isSentDest(t)) return (sent, Icons.outbox_rounded);
+    return (company, Icons.business_rounded);
+  }
 
   static String txStatusLabel(TransactionModel t) {
     if (isCompanyTx(t)) return TraceEngine.movementOf(t).label;
@@ -507,8 +536,7 @@ class TraceTxTile extends StatelessWidget {
         ),
       );
     }
-    final isCompany = TraceUi.isCompanyTx(t);
-    final color = isCompany ? TraceUi.company : TraceUi.office;
+    final (color, txIcon) = TraceUi.txLook(t);
     return InkWell(
       borderRadius: BorderRadius.circular(14),
       onTap: () => openTraceTx(context, txId),
@@ -522,11 +550,7 @@ class TraceTxTile extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              isCompany ? Icons.business_rounded : Icons.storefront_rounded,
-              size: 20,
-              color: color,
-            ),
+            Icon(txIcon, size: 20, color: color),
             const SizedBox(width: 8),
             Expanded(
               child: Column(
@@ -687,6 +711,7 @@ Future<bool> confirmTraceAmountFix(
   }
   final target = officeTakesCompany ? o : c;
   final source = officeTakesCompany ? c : o;
+  final (srcSide, destSide) = TraceUi.pairSides(officeId);
   final currencyDiffers =
       TraceService.result.value
           ?.evaluatePair(officeId, companyId)
@@ -701,13 +726,15 @@ Future<bool> confirmTraceAmountFix(
       child: StatefulBuilder(
         builder: (ctx, setLocal) {
           final cs = Theme.of(ctx).colorScheme;
-          final color = officeTakesCompany ? TraceUi.office : TraceUi.company;
+          final color = officeTakesCompany
+              ? TraceUi.destColor(officeId)
+              : TraceUi.company;
           return AlertDialog(
             icon: Icon(Icons.edit_note_rounded, color: color, size: 34),
             title: Text(
               officeTakesCompany
-                  ? 'تعديل مبلغ حركة المكتب'
-                  : 'تعديل مبلغ حركة الشركة',
+                  ? 'تعديل مبلغ حركة $destSide'
+                  : 'تعديل مبلغ حركة $srcSide',
               textAlign: TextAlign.center,
             ),
             content: SingleChildScrollView(
@@ -750,7 +777,7 @@ Future<bool> confirmTraceAmountFix(
                         ),
                         TextSpan(
                           text:
-                              ' — متل ${officeTakesCompany ? 'حركة' : 'حركة المكتب'} '
+                              ' — متل ${officeTakesCompany ? 'حركة' : 'حركة $destSide'} '
                               '${TraceUi.accountTitle(source)}.',
                         ),
                       ],
@@ -818,7 +845,7 @@ Future<bool> confirmTraceAmountFix(
   }
   _snack(
     context,
-    'تم تعديل مبلغ ${officeTakesCompany ? 'حركة المكتب' : 'حركة الشركة'} '
+    'تم تعديل مبلغ ${officeTakesCompany ? 'حركة $destSide' : 'حركة $srcSide'} '
     'لـ ${traceAmount(value)}${linkNow ? ' وتأكيد المصدر' : ''}',
   );
   return true;
@@ -883,6 +910,7 @@ class TraceAmountFix extends StatelessWidget {
       return const SizedBox.shrink();
     }
     const red = Color(0xFFDC2626);
+    final (srcSide, destSide) = TraceUi.pairSides(officeId);
     Future<void> fix(bool officeTakesCompany) async {
       final done = await confirmTraceAmountFix(
         context,
@@ -910,8 +938,8 @@ class TraceAmountFix extends StatelessWidget {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  'المبلغ مختلف: بالشركة ${traceAmount(c.amount)} '
-                  'وبالمكتب ${traceAmount(o.amount)}',
+                  'المبلغ مختلف: ب$srcSide ${traceAmount(c.amount)} '
+                  'وب$destSide ${traceAmount(o.amount)}',
                   style: const TextStyle(
                     fontWeight: FontWeight.w800,
                     fontSize: 12.5,
@@ -928,13 +956,13 @@ class TraceAmountFix extends StatelessWidget {
             children: [
               TraceActionButton(
                 icon: Icons.edit_rounded,
-                label: 'خلّي مبلغ المكتب ${traceAmount(c.amount)}',
-                color: TraceUi.office,
+                label: 'خلّي مبلغ $destSide ${traceAmount(c.amount)}',
+                color: TraceUi.destColor(officeId),
                 onPressed: () => fix(true),
               ),
               TraceActionButton(
                 icon: Icons.edit_rounded,
-                label: 'خلّي مبلغ الشركة ${traceAmount(o.amount)}',
+                label: 'خلّي مبلغ $srcSide ${traceAmount(o.amount)}',
                 color: TraceUi.company,
                 onPressed: () => fix(false),
               ),
@@ -1038,10 +1066,11 @@ Future<bool> confirmTraceNameFix(
   final source = officeTakesCompany ? c : o;
   final oldName = target.beneficiary.trim();
   final newName = source.beneficiary.trim();
+  final (srcSide, destSide) = TraceUi.pairSides(officeId);
   if (newName.isEmpty) {
     _snack(
       context,
-      'اسم ${officeTakesCompany ? 'حركة الشركة' : 'حركة المكتب'} فاضي',
+      'اسم ${officeTakesCompany ? 'حركة $srcSide' : 'حركة $destSide'} فاضي',
     );
     return false;
   }
@@ -1056,7 +1085,9 @@ Future<bool> confirmTraceNameFix(
       child: StatefulBuilder(
         builder: (ctx, setLocal) {
           final cs = Theme.of(ctx).colorScheme;
-          final color = officeTakesCompany ? TraceUi.office : TraceUi.company;
+          final color = officeTakesCompany
+              ? TraceUi.destColor(officeId)
+              : TraceUi.company;
           const red = Color(0xFFDC2626);
           const green = Color(0xFF059669);
           Widget nameBox(
@@ -1124,8 +1155,8 @@ Future<bool> confirmTraceNameFix(
             ),
             title: Text(
               officeTakesCompany
-                  ? 'تعديل اسم حركة المكتب'
-                  : 'تعديل اسم حركة الشركة',
+                  ? 'تعديل اسم حركة $destSide'
+                  : 'تعديل اسم حركة $srcSide',
               textAlign: TextAlign.center,
             ),
             content: SingleChildScrollView(
@@ -1151,7 +1182,7 @@ Future<bool> confirmTraceNameFix(
                   nameBox('بعد', newName, oldName, green),
                   const SizedBox(height: 6),
                   Text(
-                    'متل ${officeTakesCompany ? 'حركة' : 'حركة المكتب'} '
+                    'متل ${officeTakesCompany ? 'حركة' : 'حركة $destSide'} '
                     '${TraceUi.accountTitle(source)}.',
                     style: const TextStyle(fontSize: 14, height: 1.4),
                   ),
@@ -1186,8 +1217,8 @@ Future<bool> confirmTraceNameFix(
                   if (amountDiffers) ...[
                     const SizedBox(height: 8),
                     Text(
-                      '⚠️ المبلغ كمان مختلف (بالشركة ${traceAmount(c.amount)} '
-                      'وبالمكتب ${traceAmount(o.amount)}) — المبلغ ما رح '
+                      '⚠️ المبلغ كمان مختلف (ب$srcSide ${traceAmount(c.amount)} '
+                      'وب$destSide ${traceAmount(o.amount)}) — المبلغ ما رح '
                       'يتغيّر، فيك توحّده من صندوق «المبلغ مختلف».',
                       style: const TextStyle(
                         color: Color(0xFFD97706),
@@ -1246,7 +1277,7 @@ Future<bool> confirmTraceNameFix(
   }
   _snack(
     context,
-    'تم تعديل اسم ${officeTakesCompany ? 'حركة المكتب' : 'حركة الشركة'} '
+    'تم تعديل اسم ${officeTakesCompany ? 'حركة $destSide' : 'حركة $srcSide'} '
     'لـ «$value»${linkNow ? ' وتأكيد المصدر' : ''}',
   );
   return true;
@@ -1277,6 +1308,7 @@ class TraceNameFix extends StatelessWidget {
     const color = _nameFixColor;
     final cs = Theme.of(context).colorScheme;
     final note = traceNameDiffNote(o.beneficiary, c.beneficiary);
+    final (srcSide, destSide) = TraceUi.pairSides(officeId);
     Future<void> fix(bool officeTakesCompany) async {
       final done = await confirmTraceNameFix(
         context,
@@ -1356,8 +1388,13 @@ class TraceNameFix extends StatelessWidget {
               ),
             ],
           ),
-          line('الشركة', TraceUi.company, c.beneficiary, o.beneficiary),
-          line('المكتب', TraceUi.office, o.beneficiary, c.beneficiary),
+          line(srcSide, TraceUi.company, c.beneficiary, o.beneficiary),
+          line(
+            destSide,
+            TraceUi.destColor(officeId),
+            o.beneficiary,
+            c.beneficiary,
+          ),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
@@ -1366,14 +1403,14 @@ class TraceNameFix extends StatelessWidget {
               if (c.beneficiary.trim().isNotEmpty)
                 TraceActionButton(
                   icon: Icons.edit_rounded,
-                  label: 'خلّي اسم المكتب متل الشركة',
-                  color: TraceUi.office,
+                  label: 'خلّي اسم $destSide متل $srcSide',
+                  color: TraceUi.destColor(officeId),
                   onPressed: () => fix(true),
                 ),
               if (o.beneficiary.trim().isNotEmpty)
                 TraceActionButton(
                   icon: Icons.edit_rounded,
-                  label: 'خلّي اسم الشركة متل المكتب',
+                  label: 'خلّي اسم $srcSide متل $destSide',
                   color: TraceUi.company,
                   onPressed: () => fix(false),
                 ),
@@ -1546,7 +1583,9 @@ class TracePathCard extends StatelessWidget {
         title: r.prefs.unknown,
         line: t.status == TraceStatus.unknownManual
             ? 'حددته أنت'
-            : 'ما في حركة شركة مطابقة',
+            : (TraceUi.isCompanyTx(tx)
+                  ? 'ما في حركة استقبال مطابقة بشركة تانية'
+                  : 'ما في حركة شركة مطابقة'),
         color: TraceUi.unknownColor,
         icon: Icons.help_outline_rounded,
       ),
@@ -1571,6 +1610,9 @@ class TracePathCard extends StatelessWidget {
       );
       prev = oid;
     }
+    final sentOn = r.prefs.sentAsDest;
+    final prevTx = prev == null ? null : TraceService.txById(prev);
+    final prevSent = prevTx != null && TraceUi.isCompanyTx(prevTx);
     if (ct.activeOfficeId == null) {
       if (ct.possibleOfficeIds.isNotEmpty) {
         stops.add(
@@ -1585,12 +1627,17 @@ class TracePathCard extends StatelessWidget {
         final waited = DateTime.now().difference(ct.waitingSince);
         stops.add(
           _Stop.placeholder(
-            title: ct.cancelled ? 'ملغاة بالشركة' : 'لسا ما وصلت لأي مكتب',
+            title: ct.cancelled
+                ? 'ملغاة بالشركة'
+                : (sentOn
+                      ? 'لسا ما راحت لمكتب ولا إرسال'
+                      : 'لسا ما وصلت لأي مكتب'),
             line: ct.overdue
                 ? 'صار إلها ${traceDuration(waited)} — وجهتها «${ct.destination}» '
                       'تابعة لمكتب'
                 : (ct.mustReach
                       ? 'وجهتها «${ct.destination}» — لازم توصل لمكتب'
+                            '${sentOn ? ' أو تنبعت' : ''}'
                       : (ct.external
                             ? 'وجهتها «${ct.destination}» مو تابعة لمكتب — عادي'
                             : null)),
@@ -1604,7 +1651,9 @@ class TracePathCard extends StatelessWidget {
             icon: ct.cancelled
                 ? Icons.block_rounded
                 : Icons.hourglass_empty_rounded,
-            connector: prev != null ? 'انلغت من المكتب' : null,
+            connector: prev != null
+                ? (prevSent ? 'انلغى الإرسال' : 'انلغت من المكتب')
+                : null,
             connectorWarn: prev != null,
           ),
         );
@@ -1626,6 +1675,10 @@ class TracePathCard extends StatelessWidget {
       headColor = TraceUi.statusColor(ot.status);
       headLabel = TraceUi.statusLabel(ot.status);
       headIcon = TraceUi.statusIcon(ot.status);
+    } else if (ct != null && ct.reachedSent) {
+      headColor = const Color(0xFF059669);
+      headLabel = 'راحت لشركة (إرسال)';
+      headIcon = Icons.outbox_rounded;
     } else if (ct != null && ct.reached) {
       headColor = const Color(0xFF059669);
       headLabel = 'وصلت لمكتب';
@@ -1889,7 +1942,9 @@ class TracePathCard extends StatelessWidget {
       buttons.add(
         TraceActionButton(
           icon: Icons.add_link_rounded,
-          label: ct.reached ? 'تغيير المكتب' : 'ربط بحركة مكتب',
+          label: r.prefs.sentAsDest
+              ? (ct.reached ? 'تغيير الوجهة' : 'ربط بمكتب أو إرسال')
+              : (ct.reached ? 'تغيير المكتب' : 'ربط بحركة مكتب'),
           color: TraceUi.office,
           onPressed: () => showTraceChooser(context, tx.id),
         ),
@@ -1923,17 +1978,10 @@ class _StopRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final t = stop.txId == null ? null : TraceService.txById(stop.txId!);
-    final isCompany = t != null && TraceUi.isCompanyTx(t);
-    final color =
-        stop.placeholderColor ??
-        (t == null
-            ? TraceUi.unknownColor
-            : (isCompany ? TraceUi.company : TraceUi.office));
+    final look = t == null ? null : TraceUi.txLook(t);
+    final color = stop.placeholderColor ?? look?.$1 ?? TraceUi.unknownColor;
     final icon =
-        stop.placeholderIcon ??
-        (t == null
-            ? Icons.delete_outline_rounded
-            : (isCompany ? Icons.business_rounded : Icons.storefront_rounded));
+        stop.placeholderIcon ?? look?.$2 ?? Icons.delete_outline_rounded;
     final lineColor = cs.outlineVariant.withValues(alpha: .8);
     const warnColor = Color(0xFFD97706);
 
@@ -2521,7 +2569,9 @@ class _ReasonsSheet extends StatelessWidget {
           Text(
             ot != null
                 ? 'حركات قريبة ما انختارت'
-                : 'حركات مكاتب قريبة ما انربطت',
+                : (TraceService.prefs.value.sentAsDest
+                      ? 'حركات قريبة ما انربطت (مكاتب وإرسال)'
+                      : 'حركات مكاتب قريبة ما انربطت'),
             style: TextStyle(
               fontWeight: FontWeight.w900,
               color: cs.onSurfaceVariant,
@@ -2661,9 +2711,12 @@ class _ChooserSheetState extends State<_ChooserSheet> {
         active != opt.txId &&
         r.office[active]?.status == TraceStatus.manual;
     if (opt.heldBy != null && opt.heldManually) {
+      final noun = TraceService.isSentDest(opt.txId)
+          ? 'حركة الإرسال'
+          : 'حركة المكتب';
       final ok = await _confirm(
-        'حركة المكتب مربوطة',
-        'حركة المكتب هي مربوطة يدويًا بحركة شركة تانية: '
+        '$noun مربوطة',
+        '$noun هي مربوطة يدويًا بحركة شركة تانية: '
             '${TraceService.describeTx(opt.heldBy!)}.\nبدك تربطها بهالحركة بدالها؟',
       );
       if (!ok) return;
@@ -2671,7 +2724,7 @@ class _ChooserSheetState extends State<_ChooserSheet> {
     if (activeManual) {
       final ok = await _confirm(
         'في ربط يدوي',
-        'هالحركة مربوطة يدويًا بحركة مكتب تانية: '
+        'هالحركة مربوطة يدويًا ب${TraceService.destNoun(active)} تانية: '
             '${TraceService.describeTx(active)}.\nبدك تنقل الربط؟',
       );
       if (!ok) return;
@@ -2744,6 +2797,8 @@ class _ChooserSheetState extends State<_ChooserSheet> {
     });
     final hasDecision =
         isOffice && TraceService.decisions.byOffice.containsKey(widget.txId);
+    final sentOn = r.prefs.sentAsDest;
+    final isSent = isOffice && TraceService.isSentDest(widget.txId);
 
     return Column(
       children: [
@@ -2753,7 +2808,9 @@ class _ChooserSheetState extends State<_ChooserSheet> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                isOffice ? 'اختار مصدر الحركة' : 'اختار حركة المكتب',
+                isOffice
+                    ? 'اختار مصدر الحركة'
+                    : (sentOn ? 'اختار وين راحت' : 'اختار حركة المكتب'),
                 style: const TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
@@ -2762,9 +2819,15 @@ class _ChooserSheetState extends State<_ChooserSheet> {
               const SizedBox(height: 4),
               Text(
                 isOffice
-                    ? 'حركات الشركات من 7 أيام قبل حركة المكتب لحد يوم بعدها. '
-                          'الأقرب تطابقًا أولًا.'
-                    : 'حركات المكاتب من وقت الرسالة لحد 7 أيام بعدها.',
+                    ? (isSent
+                          ? 'حركات الاستقبال بالشركات التانية من 7 أيام قبل '
+                                'حركة الإرسال لحد يوم بعدها. الأقرب تطابقًا أولًا.'
+                          : 'حركات الشركات من 7 أيام قبل حركة المكتب لحد يوم '
+                                'بعدها. الأقرب تطابقًا أولًا.')
+                    : (sentOn
+                          ? 'حركات المكاتب والإرسال بالشركات التانية من وقت '
+                                'الرسالة لحد 7 أيام بعدها.'
+                          : 'حركات المكاتب من وقت الرسالة لحد 7 أيام بعدها.'),
                 style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant),
               ),
               const SizedBox(height: 10),

@@ -4,8 +4,9 @@
 //  • التحذيرات: اسم مو مطابق، مبلغ/عملة مختلفة، أكتر من احتمال، حركة قديمة،
 //    تعديل بطرف واحد، ملغاة بالشركة وفعّالة بالمكتب، ما راحت لمكتب...
 //    مع أزرار «هي نفسها / مو هي / مجهول / تأكيد / تجاهل».
-//  • ما وصلت لمكتب: حركات الشركات يلي لسا ما انربطت بحركة مكتب.
-//  • مصدرها مجهول: حركات المكاتب بدون مصدر معروف.
+//  • لسا ما راحت: حركات الاستقبال بالشركات يلي لسا ما انربطت بحركة مكتب
+//    (أو إرسال بشركة تانية).
+//  • مصدرها مجهول: حركات المكاتب بدون مصدر معروف (والإرسال المحتمل بس).
 // -------------------------------------------------------------
 
 import 'package:flutter/material.dart';
@@ -85,7 +86,7 @@ extension on _Filter {
 }
 
 class TraceWarningsScreen extends StatefulWidget {
-  /// 0 = التحذيرات، 1 = ما وصلت لمكتب، 2 = مصدرها مجهول
+  /// 0 = التحذيرات، 1 = لسا ما راحت، 2 = مصدرها مجهول
   final int initialTab;
 
   const TraceWarningsScreen({super.key, this.initialTab = 0});
@@ -234,7 +235,7 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
       child: Row(
         children: [
           tab(0, 'التحذيرات', a, Icons.warning_amber_rounded),
-          tab(1, 'ما وصلت لمكتب', b, Icons.hourglass_empty_rounded),
+          tab(1, 'لسا ما راحت', b, Icons.hourglass_empty_rounded),
           tab(2, 'مصدرها مجهول', c, Icons.help_outline_rounded),
         ],
       ),
@@ -364,7 +365,8 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
     ];
   }
 
-  /// حركات المكاتب بدون مصدر معروف (ضمن مدة التحذيرات)، المحتملة أولًا
+  /// حركات المكاتب بدون مصدر معروف (ضمن مدة التحذيرات)، المحتملة أولًا.
+  /// حركات الإرسال بلا مصدر عادية (أغلبها من زباين)، فبتطلع بس المحتملة.
   List<int> _unknownSources(TraceResult r) {
     final days = r.prefs.warnDays;
     final since = days > 0
@@ -376,6 +378,9 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
       final tx = TraceService.txById(t.officeId);
       if (tx == null) continue;
       if (since != null && tx.date.isBefore(since)) continue;
+      if (t.status != TraceStatus.possible && TraceUi.isCompanyTx(tx)) {
+        continue;
+      }
       list.add(t.officeId);
     }
     list.sort((a, b) {
@@ -407,7 +412,7 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
             title: company ? 'كل الحركات وصلت' : 'ما في حركات مجهولة المصدر',
             text: company
                 ? 'ما في حركات استقبال بالشركات (آخر 7 أيام أو وجهتها تابعة '
-                      'لمكتب) ناطرة مكتب.'
+                      'لمكتب) ناطرة ${r.prefs.sentAsDest ? 'مكتب أو إرسال' : 'مكتب'}.'
                 : 'كل حركات المكاتب الأخيرة إلها مصدر معروف.',
           ),
         ),
@@ -419,11 +424,13 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
           padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
           child: Text(
             company
-                ? 'حركات استقبال بالشركات لسا ما انربطت بحركة مكتب: يلي وجهتها '
-                      'تابعة لمكتب أولًا، وبعدين آخر 7 أيام. (يلي وجهتها مو '
-                      'تابعة لمكتب ما بتطلع هون.)'
+                ? 'حركات استقبال بالشركات لسا ما انربطت بحركة مكتب'
+                      '${r.prefs.sentAsDest ? ' ولا إرسال بشركة تانية' : ''}: '
+                      'يلي وجهتها تابعة لمكتب أولًا، وبعدين آخر 7 أيام. (يلي '
+                      'وجهتها مو تابعة لمكتب ما بتطلع هون.)'
                 : 'حركات المكاتب الأخيرة بدون مصدر (حسب مدة التحذيرات '
-                      'بالإعدادات): المحتملة (بدها اختيار) أولًا.',
+                      'بالإعدادات): المحتملة (بدها اختيار) أولًا.'
+                      '${r.prefs.sentAsDest ? ' حركات الإرسال بتطلع هون بس إذا إلها مصدر محتمل.' : ''}',
             style: TextStyle(
               fontSize: 12.5,
               height: 1.45,
@@ -452,15 +459,21 @@ class _TraceWarningsScreenState extends State<TraceWarningsScreen> {
                     'وجهتها «${ct.destination}» • ناطرة من ${traceDuration(waited)}';
                 noteColor = const Color(0xFFD97706);
               } else if (ct.officeIds.isNotEmpty) {
-                note = 'انلغت من المكتب • ناطرة من ${traceDuration(waited)}';
+                final last = TraceService.txById(ct.officeIds.last);
+                final lastSent = last != null && TraceUi.isCompanyTx(last);
+                note =
+                    '${lastSent ? 'انلغى الإرسال' : 'انلغت من المكتب'} • '
+                    'ناطرة من ${traceDuration(waited)}';
               } else {
                 note = 'ناطرة من ${traceDuration(waited)}';
               }
               if (ct.possibleOfficeIds.isNotEmpty) {
-                note = '$note • في حركة مكتب محتملة';
+                note = '$note • في حركة محتملة';
               }
               trailing = IconButton(
-                tooltip: 'ربط بحركة مكتب',
+                tooltip: r.prefs.sentAsDest
+                    ? 'ربط بمكتب أو إرسال'
+                    : 'ربط بحركة مكتب',
                 onPressed: () => showTraceChooser(context, id),
                 icon: const Icon(Icons.add_link_rounded, color: TraceUi.office),
               );
@@ -804,7 +817,9 @@ class _WarningCard extends StatelessWidget {
           buttons.add(
             TraceActionButton(
               icon: Icons.add_link_rounded,
-              label: 'ربط بحركة مكتب',
+              label: result.prefs.sentAsDest
+                  ? 'ربط بمكتب أو إرسال'
+                  : 'ربط بحركة مكتب',
               color: TraceUi.office,
               onPressed: () => showTraceChooser(context, companyId),
             ),

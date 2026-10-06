@@ -20,6 +20,10 @@
 //  • الوجهة (من الإعدادات): حركة شركة وجهتها تابعة لمكتب لازم توصل لمكتب
 //    (وإلا «ما راحت لمكتب»)، ووجهتها مو تابعة لمكتب ما منستناها، وإذا
 //    وصلت لمكتب = تحذير «يمكن تغيّر المسار».
+//  • الإرسال: حركة الاستقبال كمان ممكن تروح لحركة «إرسال» بحساب شركة تانية
+//    (شركة ABC ← إرسال شركة XYZ) بنفس القواعد والأوقات. حركة الإرسال بتاخد
+//    دور «الوجهة» متل حركة المكتب (جوّا المحرك اسمها «office»)، والإرسال
+//    مسار عادي ما بيطلّع تحذير وجهة.
 //
 // ملف Dart نقي (بدون Flutter) حتى يمكن اختباره مباشرة.
 // -------------------------------------------------------------
@@ -126,7 +130,12 @@ class TracePrefs {
   final String unknownLabel;
 
   /// حركات الشركة «المرسلة» كمان بتنحسب مصدر (افتراضيًا: الاستقبال بس).
+  /// بيشتغل بس لما [sentAsDest] مطفي.
   final bool includeSent;
+
+  /// حركة الاستقبال ممكن تروح لحركة «إرسال» بحساب شركة تانية (الإرسال =
+  /// وجهة متل حركة المكتب).
+  final bool sentAsDest;
 
   /// التحذيرات بس لحركات آخر هالعدد من الأيام (0 = كل الحركات)، حتى ما
   /// تغرق الصفحة بحركات قديمة مسكّرة.
@@ -139,8 +148,12 @@ class TracePrefs {
     this.alertAfterHours = 2,
     this.unknownLabel = defaultUnknownLabel,
     this.includeSent = false,
+    this.sentAsDest = true,
     this.warnDays = 30,
   });
+
+  /// الحركات المرسلة مصدر لحركات المكاتب؟ (الخيار القديم)
+  bool get sentIsSource => includeSent && !sentAsDest;
 
   /// خيارات «التحذيرات لآخر» (0 = الكل)
   static const List<int> warnDayChoices = [7, 14, 30, 60, 90, 180, 365, 0];
@@ -172,6 +185,7 @@ class TracePrefs {
     'alertAfterHours': alertAfterHours,
     'unknownLabel': unknownLabel,
     'includeSent': includeSent,
+    'sentAsDest': sentAsDest,
     'warnDays': warnDays,
   };
 
@@ -185,6 +199,11 @@ class TracePrefs {
       alertAfterHours: i(raw['alertAfterHours'], 2),
       unknownLabel: raw['unknownLabel']?.toString() ?? defaultUnknownLabel,
       includeSent: raw['includeSent'] == true,
+      // افتراضيًا شغّال، إلا إذا كان «احسب الحركات المرسلة» (القديم) مفعّل
+      // من قبل: منحافظ عليه لحتى المستخدم يشغّل الجديد بنفسه.
+      sentAsDest: raw['sentAsDest'] is bool
+          ? raw['sentAsDest'] as bool
+          : raw['includeSent'] != true,
       warnDays: i(raw['warnDays'], 30).clamp(0, 3650),
     );
   }
@@ -196,6 +215,7 @@ class TracePrefs {
     int? alertAfterHours,
     String? unknownLabel,
     bool? includeSent,
+    bool? sentAsDest,
     int? warnDays,
   }) => TracePrefs(
     normalHours: normalHours ?? this.normalHours,
@@ -204,6 +224,7 @@ class TracePrefs {
     alertAfterHours: alertAfterHours ?? this.alertAfterHours,
     unknownLabel: unknownLabel ?? this.unknownLabel,
     includeSent: includeSent ?? this.includeSent,
+    sentAsDest: sentAsDest ?? this.sentAsDest,
     warnDays: warnDays ?? this.warnDays,
   );
 }
@@ -423,6 +444,7 @@ class TraceMatch {
       (companyCancelledBefore ? 1 : 0);
 }
 
+/// تتبّع حركة «وجهة»: حركة مكتب، أو حركة إرسال بحساب شركة.
 class OfficeTrace {
   final int officeId;
   final TraceStatus status;
@@ -449,12 +471,16 @@ class OfficeTrace {
   int? get companyId => link?.companyId;
 }
 
+/// تتبّع حركة «مصدر» (استقبال بحساب شركة): لوين راحت.
 class CompanyTrace {
   final int companyId;
 
-  /// حركات المكاتب المربوطة فيها بالترتيب الزمني (مع الملغاة)
+  /// الحركات يلي راحتلها (مكاتب أو إرسال) بالترتيب الزمني (مع الملغاة)
   final List<int> officeIds;
   final int? activeOfficeId;
+
+  /// الحركة الفعّالة حركة مكتب (مو إرسال بشركة)
+  final bool activeIsOffice;
 
   /// حركات مكتب ممكن تكون وجهتها (بدها اختيار)
   final List<int> possibleOfficeIds;
@@ -475,6 +501,7 @@ class CompanyTrace {
     required this.companyId,
     required this.officeIds,
     required this.activeOfficeId,
+    this.activeIsOffice = true,
     required this.possibleOfficeIds,
     required this.destination,
     required this.destKind,
@@ -484,7 +511,14 @@ class CompanyTrace {
     required this.cancelled,
   });
 
+  /// راحت لمكان (مكتب أو إرسال)
   bool get reached => activeOfficeId != null;
+
+  /// وصلت لمكتب
+  bool get reachedOffice => reached && activeIsOffice;
+
+  /// انبعتت (راحت لحركة إرسال بشركة تانية)
+  bool get reachedSent => reached && !activeIsOffice;
 
   /// وجهتها تابعة لمكتب: لازم توصل لمكتب
   bool get mustReach => destKind == TraceDestKind.office;
@@ -662,7 +696,7 @@ class TraceResult {
     if (ctx == null) return null;
     final o = ctx.nodes[officeId];
     final c = ctx.nodes[companyId];
-    if (o == null || c == null || !o.isOffice || c.isOffice) return null;
+    if (o == null || c == null || !o.isDest || c.isDest) return null;
     return ctx.evaluate(o, c, force: true);
   }
 
@@ -814,7 +848,13 @@ class _St {
 class _Node {
   final TransactionModel tx;
   final Account account;
+
+  /// حساب مكتب
   final bool isOffice;
+
+  /// دورها بالتتبّع «وجهة» (حركة مكتب أو إرسال بشركة)، وإلا «مصدر»
+  /// (استقبال بشركة)
+  final bool isDest;
   final CompanyMovementType? movement;
   final List<_St> states;
   final List<TxHistoryEntry> keyEdits;
@@ -823,6 +863,7 @@ class _Node {
     required this.tx,
     required this.account,
     required this.isOffice,
+    required this.isDest,
     required this.movement,
     required this.states,
     required this.keyEdits,
@@ -832,14 +873,22 @@ class _Node {
   DateTime get date => tx.date;
   _St get current => states.first;
 
-  bool get officeCancelled =>
-      isOffice && tx.status == TransactionStatus.cancelled;
+  /// حركة إرسال بشركة (بدور الوجهة)
+  bool get isSent => isDest && !isOffice;
 
-  bool get companyCancelled => !isOffice && (movement?.isCancelled ?? false);
+  /// الوجهة انلغت: حركة المكتب ملغية، أو الإرسال انلغى
+  bool get destCancelled =>
+      isDest &&
+      (isOffice
+          ? tx.status == TransactionStatus.cancelled
+          : (movement?.isCancelled ?? false));
 
-  /// فترة «مسك» حركة الشركة: من وقت حركة المكتب حتى إلغائها
+  /// حركة المصدر ملغاة بالشركة
+  bool get companyCancelled => !isDest && (movement?.isCancelled ?? false);
+
+  /// فترة «مسك» حركة الشركة: من وقت الوجهة (مكتب/إرسال) حتى إلغائها
   DateTime get holdStart => tx.date;
-  DateTime? get holdEnd => officeCancelled ? (tx.cancelledAt ?? tx.date) : null;
+  DateTime? get holdEnd => destCancelled ? (tx.cancelledAt ?? tx.date) : null;
 
   DateTime? get lastKeyEditAt {
     DateTime? last;
@@ -897,9 +946,14 @@ class TraceEngine {
   bool isSourceMovement(CompanyMovementType m) =>
       m == CompanyMovementType.received ||
       m == CompanyMovementType.receivedCancelled ||
-      (prefs.includeSent &&
+      (prefs.sentIsSource &&
           (m == CompanyMovementType.sent ||
               m == CompanyMovementType.sentCancelled));
+
+  /// حركة «إرسال» بحساب شركة كوجهة لحركة استقبال بشركة تانية
+  bool isDestMovement(CompanyMovementType m) =>
+      prefs.sentAsDest &&
+      (m == CompanyMovementType.sent || m == CompanyMovementType.sentCancelled);
 
   /// [destinations]: الوجهات حسب مفتاحها ([destinationKey]).
   TraceResult run({
@@ -938,7 +992,11 @@ class _Ctx {
   Map<int, String> accountNames = const {};
 
   final Map<int, _Node> nodes = {};
+
+  /// حركات «الوجهة»: المكاتب (والإرسال بالشركات إذا مفعّل)
   final List<_Node> offices = [];
+
+  /// حركات «المصدر»: الاستقبال بالشركات
   final List<_Node> companies = [];
   final Map<String, List<_Node>> byName = {};
   final Map<int, List<_Node>> byAmount = {};
@@ -969,9 +1027,16 @@ class _Ctx {
       if (acc == null) continue;
       final isOffice = !acc.type.isCompany;
       CompanyMovementType? mv;
+      var isDest = isOffice;
       if (!isOffice) {
         mv = TraceEngine.movementOf(t);
-        if (!e.isSourceMovement(mv)) continue;
+        if (e.isSourceMovement(mv)) {
+          isDest = false;
+        } else if (e.isDestMovement(mv)) {
+          isDest = true;
+        } else {
+          continue;
+        }
       }
       final edits = keyEdits[t.id] ?? const <TxHistoryEntry>[];
       final cur = _St(t.beneficiary, t.amount, t.currency);
@@ -996,12 +1061,13 @@ class _Ctx {
         tx: t,
         account: acc,
         isOffice: isOffice,
+        isDest: isDest,
         movement: mv,
         states: states,
         keyEdits: edits,
       );
       nodes[t.id] = n;
-      (isOffice ? offices : companies).add(n);
+      (isDest ? offices : companies).add(n);
     }
     companies.sort(_byDate);
     offices.sort(_byDate);
@@ -1083,6 +1149,8 @@ class _Ctx {
     int? rerouteFrom,
     bool force = false,
   }) {
+    // الإرسال بياخد مصدره من استقبال بشركة تانية بس
+    if (o.isSent && o.account.id == c.account.id) return null;
     final r = ref ?? c.date;
     final gap = o.date.difference(r);
     final tooEarly = gap < -prefs.earlyTolerance;
@@ -1282,7 +1350,7 @@ class _Ctx {
         continue;
       }
       final c = nodes[d.companyId];
-      if (c == null || c.isOffice) {
+      if (c == null || c.isDest) {
         broken[o.id] = d.companyId ?? 0;
         continue;
       }
@@ -1298,7 +1366,7 @@ class _Ctx {
 
     // 2) المرشحين: الملغاة أولًا (لحساب وقت «الرجوع بعد الإلغاء»)
     for (final o in offices) {
-      if (o.officeCancelled && open(o)) {
+      if (o.destCancelled && open(o)) {
         partition(o, candidatesOf(o, reroute: false));
       }
     }
@@ -1312,7 +1380,7 @@ class _Ctx {
     }
 
     for (final o in offices) {
-      if (!o.officeCancelled) continue;
+      if (!o.destCancelled) continue;
       final l = links[o.id];
       if (l != null) {
         final c = nodes[l.companyId];
@@ -1325,7 +1393,7 @@ class _Ctx {
       }
     }
     for (final o in offices) {
-      if (!o.officeCancelled && open(o)) {
+      if (!o.destCancelled && open(o)) {
         partition(o, candidatesOf(o, reroute: true));
       }
     }
@@ -1541,7 +1609,7 @@ class _Ctx {
       int? active;
       var since = c.date;
       for (final o in hs) {
-        if (o.officeCancelled) {
+        if (o.destCancelled) {
           final at = o.tx.cancelledAt ?? o.date;
           if (at.isAfter(since)) since = at;
         } else {
@@ -1561,6 +1629,7 @@ class _Ctx {
         companyId: c.id,
         officeIds: [for (final o in hs) o.id],
         activeOfficeId: active,
+        activeIsOffice: active == null || (nodes[active]?.isOffice ?? true),
         possibleOfficeIds: possibleByCompany[c.id] ?? const [],
         destination: c.tx.destination?.trim().isEmpty ?? true
             ? null
@@ -1583,7 +1652,12 @@ class _Ctx {
       '${n.current.key}|${n.current.amount.toStringAsFixed(2)}|'
       '${normalizeText(n.current.currency)}';
 
-  String _who(_Node n) => n.isOffice ? 'بالمكتب' : 'بالشركة';
+  /// «بالمكتب» / «بالإرسال» / «بالشركة»
+  String _who(_Node n) =>
+      n.isOffice ? 'بالمكتب' : (n.isDest ? 'بالإرسال' : 'بالشركة');
+
+  /// «حركة المكتب» / «حركة الإرسال»
+  String _destNoun(_Node o) => o.isOffice ? 'حركة المكتب' : 'حركة الإرسال';
 
   static String describeEdit(TxHistoryEntry e) {
     final parts = <String>[];
@@ -1615,7 +1689,9 @@ class _Ctx {
 
   String _companyLabel(_Node c) => 'شركة ${c.account.name}';
 
-  String _officeLabel(_Node o) => o.account.name;
+  /// اسم الوجهة: اسم المكتب، أو «إرسال شركة XYZ»
+  String _officeLabel(_Node o) =>
+      o.isOffice ? o.account.name : 'إرسال شركة ${o.account.name}';
 
   List<TraceWarning> warnings(Map<int, CompanyTrace> companyTraces) {
     final out = <TraceWarning>[];
@@ -1631,12 +1707,13 @@ class _Ctx {
             title: 'ربط يدوي لحركة ما عادت موجودة',
             detail:
                 'كنت رابط حركة «${o.tx.beneficiary}» بـ ${_officeLabel(o)} '
-                'بحركة شركة انحذفت أو ما عادت حركة استقبال.',
+                'بحركة شركة انحذفت أو ما عادت حركة استقبال'
+                '${o.isSent ? ' بشركة تانية' : ''}.',
             at: o.date,
           ),
         );
       }
-      if (o.officeCancelled) continue;
+      if (o.destCancelled) continue;
 
       if (t.status == TraceStatus.possible) {
         final issues = t.issues;
@@ -1660,7 +1737,8 @@ class _Ctx {
           detail =
               'حركة «${o.tx.beneficiary}» بـ ${_officeLabel(o)} بتطابق حركة '
               '«${c.tx.beneficiary}» بـ ${_companyLabel(c)}، بس في حركة تانية '
-              'بالمكاتب بتطابقها كمان، وما منخمّن. اختار أنت.';
+              '${prefs.sentAsDest ? 'بالمكاتب أو الإرسال' : 'بالمكاتب'} '
+              'بتطابقها كمان، وما منخمّن. اختار أنت.';
         } else if (issues.contains(TraceIssue.tie)) {
           detail =
               'حركة «${o.tx.beneficiary}» بـ ${_officeLabel(o)} بتطابق '
@@ -1695,29 +1773,33 @@ class _Ctx {
       if (l == null || !t.status.linked) continue;
       final c = nodes[l.companyId]!;
 
-      // ملغاة بالشركة بس فعّالة/مسلّمة بالمكتب
+      // ملغاة بالشركة بس فعّالة/مسلّمة بالمكتب (أو لسا منبعتة)
       if (c.companyCancelled) {
-        final delivered = o.tx.status == TransactionStatus.received;
+        final delivered =
+            o.isOffice && o.tx.status == TransactionStatus.received;
         out.add(
           TraceWarning(
             kind: TraceWarningKind.companyCancelled,
             officeId: o.id,
             companyId: c.id,
             sig: 'cxl:${o.id}:${c.id}:${o.tx.status.name}',
-            title: delivered
-                ? 'ملغاة بالشركة بس مسلّمة بالمكتب'
-                : 'ملغاة بالشركة بس لسا فعّالة بالمكتب',
+            title: o.isSent
+                ? 'ملغاة بالشركة بس الإرسال لسا فعّال'
+                : (delivered
+                      ? 'ملغاة بالشركة بس مسلّمة بالمكتب'
+                      : 'ملغاة بالشركة بس لسا فعّالة بالمكتب'),
             detail:
                 'حركة «${c.tx.beneficiary}» انلغت بـ ${_companyLabel(c)}'
                 '${c.tx.cancelledAt == null ? '' : ' بتاريخ ${_dateTime(c.tx.cancelledAt!)}'}'
-                '، بس بـ ${_officeLabel(o)} ${delivered ? 'انسلمت' : 'لسا مضافة'}.',
+                '، بس ${o.isSent ? 'حركة ${_officeLabel(o)} لسا فعّالة' : 'بـ ${_officeLabel(o)} ${delivered ? 'انسلمت' : 'لسا مضافة'}'}.',
             at: o.date,
           ),
         );
       }
 
-      // الوجهة: مو تابعة لمكتب بس وصلت لمكتب، أو وصلت لمكتب غير مكاتبها
-      final dest = destOf(c);
+      // الوجهة: مو تابعة لمكتب بس وصلت لمكتب، أو وصلت لمكتب غير مكاتبها.
+      // (الإرسال مسار عادي: ما في تحذير وجهة)
+      final dest = o.isOffice ? destOf(c) : null;
       if (dest != null && !dest.toOffice) {
         out.add(
           TraceWarning(
@@ -1757,7 +1839,7 @@ class _Ctx {
         if (oChanged || cChanged) {
           final sides = oChanged && cChanged
               ? 'الحركتين'
-              : (oChanged ? 'حركة المكتب' : 'حركة الشركة');
+              : (oChanged ? _destNoun(o) : 'حركة الشركة');
           final edited = oChanged ? o : c;
           final last = _lastEditText(edited);
           out.add(
@@ -1789,7 +1871,7 @@ class _Ctx {
             sig: 'late:${o.id}:${c.id}',
             title: 'حركة قديمة',
             detail:
-                '${l.rerouteFrom != null ? 'من إلغاء الحركة بالمكتب السابق' : 'من رسالة ${_companyLabel(c)}'} '
+                '${l.rerouteFrom != null ? 'من إلغاء الحركة السابقة' : 'من رسالة ${_companyLabel(c)}'} '
                 'لحركة ${_officeLabel(o)} مرّ ${traceDuration(l.gap)}، '
                 'أكتر من الوقت العادي (${_hours(prefs.normalHoursSafe)}).',
             at: o.date,
@@ -1836,7 +1918,7 @@ class _Ctx {
               title: 'انعدلت الحركتين بس صاروا مختلفين',
               detail:
                   'بالشركة: «${c.tx.beneficiary}» ${traceAmount(c.tx.amount)} '
-                  '${c.tx.currency} • بالمكتب: «${o.tx.beneficiary}» '
+                  '${c.tx.currency} • ${_who(o)}: «${o.tx.beneficiary}» '
                   '${traceAmount(o.tx.amount)} ${o.tx.currency}',
               at: o.date,
             ),
@@ -1861,7 +1943,7 @@ class _Ctx {
               'بـ ${_companyLabel(c)} ${destText(c)} '
               '${lastOffice != null ? 'وانلغت من ${_officeLabel(lastOffice)} ' : ''}'
               'وصار إلها ${traceDuration(e.now.difference(ct.waitingSince))} '
-              'ما انربطت بحركة مكتب.',
+              'ما انربطت بحركة مكتب${prefs.sentAsDest ? ' ولا إرسال' : ''}.',
           at: c.date,
         ),
       );
@@ -1881,21 +1963,30 @@ class _Ctx {
   // الشرح «ليش؟»
   // ---------------------------------------------------------
 
+  /// «حركة المكتب» أو «حركة الإرسال» حسب وجهة [m]
+  String _destNounOf(TraceMatch m) {
+    final o = nodes[m.officeId];
+    return o == null ? 'حركة المكتب' : _destNoun(o);
+  }
+
   String _gapText(TraceMatch m) {
+    final noun = _destNounOf(m);
     if (m.gap.isNegative) {
-      return 'حركة المكتب قبل ${m.rerouteFrom != null ? 'الإلغاء' : 'رسالة الشركة'} '
+      return '$noun قبل ${m.rerouteFrom != null ? 'الإلغاء' : 'رسالة الشركة'} '
           'بـ ${traceDuration(m.gap)}';
     }
-    return 'حركة المكتب بعد ${m.rerouteFrom != null ? 'إلغاء المكتب السابق' : 'رسالة الشركة'} '
+    return '$noun بعد ${m.rerouteFrom != null ? 'الإلغاء السابق' : 'رسالة الشركة'} '
         'بـ ${traceDuration(m.gap)}';
   }
 
   List<TraceReason> matchReasons(TraceMatch m, {required bool manual}) {
     final out = <TraceReason>[];
+    final destNoun = _destNounOf(m);
+    final destAt = destNoun == 'حركة المكتب' ? 'بالمكتب' : 'بالإرسال';
     // الاسم
     if (m.exactName) {
       final past = <String>[
-        if (m.officeNamePast) 'حركة المكتب',
+        if (m.officeNamePast) destNoun,
         if (m.companyNamePast) 'حركة الشركة',
       ];
       out.add(
@@ -1934,7 +2025,7 @@ class _Ctx {
     }
     // المبلغ
     final amountPast = <String>[
-      if (m.officeAmountPast) 'حركة المكتب',
+      if (m.officeAmountPast) destNoun,
       if (m.companyAmountPast) 'حركة الشركة',
     ];
     if (m.amountSame) {
@@ -1950,7 +2041,7 @@ class _Ctx {
       out.add(
         TraceReason(
           TraceReasonTone.warn,
-          'المبلغ مختلف: بالشركة ${traceAmount(m.companyAmount)} وبالمكتب ${traceAmount(m.officeAmount)}',
+          'المبلغ مختلف: بالشركة ${traceAmount(m.companyAmount)} و$destAt ${traceAmount(m.officeAmount)}',
         ),
       );
     }
@@ -2010,9 +2101,9 @@ class _Ctx {
     }
     if (m.companyCancelledBefore) {
       out.add(
-        const TraceReason(
+        TraceReason(
           TraceReasonTone.bad,
-          'حركة الشركة كانت ملغاة قبل حركة المكتب',
+          'حركة الشركة كانت ملغاة قبل $destNoun',
         ),
       );
     }
@@ -2023,7 +2114,7 @@ class _Ctx {
     final rej = e.decisions.rejected[o.id]?.contains(c.id) ?? false;
     if (rej) return 'استبعدتها أنت («مو هي»)';
     if (m.tooEarly) {
-      return 'رسالة الشركة بعد حركة المكتب بـ ${traceDuration(m.gap)}';
+      return 'رسالة الشركة بعد ${_destNoun(o)} بـ ${traceDuration(m.gap)}';
     }
     if (m.tooOld) {
       return 'أقدم من أقصى وقت: ${traceDuration(m.gap)} '
@@ -2033,7 +2124,7 @@ class _Ctx {
     if (h != null) {
       return 'مربوطة بحركة تانية: ${_officeLabel(h)} («${h.tx.beneficiary}»)';
     }
-    if (m.companyCancelledBefore) return 'ملغاة بالشركة قبل حركة المكتب';
+    if (m.companyCancelledBefore) return 'ملغاة بالشركة قبل ${_destNoun(o)}';
     if (m.nameFit == TraceNameFit.different) return 'الاسم مختلف';
     final issues = m.issues.map((i) => i.label).join(' و');
     return issues.isEmpty ? 'بتطابق بس في احتمال أقوى' : issues;
@@ -2080,7 +2171,7 @@ class _Ctx {
           TraceReason(
             TraceReasonTone.warn,
             t.issues.contains(TraceIssue.tie)
-                ? 'في ${t.candidates.length == 1 ? 'حركة بتطابق بس في حركة تانية بالمكتب بتطابقها كمان' : '${t.candidates.length} حركات بتطابق'}، وما منخمّن: اختار أنت.'
+                ? 'في ${t.candidates.length == 1 ? 'حركة بتطابق بس في حركة تانية بتطابقها كمان' : '${t.candidates.length} حركات بتطابق'}، وما منخمّن: اختار أنت.'
                 : 'ما في تطابق تام. الأقرب: ${t.candidates.first.issues.map((i) => i.label).join(' و')}. اختار أنت.',
           ),
         );
@@ -2099,8 +2190,9 @@ class _Ctx {
         reasons.add(
           TraceReason(
             TraceReasonTone.info,
-            'ما في حركة استقبال بحساب شركة بنفس الاسم والمبلغ خلال '
-            '${_hours(prefs.maxHoursSafe)} قبل حركة المكتب.',
+            'ما في حركة استقبال بحساب شركة${o.isSent ? ' تانية' : ''} بنفس '
+            'الاسم والمبلغ خلال ${_hours(prefs.maxHoursSafe)} قبل '
+            '${_destNoun(o)}.',
           ),
         );
     }
@@ -2118,7 +2210,14 @@ class _Ctx {
         ? nodes[linked.companyId]
         : null;
     final ld = lc == null ? null : destOf(lc);
-    if (ld != null && !ld.toOffice) {
+    if (ld != null && o.isSent) {
+      reasons.add(
+        TraceReason(
+          TraceReasonTone.good,
+          'حركة الاستقبال وجهتها «${ld.name}»، والإرسال مسار عادي إلها.',
+        ),
+      );
+    } else if (ld != null && !ld.toOffice) {
       reasons.add(
         TraceReason(
           TraceReasonTone.warn,
@@ -2196,12 +2295,19 @@ class _Ctx {
       return TraceReason(
         TraceReasonTone.info,
         'وجهتها «${dest.name}» تابعة لمكتب'
-        '${names.isEmpty ? '' : ' (${names.join('، ')})'}، فلازم توصل لمكتب.',
+        '${names.isEmpty ? '' : ' (${names.join('، ')})'}، فلازم توصل لمكتب'
+        '${ct.reachedSent ? '، وانبعتت بشركة تانية (الإرسال مسار عادي)' : (prefs.sentAsDest ? ' أو تنبعت بشركة تانية' : '')}.',
+      );
+    }
+    if (ct.reachedSent) {
+      return TraceReason(
+        TraceReasonTone.good,
+        'وجهتها «${dest.name}» مو تابعة لمكتب، وانبعتت بشركة تانية — عادي.',
       );
     }
     return TraceReason(
-      ct.reached ? TraceReasonTone.warn : TraceReasonTone.good,
-      ct.reached
+      ct.reachedOffice ? TraceReasonTone.warn : TraceReasonTone.good,
+      ct.reachedOffice
           ? 'وجهتها «${dest.name}» مو تابعة لمكتب، بس وصلت لمكتب — يمكن '
                 'تغيّر المسار.'
           : 'وجهتها «${dest.name}» مو تابعة لمكتب، فعادي ما توصل لمكتب.',
@@ -2216,7 +2322,8 @@ class _Ctx {
       reasons.add(
         TraceReason(
           ct.overdue ? TraceReasonTone.bad : TraceReasonTone.info,
-          'لسا ما في حركة بحساب مكتب مربوطة فيها.',
+          'لسا ما في حركة ${prefs.sentAsDest ? 'مكتب أو إرسال' : 'بحساب مكتب'} '
+          'مربوطة فيها.',
         ),
       );
     }
@@ -2229,9 +2336,9 @@ class _Ctx {
           : (t.status == TraceStatus.autoOrder ? 'بالترتيب' : 'تلقائيًا');
       reasons.add(
         TraceReason(
-          o.officeCancelled ? TraceReasonTone.warn : TraceReasonTone.good,
+          o.destCancelled ? TraceReasonTone.warn : TraceReasonTone.good,
           'راحت لـ ${_officeLabel(o)} ($how) بعد ${traceDuration(m.gap)}'
-          '${o.officeCancelled ? ' وانلغت هناك${o.tx.cancelledAt == null ? '' : ' بتاريخ ${_dateTime(o.tx.cancelledAt!)}'}' : ''}',
+          '${o.destCancelled ? ' وانلغت هناك${o.tx.cancelledAt == null ? '' : ' بتاريخ ${_dateTime(o.tx.cancelledAt!)}'}' : ''}',
         ),
       );
       if (!m.strong) {
@@ -2247,7 +2354,7 @@ class _Ctx {
       reasons.add(
         TraceReason(
           TraceReasonTone.warn,
-          'في ${ct.possibleOfficeIds.length == 1 ? 'حركة مكتب محتملة' : '${ct.possibleOfficeIds.length} حركات مكتب محتملة'} بدها تأكيد.',
+          'في ${ct.possibleOfficeIds.length == 1 ? 'حركة محتملة' : '${ct.possibleOfficeIds.length} حركات محتملة'} بدها تأكيد.',
         ),
       );
     }
@@ -2298,7 +2405,7 @@ class _Ctx {
       } else if (m.tooOld) {
         reason = 'بعد أقصى وقت: ${traceDuration(m.gap)}';
       } else if (m.tooEarly) {
-        reason = 'حركة المكتب قبل رسالة الشركة بـ ${traceDuration(m.gap)}';
+        reason = '${_destNoun(o)} قبل رسالة الشركة بـ ${traceDuration(m.gap)}';
       } else {
         final issues = m.issues.map((i) => i.label).join(' و');
         reason = issues.isEmpty ? 'بتطابق بس في احتمال أقوى' : issues;
@@ -2354,7 +2461,7 @@ class _Ctx {
       final m = evaluate(o, c, force: true);
       if (m == null) continue;
       final l = links[o.id];
-      // «ماسكة» هون: حركة المكتب مربوطة بحركة شركة تانية
+      // «ماسكة» هون: حركة المكتب (أو الإرسال) مربوطة بحركة شركة تانية
       final heldBy = l != null && l.companyId != companyId ? l.companyId : null;
       out.add(
         TraceOption(

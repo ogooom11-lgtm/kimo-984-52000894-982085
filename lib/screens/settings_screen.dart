@@ -237,7 +237,9 @@ class _SettingsScreenState extends State<SettingsScreen>
             subtitle:
                 'عادي ${tp.normalHoursSafe} س • أقصى ${tp.maxHoursSafe} س • '
                 '«${tp.unknown}»',
-            searchText: 'مصدر مسار شركة مكتب ربط وقت ساعات مجهول تحذير مرسلة',
+            searchText:
+                'مصدر مسار شركة مكتب ربط وقت ساعات مجهول تحذير مرسلة إرسال '
+                'استقبال',
             contents: [tp.unknown],
             onTap: () => _open(_TracePrefsPage(store: _store)),
           ),
@@ -4387,14 +4389,15 @@ class _TracePrefsPage extends StatelessWidget {
                   color: _kTeal,
                   text:
                       'كل حركة بحساب مكتب إلها مصدر: حركة «استقبال» بحساب شركة '
-                      '(شركة ABC ← مكتب X) أو «مجهول». البرنامج بيربطها لحاله إذا '
-                      'الاسم مطابق تمامًا والمبلغ والعملة نفسهم والوقت مناسب، '
-                      'وغير هيك بيعطيك تحذير وأنت بتختار. المسار بيبين بتفاصيل '
-                      'الحركة.',
+                      '(شركة ABC ← مكتب X) أو «مجهول». وحركة الاستقبال كمان '
+                      'ممكن تروح لحركة «إرسال» بشركة تانية (شركة ABC ← إرسال '
+                      'شركة XYZ). البرنامج بيربطها لحاله إذا الاسم مطابق تمامًا '
+                      'والمبلغ والعملة نفسهم والوقت مناسب، وغير هيك بيعطيك '
+                      'تحذير وأنت بتختار. المسار بيبين بتفاصيل الحركة.',
                 ),
                 const SizedBox(height: 18),
                 const _SectionTitle(
-                  text: 'الوقت بين رسالة الشركة وحركة المكتب',
+                  text: 'الوقت بين رسالة الشركة وحركة المكتب (أو الإرسال)',
                 ),
                 _Card(
                   padding: EdgeInsets.zero,
@@ -4582,14 +4585,35 @@ class _TracePrefsPage extends StatelessWidget {
                 const _SectionTitle(text: 'أنواع حركات الشركة'),
                 _Card(
                   padding: EdgeInsets.zero,
-                  child: _SwitchRow(
-                    icon: Icons.call_made_rounded,
-                    title: 'احسب الحركات المرسلة كمان',
-                    subtitle:
-                        'عادةً المصدر حركة «استقبال» بحساب الشركة. فعّلها إذا '
-                        'حركات «مرسلة» كمان بتروح لمكاتب.',
-                    value: p.includeSent,
-                    onChanged: (v) => _set(p.copyWith(includeSent: v)),
+                  child: Column(
+                    children: [
+                      _SwitchRow(
+                        icon: Icons.outbox_rounded,
+                        title: 'الاستقبال ممكن يروح لإرسال بشركة تانية',
+                        subtitle:
+                            'حركة «استقبال» بشركة ممكن تكون وجهتها حركة «إرسال» '
+                            'بشركة تانية (نفس الاسم والمبلغ والعملة والأوقات '
+                            'متل المكاتب). الإرسال مسار عادي وما بيطلّع تحذير '
+                            'وجهة.',
+                        value: p.sentAsDest,
+                        onChanged: (v) => _set(p.copyWith(sentAsDest: v)),
+                      ),
+                      const _ListDivider(),
+                      _SwitchRow(
+                        icon: Icons.call_made_rounded,
+                        title: 'احسب الحركات المرسلة مصدر لمكاتب',
+                        subtitle: p.sentAsDest
+                            ? 'موقّف لأن الإرسال محسوب وجهة لحركات الاستقبال. '
+                                  'طفّي الخيار يلي فوق إذا حركات «مرسلة» عندك '
+                                  'بتروح لمكاتب.'
+                            : 'عادةً المصدر حركة «استقبال» بحساب الشركة. فعّلها '
+                                  'إذا حركات «مرسلة» كمان بتروح لمكاتب.',
+                        value: p.sentIsSource,
+                        onChanged: p.sentAsDest
+                            ? null
+                            : (v) => _set(p.copyWith(includeSent: v)),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -5270,7 +5294,9 @@ class _SwitchRow extends StatelessWidget {
   final String title;
   final String subtitle;
   final bool value;
-  final ValueChanged<bool> onChanged;
+
+  /// null = موقّف
+  final ValueChanged<bool>? onChanged;
 
   const _SwitchRow({
     required this.icon,

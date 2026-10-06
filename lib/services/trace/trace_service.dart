@@ -1,7 +1,8 @@
 // lib/services/trace/trace_service.dart
 // -------------------------------------------------------------
 // خدمة تتبّع مصدر الحركة:
-//  • تحسب «مين مصدر كل حركة مكتب» بالخلفية (Isolate) وتعيد الحساب تلقائيًا
+//  • تحسب «مين مصدر كل حركة مكتب» (وكل حركة إرسال بشركة: من أي استقبال
+//    بشركة تانية) بالخلفية (Isolate) وتعيد الحساب تلقائيًا
 //    مع أي تغيير بالحركات أو الحسابات أو سجل التعديلات أو الإعدادات.
 //  • تحفظ قرارات المستخدم (تأكيد/تغيير/مجهول/«مو هي»/تجاهل تحذير) بصندوق
 //    مستقل (tx_links) مع إعدادات التتبّع. الصندوق كله داخل النسخة
@@ -350,6 +351,17 @@ class TraceService {
         .trim();
   }
 
+  /// حركة «الوجهة» [destId] حركة إرسال بحساب شركة (مو حركة مكتب)؟
+  static bool isSentDest(int destId) {
+    final t = txById(destId);
+    if (t == null) return false;
+    return accountById(t.accountId)?.type.isCompany ?? false;
+  }
+
+  /// «حركة مكتب» / «حركة إرسال» حسب حركة الوجهة [destId]
+  static String destNoun(int destId) =>
+      isSentDest(destId) ? 'حركة إرسال' : 'حركة مكتب';
+
   static String _currentSourceLabel(int officeId) {
     final t = result.value?.office[officeId];
     if (t == null) return prefs.value.unknown;
@@ -363,7 +375,8 @@ class TraceService {
   // قرارات المستخدم
   // ===========================
 
-  /// ربط يدوي: مصدر حركة المكتب [officeId] هو حركة الشركة [companyId]
+  /// ربط يدوي: مصدر حركة المكتب (أو الإرسال) [officeId] هو حركة الشركة
+  /// [companyId]
   static Future<void> linkManually(int officeId, int companyId) async {
     final o = txById(officeId);
     final c = txById(companyId);
@@ -393,16 +406,17 @@ class TraceService {
       from: same ? null : before,
       to: describeTx(companyId),
     );
+    final noun = destNoun(officeId);
     TxHistoryService.recordLink(
       companyId,
-      title: same ? 'تأكيد الربط مع حركة مكتب' : 'ربط بحركة مكتب يدويًا',
+      title: same ? 'تأكيد الربط مع $noun' : 'ربط ب$noun يدويًا',
       label: 'الوجهة',
       to: describeTx(officeId),
     );
     if (prevCompany != null && !same) {
       TxHistoryService.recordLink(
         prevCompany,
-        title: 'فك الربط مع حركة مكتب',
+        title: 'فك الربط مع $noun',
         label: 'الوجهة',
         from: describeTx(officeId),
       );
@@ -435,7 +449,7 @@ class TraceService {
         kind: OperationKind.manualEdit,
         title:
             'تعديل مبلغ «${target.beneficiary}» ليصير متل '
-            '${officeTakesCompany ? 'حركة الشركة' : 'حركة المكتب'}',
+            '${officeTakesCompany ? 'حركة الشركة' : (isSentDest(officeId) ? 'حركة الإرسال' : 'حركة المكتب')}',
         subtitle: 'من مسار الحركة',
         records: [
           OperationTxRecord(
@@ -477,7 +491,7 @@ class TraceService {
         kind: OperationKind.manualEdit,
         title:
             'تعديل اسم «$old» لـ «$value» متل '
-            '${officeTakesCompany ? 'حركة الشركة' : 'حركة المكتب'}',
+            '${officeTakesCompany ? 'حركة الشركة' : (isSentDest(officeId) ? 'حركة الإرسال' : 'حركة المكتب')}',
         subtitle: 'من مسار الحركة',
         records: [
           OperationTxRecord(
@@ -565,7 +579,7 @@ class TraceService {
     if (prevCompany != null) {
       TxHistoryService.recordLink(
         prevCompany,
-        title: 'فك الربط مع حركة مكتب',
+        title: 'فك الربط مع ${destNoun(officeId)}',
         label: 'الوجهة',
         from: describeTx(officeId),
       );
