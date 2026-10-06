@@ -688,7 +688,11 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       for (final amtCol in _selectedAmountCols) {
         final amount = _parseAmount(row[amtCol]);
         if (amount != null && amount > 0) {
-          final rawCurrency = _effectiveCurrency(amtCol, rowCurrency);
+          final rawCurrency = _effectiveCurrency(
+            amtCol,
+            rowCurrency,
+            cellText: row[amtCol]?.toString() ?? '',
+          );
           parts.add(
             _MoneyPart(
               amount: amount,
@@ -980,16 +984,80 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   }
 
   /// العملة المعتمدة لعمود مبالغ:
-  /// عملة الصف (إن وُجد عمود عملة) ← العملة المختارة للعمود ← عنوان العمود
-  String _effectiveCurrency(String amountCol, String rowCurrency) {
+  /// عملة الصف (إن وُجد عمود عملة) ← العملة المختارة للعمود ← العملة المكتوبة
+  /// بخلية المبلغ نفسها ← عنوان العمود
+  String _effectiveCurrency(
+    String amountCol,
+    String rowCurrency, {
+    String cellText = '',
+  }) {
     if (rowCurrency.isNotEmpty) return rowCurrency;
     final assigned = _amountColCurrency[amountCol];
     if (assigned != null && assigned.trim().isNotEmpty) return assigned;
+    // العملة مكتوبة بنفس خلية المبلغ («500 \$»، «1.000 ليرة»)
+    final inCell = _currencyInText(cellText);
+    if (inCell != null) return inCell;
     if (_currencyColumn != null) return '';
     return _extractCurrencyFromHeader(amountCol);
   }
 
-  String _extractCurrencyFromHeader(String header) {
+  /// عملة من عملات التطبيق مكتوبة جوّا نص (خلية مبلغ)، أو null
+  String? _currencyInText(String raw) {
+    // نشيل الأرقام بس (مع فواصلها) ونخلي «ل.س» متل ما هي
+    final text = raw
+        .replaceAll(RegExp(r'[0-9\u0660-\u0669][0-9\u0660-\u0669.,٬٫]*'), ' ')
+        .trim();
+    if (text.isEmpty) return null;
+    final key = ' ${_curKey(text)} ';
+    final names = _appCurrencies.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    for (final name in names) {
+      final k = _curKey(name);
+      if (k.isNotEmpty && key.contains(k)) return name;
+    }
+    final aliases = _appCurrencyMap.keys.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    for (final alias in aliases) {
+      final k = _curKey(alias);
+      if (k.isEmpty) continue;
+      final isSymbol = !RegExp(r'[A-Za-z\u0621-\u064A]').hasMatch(k);
+      if (isSymbol) {
+        if (key.contains(k)) return _appCurrencyMap[alias]!.trim();
+      } else if (k.length >= 2 && key.contains(' $k ')) {
+        return _appCurrencyMap[alias]!.trim();
+      }
+    }
+    return null;
+  }
+
+  /// العملة الأكثر تكرارًا بخلايا عمود (من أول 60 خلية فيها شي)، أو null
+  String? _columnCellCurrency(String h) {
+    _checkColStats();
+    if (_cellCurrencyCache.containsKey(h)) return _cellCurrencyCache[h];
+    final counts = <String, int>{};
+    var seen = 0;
+    for (final r in _rows) {
+      final v = r[h]?.toString() ?? '';
+      if (v.trim().isEmpty) continue;
+      final c = _currencyInText(v);
+      if (c != null) counts[c] = (counts[c] ?? 0) + 1;
+      if (++seen >= 60) break;
+    }
+    String? best;
+    counts.forEach((c, n) {
+      if (best == null || n > counts[best]!) best = c;
+    });
+    _cellCurrencyCache[h] = best;
+    return best;
+  }
+
+  /// عملة معروفة (من عملات التطبيق أو الشائعة) بعنوان العمود، أو null
+  String? _knownCurrencyInHeader(String header) {
+    final known = _extractCurrencyFromHeader(header, fallback: false);
+    return known.isEmpty ? null : known;
+  }
+
+  String _extractCurrencyFromHeader(String header, {bool fallback = true}) {
     var h = header.trim();
     final lower = h.toLowerCase();
 
@@ -1023,6 +1091,8 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
     if (lower.contains('try') || h.contains('تركي') || h.contains('ليرة تركية')) {
       return 'ليرة تركية';
     }
+
+    if (!fallback) return '';
 
     h = h
         .replaceAll(RegExp(r'(?i)amount|amt|value|sum'), '')
@@ -1540,18 +1610,11 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
 
   Widget _buildStepAmountAndDate() {
     final cs = Theme.of(context).colorScheme;
-    // كل عمود فيه رقم بأي صف (ولو كان أول صف فاضي) يظهر هون مع اختيار العملة،
-    // وبعدها باقي الأعمدة يلي فيها شي (إذا الأرقام مكتوبة بشكل غريب)
-    final candidates = [
-      for (final h in _headers)
-        if (!_selectedNameCols.contains(h) &&
-            h != _currencyColumn &&
-            _columnHasAny(h))
-          h,
-    ];
+    // كل أعمدة الملف بترتيبها (A، B، C...) ما عدا يلي اخترتها للاسم — بدون
+    // أي فلترة حسب المحتوى، وكل عمود تختاره بتحدد عملته
     final amountItems = [
-      ...candidates.where(_columnHasNumber),
-      ...candidates.where((h) => !_columnHasNumber(h)),
+      for (final h in _headers)
+        if (!_selectedNameCols.contains(h)) h,
     ];
 
     return Column(
@@ -1569,7 +1632,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'اختر أعمدة المبالغ من الملف. ترتيبها مهم، فالأول سيقارن مع المبلغ الأول والثاني مع المبلغ الثاني.',
+                'كل أعمدة الملف ظاهرة هون ما عدا أعمدة الاسم. اختر أعمدة المبالغ وحدد عملة كل عمود. ترتيبها مهم، فالأول سيقارن مع المبلغ الأول والثاني مع المبلغ الثاني.',
                 style: TextStyle(color: cs.onSurfaceVariant),
               ),
             ],
@@ -1636,7 +1699,9 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
             separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (ctx, i) {
               final h = amountItems[i];
+              final hasAny = _columnHasAny(h);
               final hasNumber = _columnHasNumber(h);
+              final isCurrencyCol = h == _currencyColumn;
               final isSelected = _selectedAmountCols.contains(h);
 
               return InkWell(
@@ -1647,12 +1712,19 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                       _selectedAmountCols.remove(h);
                       _amountColCurrency.remove(h);
                     } else {
+                      // عمود العملة صار عمود مبالغ: ما عاد عمود عملة
+                      if (isCurrencyCol) _currencyColumn = null;
                       _selectedAmountCols.add(h);
                       // العملة التي اخترتها سابقًا لهذا العمود تُختار تلقائيًا
                       final saved = _savedCurrencyFor(h);
                       if (saved != null) _amountColCurrency[h] = saved;
                     }
                   });
+                  if (!isSelected && isCurrencyCol) {
+                    _showSnack(
+                      'صار العمود ${_letterOf(h)} عمود مبالغ (وما عاد عمود عملة كل صف)',
+                    );
+                  }
                   _saveColumnChoices();
                   _saveSessionState();
                 },
@@ -1692,7 +1764,31 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
                                 color: cs.onSurfaceVariant,
                               ),
                             ),
-                            if (!hasNumber)
+                            if (isCurrencyCol)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  'مختار كعمود عملة كل صف — إذا اخترته للمبالغ بيتلغى كعمود عملة',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: cs.tertiary,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              )
+                            else if (!hasAny)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  'عمود فاضي',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: cs.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              )
+                            else if (!hasNumber)
                               Padding(
                                 padding: const EdgeInsets.only(top: 4),
                                 child: Text(
@@ -1745,12 +1841,22 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   String _currencyLabelForColumn(String h) {
     final assigned = _amountColCurrency[h];
     final hasAssigned = assigned != null && assigned.isNotEmpty;
-    if (_currencyColumn != null) {
-      return 'من عمود «$_currencyColumn» لكل صف'
+    if (_currencyColumn != null && _currencyColumn != h) {
+      return 'من عمود ${_letterOf(_currencyColumn!)} لكل صف'
           '${hasAssigned ? ' (وللصفوف بدون عملة: $assigned)' : ''}';
     }
     if (hasAssigned) return '$assigned (مختارة)';
-    return '${_extractCurrencyFromHeader(h)} (مستنتجة من العنوان)';
+    return _autoCurrencyLabel(h);
+  }
+
+  /// العملة التلقائية لعمود: من خلاياه («500 \$») أو من عنوانه، أو «غير محددة»
+  String _autoCurrencyLabel(String h) {
+    final fromCells = _columnCellCurrency(h);
+    if (fromCells != null) return '$fromCells (من الخلايا)';
+    final fromHeader = _knownCurrencyInHeader(_headerTitles[h] ?? h) ??
+        _knownCurrencyInHeader(h);
+    if (fromHeader != null) return '$fromHeader (من العنوان)';
+    return 'غير محددة — اخترها';
   }
 
   /// اختيار عملة عمود المبالغ من عملات التطبيق
@@ -1760,9 +1866,9 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       DropdownMenuItem<String?>(
         value: null,
         child: Text(
-          _currencyColumn != null
+          _currencyColumn != null && _currencyColumn != h
               ? 'بدون عملة افتراضية'
-              : 'تلقائي (${_extractCurrencyFromHeader(h)})',
+              : 'تلقائي: ${_autoCurrencyLabel(h)}',
           overflow: TextOverflow.ellipsis,
         ),
       ),
@@ -2888,6 +2994,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
   int? _colStatsKey;
   final Map<String, bool> _hasAnyCache = {};
   final Map<String, bool> _hasNumberCache = {};
+  final Map<String, String?> _cellCurrencyCache = {};
 
   void _checkColStats() {
     final key = Object.hash(
@@ -2900,6 +3007,7 @@ class _UnreceivedReconcileScreenState extends State<UnreceivedReconcileScreen> {
       _colStatsKey = key;
       _hasAnyCache.clear();
       _hasNumberCache.clear();
+      _cellCurrencyCache.clear();
     }
   }
 
