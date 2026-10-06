@@ -8,6 +8,10 @@
 // - فقط خمسة ملايين ليرة سورية
 // - مليونين وستمائة ألف
 // - 150طن / 22 طون   => طن/طون = مليون
+//
+// مبالغ منفصلة بنفس النص ما بتنجمع أبدًا: «14325 14 الف و 325» = رقم ثم نفس
+// المبلغ مكتوب (14325)، مش 14325 + 14 + 325. إذا كانت قيمها مختلفة النتيجة
+// مو واضحة (matched = false) وكاشف المبلغ بيعرضها كمبالغ مختلفة.
 // -------------------------------------------------------------
 
 class AmountTextParseResult {
@@ -121,7 +125,168 @@ class AmountTextParser {
     if (text.trim().isEmpty) return AmountTextParseResult.empty;
 
     final normalized = _normalizeInput(text);
+    if (normalized.isEmpty) return AmountTextParseResult.empty;
     final customValues = _normalizeCustomWordValues(customWordValues);
+
+    // مبالغ منفصلة (رقمين جنب بعض، أو رقم ثم نفس المبلغ مكتوب): ما منجمعها.
+    // إذا كلها نفس القيمة منرجّعها، وإلا النتيجة مو واضحة.
+    final groups = _independentGroups(normalized, customValues);
+    if (groups.length > 1) {
+      double? value;
+      var confidence = 1.0;
+      for (final g in groups) {
+        final r = _parseExpression(g, customValues);
+        final v = r.value;
+        if (!r.matched || v == null || v <= 0) continue;
+        if (value != null && (value - v).abs() > 1e-6) {
+          return AmountTextParseResult(
+            value: null,
+            matched: false,
+            confidence: 0.0,
+            normalizedText: normalized,
+          );
+        }
+        value = v;
+        if (r.confidence < confidence) confidence = r.confidence;
+      }
+      if (value == null) {
+        return AmountTextParseResult(
+          value: null,
+          matched: false,
+          confidence: 0.0,
+          normalizedText: normalized,
+        );
+      }
+      return AmountTextParseResult(
+        value: value,
+        matched: true,
+        confidence: confidence,
+        normalizedText: normalized,
+      );
+    }
+    return _parseExpression(normalized, customValues);
+  }
+
+  /// نوع توكن مطبّع واحد (بدون إعادة تطبيع قيم الكلمات المخصصة)
+  static NumberWordKind _tokenKind(String token, Map<String, double> custom) {
+    final t = _normalizeToken(token);
+    if (t.isEmpty || t == 'و' || RegExp(r'[0-9]').hasMatch(t)) {
+      return NumberWordKind.none;
+    }
+    if (_magnitudeUnitValue(t) != null) return NumberWordKind.magnitude;
+    if (_isHalfToken(t)) return NumberWordKind.half;
+    if (_directHundreds.containsKey(t) || _isHundredWord(t)) {
+      return NumberWordKind.hundred;
+    }
+    if (_directNumberWords.containsKey(t)) return NumberWordKind.small;
+    final v = custom[t];
+    if (v != null) {
+      if (v >= 1000) return NumberWordKind.magnitude;
+      if (v >= 100) return NumberWordKind.hundred;
+      return NumberWordKind.small;
+    }
+    return NumberWordKind.none;
+  }
+
+  /// يقسم النص المطبّع لمبالغ منفصلة (بدون «و» بيناتها):
+  ///  • رقمين جنب بعض (ولو بينهم كلمة عادية متل «ليرة»).
+  ///  • رقم كامل بعده مقدار بيبلّش مبلغ مكتوب: «1500000 مليون و 500 الف».
+  ///  • رقم ثم عدد مكتوب بالحروف، أو العكس: «58100 ثمانية و خمسون الف».
+  ///  • مقدار بعده مبلغ فيه مقدار أكبر أو مساوي: «50 الف خمسين الف».
+  static List<String> _independentGroups(
+    String normalized,
+    Map<String, double> custom,
+  ) {
+    final tokens = normalized
+        .split(' ')
+        .where((t) => t.trim().isNotEmpty)
+        .toList();
+    if (tokens.length < 2) return [normalized];
+
+    bool isWaw(String t) => t == 'و';
+    final numericRe = RegExp(r'^[+\-]?[0-9][0-9,.]*$');
+    double? numOf(String t) =>
+        numericRe.hasMatch(t) ? _parseNumericToken(t) : null;
+    double unitOf(String t) {
+      final n = _normalizeToken(t);
+      if (n.isEmpty) return 1.0;
+      return _magnitudeUnitValue(n) ?? 1.0;
+    }
+
+    bool meaningful(String t) =>
+        isWaw(t) ||
+        numOf(t) != null ||
+        _tokenKind(t, custom) != NumberWordKind.none;
+
+    bool hasMeaningfulAfter(int i) {
+      for (int j = i + 1; j < tokens.length; j++) {
+        if (meaningful(tokens[j])) return true;
+      }
+      return false;
+    }
+
+    bool isCut(String a, String b, int i) {
+      if (isWaw(a) || isWaw(b)) return false;
+      final av = numOf(a);
+      final bv = numOf(b);
+      if (av != null && bv != null) return true;
+      if (av != null) {
+        final u = unitOf(b);
+        if (u > 1) return av >= u && hasMeaningfulAfter(i);
+        final k = _tokenKind(b, custom);
+        if (k == NumberWordKind.small) return true;
+        if (k == NumberWordKind.hundred) {
+          return !(_isHundredWord(_normalizeToken(b)) && av < 10);
+        }
+        return false;
+      }
+      final ka = _tokenKind(a, custom);
+      if (bv != null) {
+        if (ka == NumberWordKind.small || ka == NumberWordKind.hundred) {
+          return true;
+        }
+        final u = unitOf(a);
+        if (u > 1 && bv >= u) return true;
+      }
+      final aUnit = unitOf(a);
+      if (aUnit > 1) {
+        for (int j = i; j < tokens.length; j++) {
+          final t = tokens[j];
+          if (isWaw(t)) break;
+          final u = unitOf(t);
+          if (u > 1) return u >= aUnit;
+        }
+      }
+      return false;
+    }
+
+    final groups = <List<String>>[];
+    String? prev;
+    for (int i = 0; i < tokens.length; i++) {
+      final t = tokens[i];
+      if (!meaningful(t)) {
+        if (groups.isEmpty) {
+          groups.add([t]);
+        } else {
+          groups.last.add(t);
+        }
+        continue;
+      }
+      if (groups.isEmpty || (prev != null && isCut(prev, t, i))) {
+        groups.add([t]);
+      } else {
+        groups.last.add(t);
+      }
+      prev = t;
+    }
+    return [for (final g in groups) g.join(' ')];
+  }
+
+  /// مبلغ واحد (بدون مبالغ منفصلة جواته)
+  static AmountTextParseResult _parseExpression(
+    String normalized,
+    Map<String, double> customValues,
+  ) {
     final directCombo = RegExp(
       r'^'
       r'([0-9\u0660-\u0669]+)\s*'
@@ -139,7 +304,9 @@ class AmountTextParser {
       final second = _parseNumericToken(directCombo.group(3) ?? '') ?? 0;
       final smallMag = _magnitudeUnitValue(directCombo.group(4) ?? '') ?? 0;
 
-      final total = (first * bigMag) + (second * smallMag);
+      final total =
+          _applyMagnitudeSmart(first, bigMag) +
+          _applyMagnitudeSmart(second, smallMag);
 
       if (total > 0) {
         return AmountTextParseResult(
@@ -690,6 +857,8 @@ class AmountTextParser {
     // الصيغ بعد التطبيع (مئة/مية/مائة → ميه/مايه) والعامية
     'مايتين': 200,
     'ميتان': 200,
+    'متين': 200,
+    'متان': 200,
     'ثلاثميه': 300,
     'تلاتميه': 300,
     'تلتميه': 300,

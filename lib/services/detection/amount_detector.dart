@@ -6,6 +6,8 @@
 // 3) تجاهل الهواتف والأكواد والأرقام غير المالية
 // 4) عدم اعتبار طن/طون مبالغ
 // 5) إعادة أفضل مبلغ + المرشحات + تنبيه تعدد المبالغ الحقيقي
+// 6) ما منجمع أرقام نفس السطر أبدًا: «14325 14 الف و 325» = رقم ثم نفس المبلغ
+//    مكتوب (14325)، والمكتوب بينقارن بالرقم (وإذا اختلفوا = تحذير)
 //
 // ملاحظة:
 // - أبقينا detect(lines: ...) للتوافق المؤقت.
@@ -1004,6 +1006,73 @@ class AmountDetector {
         }
       }
 
+      // وحدة المقدار في توكن («الف» = 1000، «250الف» = 1000)، أو 1
+      double unitOf(String t) {
+        if (_hasDigits(t)) {
+          final emb = _extractEmbeddedMoneyMagnitude(
+            _normalizeInlineAmountToken(t),
+          );
+          return emb == null ? 1.0 : _magnitudeUnitValue(emb);
+        }
+        return kindOf(t) == NumberWordKind.magnitude
+            ? _magnitudeUnitValue(t)
+            : 1.0;
+      }
+
+      bool connects(String t) => isWaw(t) || AmountTextParser.startsWithWaw(t);
+
+      // مبلغين منفصلين جنب بعض بدون «و» بيناتهم — ما بينجمعوا أبدًا:
+      //  • رقمين جنب بعض: «14325 14 الف و 325» = 14325 ثم نفس المبلغ مكتوب.
+      //  • رقم كامل بعده مبلغ مكتوب بيبلّش بمقدار: «1500000 مليون و500 الف».
+      //    (أما «2000000 مليون» لحالها فالمقدار اسم بس، ونفس المبلغ.)
+      //  • مقدار بعده مبلغ تاني فيه مقدار أكبر أو مساوي: «50 الف خمسين الف».
+      //    (أما «مليون 500 الف» أو «الف خمسمية» فمبلغ واحد.)
+      bool isSeparateCut(int k, int end) {
+        final a = tokens[k];
+        final b = tokens[k + 1];
+        if (connects(a) || connects(b)) return false;
+        final aDigit = _hasDigits(a);
+        final bDigit = _hasDigits(b);
+        if (aDigit && bDigit) return true;
+        if (aDigit && kindOf(b) == NumberWordKind.magnitude && k + 1 < end) {
+          final na = _normalizeInlineAmountToken(a);
+          final v = parseAmountToken(na);
+          final unit = _magnitudeUnitValue(b);
+          if (v != null &&
+              unit > 1 &&
+              _extractEmbeddedMoneyMagnitude(na) == null &&
+              v >= unit) {
+            return true;
+          }
+        }
+        final aUnit = unitOf(a);
+        if (aUnit > 1) {
+          for (int j = k + 1; j <= end; j++) {
+            final t = tokens[j];
+            if (connects(t)) break;
+            final u = unitOf(t);
+            if (u > 1) return u >= aUnit;
+          }
+        }
+        return false;
+      }
+
+      // جزء فيه كلمات أعداد أو مقادير (مكتوب، ولو كان فيه أرقام متل
+      // «14 الف و 325»)، مقابل جزء أرقام بس («14325»)
+      bool isWritten((int, int) part) {
+        for (int k = part.$1; k <= part.$2; k++) {
+          final t = tokens[k];
+          if (isWaw(t)) continue;
+          // رقم ملزوق فيه مقدار («14الف») = صيغة مكتوبة كمان
+          if (_hasDigits(t)) {
+            if (unitOf(t) > 1) return true;
+            continue;
+          }
+          return true;
+        }
+        return false;
+      }
+
       // قيمة جزء من التعبير: رقم (مع مقداره إن وُجد) أو مبلغ مكتوب بالحروف
       double? partValue(int start, int end) {
         final digits = <int>[];
@@ -1047,6 +1116,14 @@ class AmountDetector {
           final t = tokens[k];
           if (_hasDigits(t)) {
             digitIdx.add(k);
+            // رقم ملزوق فيه مقدار جزء من مبلغ مكتوب: «14الف و325» = 14325
+            if (start != end &&
+                _extractEmbeddedMoneyMagnitude(
+                      _normalizeInlineAmountToken(t),
+                    ) !=
+                    null) {
+              magnitudeIdx.add(k);
+            }
           } else if (_isMagnitudeWord(_normalizeArabic(_cleanToken(t)))) {
             magnitudeIdx.add(k);
           } else if (_isNumberWord(t, customWordValues, numberWordCache)) {
@@ -1147,11 +1224,12 @@ class AmountDetector {
         }
         final end = i - 1;
 
-        // تقسيم التعبير عند الحد بين رقم ومبلغ مكتوب بالحروف
+        // تقسيم التعبير عند الحد بين رقم ومبلغ مكتوب بالحروف، وبين أي مبلغين
+        // منفصلين (ما منجمع أرقام نفس السطر)
         final parts = <(int, int)>[];
         var partStart = start;
         for (int k = start; k < end; k++) {
-          if (isRestatementCut(k)) {
+          if (isRestatementCut(k) || isSeparateCut(k, end)) {
             parts.add((partStart, k));
             partStart = k + 1;
           }
@@ -1165,10 +1243,12 @@ class AmountDetector {
         for (int p = 0; p + 1 < parts.length; p++) {
           final left = parts[p];
           final right = parts[p + 1];
-          final leftIsDigits = _hasDigits(tokens[left.$2]);
-          final digitsPart = leftIsDigits ? left : right;
-          final wordsPart = leftIsDigits ? right : left;
-          final wordsCandidate = leftIsDigits ? results[p + 1] : results[p];
+          // رقم ونفس المبلغ مكتوب جنبه: جزء أرقام بس + جزء مكتوب
+          final leftWritten = isWritten(left);
+          if (leftWritten == isWritten(right)) continue;
+          final digitsPart = leftWritten ? right : left;
+          final wordsPart = leftWritten ? left : right;
+          final wordsCandidate = leftWritten ? results[p] : results[p + 1];
           final dv = partValue(digitsPart.$1, digitsPart.$2);
           final wv = partValue(wordsPart.$1, wordsPart.$2);
           if (dv == null || wv == null || dv.abs() < 10 || wv.abs() < 10) {
