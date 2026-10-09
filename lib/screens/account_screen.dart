@@ -4,12 +4,19 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../database_service.dart';
 import '../models.dart';
-import '../services/tx_history_service.dart';
+import '../services/tx_undo.dart';
+import '../widgets/app_messages.dart';
 import 'add_edit_transaction_screen.dart';
 import 'share_image_page.dart';
-import 'transaction_history_screen.dart';
 
 enum SortField { date, name, status, amount }
+
+/// رسالة قصيرة مكان الرسالة الحالية
+void _say(ScaffoldMessengerState messenger, String text) {
+  messenger
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(content: Text(text)));
+}
 
 /// الحقول يلي بتنسخ: الاسم، المبلغ 1 والمبلغ 2 (مع العملات)، والتاريخ
 class _CopyFields {
@@ -224,9 +231,6 @@ class _AccountScreenState extends State<AccountScreen> {
     );
     if (!ok) return;
 
-    if (items.length > 1) {
-      TxHistoryService.annotate(items.map((t) => t.id), 'نقل جماعي');
-    }
     for (final tx in items) {
       tx.accountId = target.id;
       await tx.save();
@@ -252,7 +256,8 @@ class _AccountScreenState extends State<AccountScreen> {
     if (!ok) return;
 
     final now = DateTime.now();
-    TxHistoryService.annotate(items.map((t) => t.id), 'إجراء جماعي');
+    // حالة الحركات قبل التسليم، للتراجع
+    final delivered = <(TransactionModel, TxStatusSnapshot)>[];
     for (final tx in items) {
       final movement = tx.companyMovementType;
       if (_isCompanyAccount && movement != null) {
@@ -274,6 +279,9 @@ class _AccountScreenState extends State<AccountScreen> {
         tx.status = TransactionStatus.added;
         tx.receivedAt = null;
       } else {
+        if (status == TransactionStatus.received) {
+          delivered.add((tx, TxStatusSnapshot.of(tx)));
+        }
         tx.applyStatus(status, at: now);
       }
       await tx.save();
@@ -281,9 +289,23 @@ class _AccountScreenState extends State<AccountScreen> {
 
     if (!mounted) return;
     _clearSelection();
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('تم تحديث ${items.length} حركة')));
+    final messenger = ScaffoldMessenger.of(context);
+    if (delivered.isEmpty) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('تم تحديث ${items.length} حركة')),
+      );
+      return;
+    }
+    AppMessages.showWithUndo(
+      messenger,
+      'تم تسليم ${delivered.length} حركة',
+      () async {
+        for (final (tx, before) in delivered) {
+          await TxUndo.restoreStatus(tx, before);
+        }
+        _say(messenger, 'تم التراجع عن التسليم');
+      },
+    );
   }
 
   Future<void> _deleteTransactions(List<TransactionModel> items) async {
@@ -294,7 +316,6 @@ class _AccountScreenState extends State<AccountScreen> {
     );
     if (!ok) return;
 
-    TxHistoryService.annotate(items.map((t) => t.id), 'حذف جماعي');
     for (final tx in items) {
       await tx.delete();
     }
@@ -1495,8 +1516,16 @@ class _StatusSection extends StatelessWidget {
                         );
                       },
                       onSetReceived: () async {
-                        t.applyStatus(TransactionStatus.received);
-                        await t.save();
+                        final messenger = ScaffoldMessenger.of(context);
+                        final before = await TxUndo.deliver(t);
+                        AppMessages.showWithUndo(
+                          messenger,
+                          'تم التسليم',
+                          () async {
+                            await TxUndo.restoreStatus(t, before);
+                            _say(messenger, 'تم التراجع عن التسليم');
+                          },
+                        );
                       },
                       onSetCancelled: (Future<bool?> Function() confirm) async {
                         final ok = await confirm();
@@ -1620,12 +1649,26 @@ class _TxBubble extends StatelessWidget {
 
   bool get _isCompany => t.companyMovementType != null;
 
-  /// الضغط على الحركة: تسليم / إلغاء / تعديل
+  /// «تراجع عن التسليم»: الحركة بترجع مضافة
+  Future<void> _undoDelivery(ScaffoldMessengerState messenger) async {
+    await TxUndo.undoDelivery(t);
+    _say(messenger, 'تم التراجع عن التسليم');
+  }
+
+  /// «تراجع عن التعديل»: الحركة بترجع متل ما كانت قبل آخر تعديل
+  Future<void> _undoEdit(ScaffoldMessengerState messenger) async {
+    final ok = await TxUndo.undoEdit(t);
+    _say(messenger, ok ? 'تم التراجع عن التعديل' : 'تعذّر التراجع عن التعديل');
+  }
+
+  /// الضغط على الحركة: تسليم / إلغاء / تعديل، والتراجع عن التسليم والتعديل
   Future<void> _showActions(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
     final cancelled = _isCompany
         ? (t.effectiveCompanyMovement?.isCancelled ?? false)
         : t.status == TransactionStatus.cancelled;
     final received = !_isCompany && t.status == TransactionStatus.received;
+    final canUndoEdit = TxUndo.canUndoEdit(t.id);
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -1648,15 +1691,20 @@ class _TxBubble extends StatelessWidget {
                   ),
                 ),
               ),
-              if (!_isCompany)
+              if (!_isCompany && !received)
                 ListTile(
-                  enabled: !received,
                   leading: const Icon(
                     Icons.verified_rounded,
                     color: Colors.green,
                   ),
                   title: const Text('تسليم'),
                   onTap: () => Navigator.pop(ctx, 'deliver'),
+                ),
+              if (received)
+                ListTile(
+                  leading: const Icon(Icons.undo_rounded, color: Colors.green),
+                  title: const Text('تراجع عن التسليم'),
+                  onTap: () => Navigator.pop(ctx, 'undeliver'),
                 ),
               ListTile(
                 enabled: !cancelled,
@@ -1669,6 +1717,12 @@ class _TxBubble extends StatelessWidget {
                 title: const Text('تعديل'),
                 onTap: () => Navigator.pop(ctx, 'edit'),
               ),
+              if (canUndoEdit)
+                ListTile(
+                  leading: const Icon(Icons.undo_rounded, color: Colors.blue),
+                  title: const Text('تراجع عن التعديل'),
+                  onTap: () => Navigator.pop(ctx, 'undo_edit'),
+                ),
               const SizedBox(height: 8),
             ],
           ),
@@ -1679,11 +1733,17 @@ class _TxBubble extends StatelessWidget {
       case 'deliver':
         await onSetReceived();
         break;
+      case 'undeliver':
+        await _undoDelivery(messenger);
+        break;
       case 'cancel':
         await onSetCancelled(confirmCancel);
         break;
       case 'edit':
         onEdit();
+        break;
+      case 'undo_edit':
+        await _undoEdit(messenger);
         break;
     }
   }
@@ -1836,15 +1896,22 @@ class _TxBubble extends StatelessWidget {
                         PopupMenuButton<String>(
                           tooltip: "خيارات",
                           onSelected: (val) async {
+                            final messenger = ScaffoldMessenger.of(context);
                             switch (val) {
                               case 'deliver':
                                 await onSetReceived();
+                                break;
+                              case 'undeliver':
+                                await _undoDelivery(messenger);
                                 break;
                               case 'cancel':
                                 await onSetCancelled(confirmCancel);
                                 break;
                               case 'edit':
                                 onEdit();
+                                break;
+                              case 'undo_edit':
+                                await _undoEdit(messenger);
                                 break;
                               case 'move':
                                 await onMoveRequested();
@@ -1855,18 +1922,23 @@ class _TxBubble extends StatelessWidget {
                               case 'copy':
                                 onCopyItemRequested(t);
                                 break;
-                              case 'history':
-                                await openTransactionHistory(context, t);
-                                break;
                             }
                           },
                           itemBuilder: (ctx) {
                             final isCompany = t.companyMovementType != null;
+                            final received =
+                                !isCompany &&
+                                t.status == TransactionStatus.received;
                             return [
-                              if (!isCompany)
+                              if (!isCompany && !received)
                                 const PopupMenuItem(
                                   value: 'deliver',
                                   child: Text("تمييز كـ مستلمة"),
+                                ),
+                              if (received)
+                                const PopupMenuItem(
+                                  value: 'undeliver',
+                                  child: Text("تراجع عن التسليم"),
                                 ),
                               if (!isCompany)
                                 const PopupMenuItem(
@@ -1881,6 +1953,11 @@ class _TxBubble extends StatelessWidget {
                                       : 'تعديل',
                                 ),
                               ),
+                              if (TxUndo.canUndoEdit(t.id))
+                                const PopupMenuItem(
+                                  value: 'undo_edit',
+                                  child: Text("تراجع عن التعديل"),
+                                ),
                               const PopupMenuItem(
                                 value: 'move',
                                 child: Text("نقل إلى حساب آخر"),
@@ -1895,10 +1972,6 @@ class _TxBubble extends StatelessWidget {
                               const PopupMenuItem(
                                 value: 'copy',
                                 child: Text("نسخ…"),
-                              ),
-                              const PopupMenuItem(
-                                value: 'history',
-                                child: Text("سجل التعديلات"),
                               ),
                             ];
                           },

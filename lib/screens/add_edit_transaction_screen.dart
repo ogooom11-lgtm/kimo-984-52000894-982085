@@ -4,10 +4,10 @@ import 'package:flutter/services.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/destinations.dart';
-import '../services/tx_history_service.dart';
+import '../services/tx_undo.dart';
+import '../widgets/app_messages.dart';
 import '../widgets/destination_picker.dart';
 import 'settings_screen.dart';
-import 'transaction_history_screen.dart';
 
 class AddEditTransactionScreen extends StatefulWidget {
   final Account account;
@@ -78,12 +78,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
       ),
     );
   }
-
-  final Map<String, List<String>> _undoStacks = {
-    'beneficiary': <String>[],
-    'amount1': <String>[],
-    'amount2': <String>[],
-  };
 
   @override
   void initState() {
@@ -199,44 +193,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     );
   }
 
-  List<String> get _draggableParts {
-    final source = _rawController.text.trim();
-    if (source.isEmpty) return const [];
-
-    final result = <String>[];
-    final seen = <String>{};
-
-    void addPart(String value) {
-      var cleaned = value.trim();
-      if (cleaned.isEmpty) return;
-
-      cleaned = cleaned
-          .replaceAll(RegExp(r'^[\s\-\–\—\•\.\,\،\;\؛\:]+'), '')
-          .replaceAll(RegExp(r'[\s\-\–\—\•\.\,\،\;\؛\:]+$'), '');
-
-      if (cleaned.isEmpty) return;
-      if (seen.add(cleaned)) result.add(cleaned);
-    }
-
-    for (final line in source.split(RegExp(r'[\n\r]+'))) {
-      addPart(line);
-    }
-
-    for (final chunk in source.split(RegExp(r'[،,؛;]+'))) {
-      addPart(chunk);
-    }
-
-    for (final word in source.split(RegExp(r'\s+'))) {
-      addPart(word);
-    }
-
-    return result.take(40).toList();
-  }
-
-  bool _canAcceptAmount(String? value) {
-    return _extractDigitsOnly(value) != null;
-  }
-
   String? _extractDigitsOnly(String? input) {
     if (input == null) return null;
 
@@ -303,59 +259,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     return double.tryParse(digits) ?? 0.0;
   }
 
-  void _setControllerText(TextEditingController controller, String value) {
-    controller.value = TextEditingValue(
-      text: value,
-      selection: TextSelection.collapsed(offset: value.length),
-    );
-  }
-
-  void _pushUndo(String key, String currentValue) {
-    final stack = _undoStacks[key]!;
-    if (stack.isEmpty || stack.last != currentValue) {
-      stack.add(currentValue);
-    }
-    if (stack.length > 12) {
-      stack.removeAt(0);
-    }
-  }
-
-  void _undoField(String key, TextEditingController controller) {
-    final stack = _undoStacks[key]!;
-    if (stack.isEmpty) return;
-
-    final previous = stack.removeLast();
-    _setControllerText(controller, previous);
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('تم التراجع')));
-  }
-
-  void _applyDropToBeneficiary(String value) {
-    _pushUndo('beneficiary', _beneficiaryController.text);
-    _setControllerText(_beneficiaryController, value.trim());
-    HapticFeedback.selectionClick();
-  }
-
-  void _applyDropToAmount(
-    String value,
-    TextEditingController controller,
-    String undoKey,
-  ) {
-    final digits = _extractDigitsOnly(value);
-    if (digits == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('هذا النص ليس مبلغًا صالحًا')),
-      );
-      return;
-    }
-
-    _pushUndo(undoKey, controller.text);
-    _setControllerText(controller, _formatThousands(digits));
-    HapticFeedback.selectionClick();
-  }
-
   Future<void> _save() async {
     if (_isSaving) return;
 
@@ -384,8 +287,11 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     setState(() => _isSaving = true);
 
     try {
+      // الحركة اللي انعدّلت فعلًا (للتراجع)
+      TransactionModel? edited;
       if (widget.existing != null) {
         final tx = widget.existing!;
+        final before = TxEditSnapshot.of(tx);
         tx.beneficiary = _beneficiaryController.text.trim();
         tx.amount = amount1;
         tx.secondAmount = secondAmount;
@@ -398,8 +304,11 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           tx.companyMovementType = _companyMovement;
           tx.destination = _destination;
         }
-        TxHistoryService.annotate([tx.id], 'تعديل يدوي');
         await tx.save();
+        if (!before.sameAs(TxEditSnapshot.of(tx))) {
+          await TxUndo.rememberEdit(tx.id, before);
+          edited = tx;
+        }
       } else {
         final tx = TransactionModel(
           id: DatabaseService.newTransactionId(),
@@ -423,9 +332,26 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('تم الحفظ بنجاح ✅')));
+      final messenger = ScaffoldMessenger.of(context);
+      if (edited != null) {
+        final tx = edited;
+        AppMessages.showWithUndo(messenger, 'تم حفظ التعديل', () async {
+          final ok = await TxUndo.undoEdit(tx);
+          messenger
+            ..hideCurrentSnackBar()
+            ..showSnackBar(
+              SnackBar(
+                content: Text(
+                  ok ? 'تم التراجع عن التعديل' : 'تعذّر التراجع عن التعديل',
+                ),
+              ),
+            );
+        });
+      } else {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('تم الحفظ بنجاح ✅')),
+        );
+      }
       Navigator.pop(context, true);
     } catch (e) {
       if (!mounted) return;
@@ -502,10 +428,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
   }
 
   Widget _buildRawInputCard() {
-    final parts = _draggableParts;
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 260),
+    return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: _cardColor,
@@ -526,7 +449,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
               Icon(Icons.text_fields_rounded),
               SizedBox(width: 8),
               Text(
-                'النص الخام',
+                'النص',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
               ),
             ],
@@ -564,153 +487,60 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                     ),
             ),
           ),
-          const SizedBox(height: 14),
-          if (parts.isNotEmpty) ...[
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: parts.map(_buildDraggableChip).toList(),
-            ),
-          ],
         ],
       ),
     );
   }
 
-  Widget _buildDraggableChip(String text) {
-    final chip = Container(
-      constraints: const BoxConstraints(maxWidth: 220),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        color: _isDark ? _cs.primaryContainer : Colors.blue.shade50,
-        border: Border.all(
-          color: _isDark
-              ? _cs.primary.withValues(alpha: .35)
-              : Colors.blue.shade100,
-        ),
-      ),
-      child: Text(
-        text,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          color: _isDark ? _cs.onPrimaryContainer : Colors.blueGrey.shade900,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-
-    return LongPressDraggable<String>(
-      data: text,
-      feedback: Material(
-        color: Colors.transparent,
-        child: Transform.scale(
-          scale: 1.04,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 240),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(18),
-              color: Colors.indigo.shade400,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.indigo.withValues(alpha: 0.28),
-                  blurRadius: 16,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Text(
-              text,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ),
-      ),
-      childWhenDragging: Opacity(opacity: 0.35, child: chip),
-      child: chip,
-    );
-  }
-
-  Widget _buildDropTextField({
+  Widget _buildTextFieldCard({
     required String title,
     required IconData icon,
     required TextEditingController controller,
     String? hint,
-    required String undoKey,
-    required void Function(String value) onAccept,
-    bool Function(String? value)? canAccept,
     TextInputType? keyboardType,
     List<TextInputFormatter>? inputFormatters,
   }) {
-    return DragTarget<String>(
-      onWillAccept: canAccept ?? (_) => true,
-      onAccept: onAccept,
-      builder: (context, candidateData, rejectedData) {
-        final isHovering = candidateData.isNotEmpty;
-
-        return AnimatedContainer(
-          duration: const Duration(milliseconds: 220),
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: isHovering
-                ? (_isDark ? _cs.primaryContainer : Colors.blue.shade50)
-                : _cardColor,
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(
-              color: isHovering ? _focusBorder : _softBorder,
-              width: isHovering ? 1.4 : 1.0,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: isHovering
-                    ? Colors.blue.withValues(alpha: 0.10)
-                    : _shadowColor,
-                blurRadius: 16,
-                offset: const Offset(0, 7),
-              ),
-            ],
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _cardColor,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: _softBorder),
+        boxShadow: [
+          BoxShadow(
+            color: _shadowColor,
+            blurRadius: 16,
+            offset: const Offset(0, 7),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  Icon(icon, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 15.5,
-                      ),
-                    ),
+              Icon(icon, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15.5,
                   ),
-                  IconButton(
-                    tooltip: 'تراجع',
-                    onPressed: _undoStacks[undoKey]!.isEmpty
-                        ? null
-                        : () => setState(() => _undoField(undoKey, controller)),
-                    icon: const Icon(Icons.undo_rounded),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: controller,
-                keyboardType: keyboardType,
-                inputFormatters: inputFormatters,
-                decoration: _fieldDecoration(hintText: hint),
+                ),
               ),
             ],
           ),
-        );
-      },
+          const SizedBox(height: 10),
+          TextField(
+            controller: controller,
+            keyboardType: keyboardType,
+            inputFormatters: inputFormatters,
+            decoration: _fieldDecoration(hintText: hint),
+          ),
+        ],
+      ),
     );
   }
 
@@ -931,15 +761,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           backgroundColor: Colors.transparent,
           foregroundColor: _cs.onSurface,
           title: Text(isEdit ? 'تعديل الحركة' : 'إضافة حركة'),
-          actions: [
-            if (isEdit)
-              IconButton(
-                tooltip: 'سجل التعديلات',
-                onPressed: () =>
-                    openTransactionHistory(context, widget.existing!),
-                icon: const Icon(Icons.history_rounded),
-              ),
-          ],
         ),
         body: ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -987,30 +808,22 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                 ),
               ),
 
-            _buildDropTextField(
+            _buildTextFieldCard(
               title: 'اسم المستفيد',
               icon: Icons.person_rounded,
               controller: _beneficiaryController,
-              undoKey: 'beneficiary',
-              onAccept: (value) =>
-                  setState(() => _applyDropToBeneficiary(value)),
             ),
             const SizedBox(height: 16),
 
-            _buildDropTextField(
+            _buildTextFieldCard(
               title: 'المبلغ الأول',
               icon: Icons.payments_rounded,
               controller: _amountController,
-              undoKey: 'amount1',
               keyboardType: TextInputType.number,
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp(r'[\d٠-٩۰-۹]')),
                 DotThousandsInputFormatter(),
               ],
-              canAccept: _canAcceptAmount,
-              onAccept: (value) => setState(() {
-                _applyDropToAmount(value, _amountController, 'amount1');
-              }),
             ),
             const SizedBox(height: 12),
 
@@ -1023,21 +836,16 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
 
             const SizedBox(height: 16),
 
-            _buildDropTextField(
+            _buildTextFieldCard(
               title: 'المبلغ الثاني',
               icon: Icons.account_balance_wallet_rounded,
               controller: _secondAmountController,
               hint: 'اختياري',
-              undoKey: 'amount2',
               keyboardType: TextInputType.number,
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp(r'[\d٠-٩۰-۹]')),
                 DotThousandsInputFormatter(),
               ],
-              canAccept: _canAcceptAmount,
-              onAccept: (value) => setState(() {
-                _applyDropToAmount(value, _secondAmountController, 'amount2');
-              }),
             ),
             const SizedBox(height: 12),
 

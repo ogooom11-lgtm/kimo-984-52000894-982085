@@ -167,6 +167,27 @@ class AppMessages {
       );
   }
 
+  /// رسالة نجاح مع زر «تراجع». [messenger] بينجاب قبل أي انتظار حتى تضل
+  /// الرسالة شغالة لو الشاشة تسكّرت أو انبنت من جديد.
+  static void showWithUndo(
+    ScaffoldMessengerState messenger,
+    String text,
+    VoidCallback onUndo,
+  ) {
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          key: ValueKey<String>(
+            '$_kindKeyPrefix${AppMessageKind.success.name}',
+          ),
+          content: Text(text),
+          duration: const Duration(seconds: 6),
+          action: SnackBarAction(label: 'تراجع', onPressed: onUndo),
+        ),
+      );
+  }
+
   static AppMessageKind? _kindFromKey(Key? key) {
     if (key is! ValueKey<String>) return null;
     final v = key.value;

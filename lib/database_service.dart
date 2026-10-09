@@ -9,8 +9,8 @@ class DatabaseService {
   static const String transactionsBoxName = "transactions";
   static const String settingsBoxName = "settings";
 
-  /// سجل تعديلات الحركات (خرائط بسيطة بدون Adapter) — راجع TxHistoryService
-  static const String txHistoryBoxName = "tx_edit_history";
+  /// شكل الحركات قبل آخر تعديل (للتراجع) — راجع TxUndo
+  static const String txUndoBoxName = "tx_undo";
 
   /// تفضيلات عرض بسيطة (خرائط بدون Adapter) — مثل خيارات صورة المشاركة
   static const String uiPrefsBoxName = "ui_prefs";
@@ -23,8 +23,7 @@ class DatabaseService {
     await Hive.openBox<Account>(accountsBoxName);
     await Hive.openBox<TransactionModel>(transactionsBoxName);
     await Hive.openBox<Settings>(settingsBoxName);
-    // صندوق كسول: السجل قد يكبر كثيرًا، فلا نحمّله كله في الذاكرة
-    await _openLogBox(txHistoryBoxName, lazy: true);
+    await _openLogBox(txUndoBoxName);
     await _openLogBox(uiPrefsBoxName);
 
     // ✅ اختيارية: ترحيل مفاتيح int قديمة (لو كنت سابقًا تستخدم put(id))
@@ -33,15 +32,13 @@ class DatabaseService {
 
   /// صناديق السجلات والتفضيلات: إذا تلف الملف لا نمنع تشغيل التطبيق، نحذفه
   /// ونفتح جديدًا
-  static Future<void> _openLogBox(String name, {bool lazy = false}) async {
-    Future<void> open() =>
-        lazy ? Hive.openLazyBox<dynamic>(name) : Hive.openBox<dynamic>(name);
+  static Future<void> _openLogBox(String name) async {
     try {
-      await open();
+      await Hive.openBox<dynamic>(name);
     } catch (_) {
       try {
         await Hive.deleteBoxFromDisk(name);
-        await open();
+        await Hive.openBox<dynamic>(name);
       } catch (_) {}
     }
   }

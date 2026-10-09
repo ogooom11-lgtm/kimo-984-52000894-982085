@@ -12,7 +12,6 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/destinations.dart';
-import '../services/tx_history_service.dart';
 import '../widgets/destination_picker.dart' show kDestColor;
 
 const _kGreen = Color(0xFF10B981);
@@ -722,9 +721,7 @@ class _CurrencySplitDialogState extends State<_CurrencySplitDialog> {
     );
     if (!ok || !mounted) return;
     setState(() => _busy = true);
-    final source = 'أداة تقسيم المبالغ (÷ ${_fmtNum(divisor)})';
     for (final tx in matching) {
-      TxHistoryService.annotate([tx.id], source);
       if (tx.currency == _selected) tx.amount /= divisor;
       if (tx.secondAmount != null && tx.secondCurrency == _selected) {
         tx.secondAmount = tx.secondAmount! / divisor;
