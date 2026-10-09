@@ -167,20 +167,19 @@ class AppMessages {
       );
   }
 
-  /// رسالة نجاح مع زر «تراجع». [messenger] بينجاب قبل أي انتظار حتى تضل
-  /// الرسالة شغالة لو الشاشة تسكّرت أو انبنت من جديد.
+  /// رسالة مع زر «تراجع» (نجاح افتراضيًا). [messenger] بينجاب قبل أي
+  /// انتظار حتى تضل الرسالة شغالة لو الشاشة تسكّرت أو انبنت من جديد.
   static void showWithUndo(
     ScaffoldMessengerState messenger,
     String text,
-    VoidCallback onUndo,
-  ) {
+    VoidCallback onUndo, {
+    AppMessageKind kind = AppMessageKind.success,
+  }) {
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          key: ValueKey<String>(
-            '$_kindKeyPrefix${AppMessageKind.success.name}',
-          ),
+          key: ValueKey<String>('$_kindKeyPrefix${kind.name}'),
           content: Text(text),
           duration: const Duration(seconds: 6),
           action: SnackBarAction(label: 'تراجع', onPressed: onUndo),

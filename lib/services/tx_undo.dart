@@ -1,11 +1,12 @@
 // lib/services/tx_undo.dart
 // -------------------------------------------------------------
-// التراجع عن آخر تعديل للحركة وعن التسليم.
+// التراجع عن آخر تعديل للحركة وعن التسليم والإلغاء.
 //  • شكل الحركة قبل آخر تعديل (من صفحة التعديل) بينحفظ بصندوق صغير
 //    (tx_undo) مفتاحه رقم الحركة، فالتراجع بيضل متاح حتى لو تسكّر التطبيق،
 //    ومرة وحدة لكل تعديل.
-//  • التسليم: بعده مباشرة التراجع بيرجّع الحالة متل ما كانت بالضبط، ولاحقًا
-//    «تراجع عن التسليم» بيرجّع الحركة مضافة.
+//  • التسليم والإلغاء: بعدهن مباشرة التراجع بيرجّع الحالة متل ما كانت
+//    بالضبط، ولاحقًا «تراجع عن التسليم/الإلغاء» بيرجّع الحركة مضافة (وحركة
+//    الشركة لنوعها: إرسال أو استقبال).
 // -------------------------------------------------------------
 
 import 'package:hive/hive.dart';
@@ -113,21 +114,34 @@ class TxEditSnapshot {
   }
 }
 
-/// حالة الحركة قبل التسليم (للتراجع الفوري)
+/// حالة الحركة قبل التسليم أو الإلغاء (للتراجع الفوري)
 class TxStatusSnapshot {
   final TransactionStatus status;
   final DateTime? receivedAt;
   final DateTime? cancelledAt;
 
-  const TxStatusSnapshot(this.status, this.receivedAt, this.cancelledAt);
+  /// حركات الشركات: الإلغاء جزء من نوع الحركة
+  final CompanyMovementType? companyMovementType;
 
-  factory TxStatusSnapshot.of(TransactionModel t) =>
-      TxStatusSnapshot(t.status, t.receivedAt, t.cancelledAt);
+  const TxStatusSnapshot(
+    this.status,
+    this.receivedAt,
+    this.cancelledAt, [
+    this.companyMovementType,
+  ]);
+
+  factory TxStatusSnapshot.of(TransactionModel t) => TxStatusSnapshot(
+    t.status,
+    t.receivedAt,
+    t.cancelledAt,
+    t.companyMovementType,
+  );
 
   void applyTo(TransactionModel t) {
     t.status = status;
     t.receivedAt = receivedAt;
     t.cancelledAt = cancelledAt;
+    t.companyMovementType = companyMovementType;
   }
 }
 
@@ -225,6 +239,58 @@ class TxUndo {
   static Future<void> undoDelivery(TransactionModel t) async {
     if (!t.isInBox) return;
     t.applyStatus(TransactionStatus.added);
+    await t.save();
+  }
+
+  // ===========================
+  // الإلغاء
+  // ===========================
+
+  /// الحركة ملغاة؟ (مكتب أو شركة)
+  static bool isCancelled(TransactionModel t) => t.companyMovementType != null
+      ? (t.effectiveCompanyMovement?.isCancelled ?? false)
+      : t.status == TransactionStatus.cancelled;
+
+  /// يلغي الحركة ويرجّع حالتها قبل الإلغاء (للتراجع الفوري). [company] =
+  /// الحركة بحساب شركة: الإلغاء بيصير جزء من نوع الحركة حتى تنحسب
+  /// بالإحصائيات بتاريخ إلغائها.
+  static Future<TxStatusSnapshot> cancel(
+    TransactionModel t, {
+    required bool company,
+  }) async {
+    final before = TxStatusSnapshot.of(t);
+    final movement = t.companyMovementType;
+    if (company && movement != null) {
+      // ما منغيّر تاريخ الإلغاء لحركة ملغاة من قبل
+      if (!(t.effectiveCompanyMovement?.isCancelled ?? false) ||
+          t.cancelledAt == null) {
+        t.cancelledAt = DateTime.now();
+      }
+      t.companyMovementType = movement.cancelled;
+    } else if (t.status != TransactionStatus.cancelled ||
+        t.cancelledAt == null) {
+      // نفس الشي: حركة ملغاة من قبل بيضل تاريخ إلغائها
+      t.applyStatus(TransactionStatus.cancelled);
+    }
+    await t.save();
+    return before;
+  }
+
+  /// «تراجع عن الإلغاء» لاحقًا: المكتب بترجع مضافة، والشركة بترجع لنوعها
+  /// (إرسال أو استقبال)
+  static Future<void> undoCancel(TransactionModel t) async {
+    if (!t.isInBox) return;
+    final movement = t.companyMovementType;
+    if (movement != null) {
+      t.companyMovementType = movement.isSent
+          ? CompanyMovementType.sent
+          : CompanyMovementType.received;
+      t.status = TransactionStatus.added;
+      t.receivedAt = null;
+      t.cancelledAt = null;
+    } else {
+      t.applyStatus(TransactionStatus.added);
+    }
     await t.save();
   }
 }

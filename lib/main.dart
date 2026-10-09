@@ -1,7 +1,10 @@
+import 'dart:async';
+import 'dart:io' show Directory;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/settings_screen.dart';
@@ -10,24 +13,32 @@ import 'database_service.dart';
 import 'models.dart';
 import 'theme/app_theme.dart';
 import 'screens/timeline_analytics_screen.dart';
+import 'services/app_lock.dart';
 import 'widgets/app_messages.dart';
-
-/// من هاليوم وطالع التطبيق ما بيفتح (صفحة بيضا مع رسالة خطأ)
-final DateTime _kLockDate = DateTime(2026, 10, 18);
-
-bool get _appLocked => !DateTime.now().isBefore(_kLockDate);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  if (_appLocked) {
+  try {
+    await Hive.initFlutter();
+  } catch (e, s) {
+    debugPrint('Startup error: $e');
+    debugPrintStack(stackTrace: s);
+    if (AppLock.dateReached) {
+      runApp(const AppErrorScreen());
+      return;
+    }
+    rethrow;
+  }
+
+  // القفل (صفحة بيضا مع رسالة خطأ): التاريخ وصل هلق، أو وصل قبل وانسجّل
+  // حتى لو رجّعوا تاريخ الموبايل لورا
+  if (await AppLock.init(dir: await _appFilesDir())) {
     runApp(const AppErrorScreen());
     return;
   }
 
   try {
-    await Hive.initFlutter();
-
     Hive.registerAdapter(TransactionStatusAdapter());
     Hive.registerAdapter(AccountTypeAdapter());
     Hive.registerAdapter(CompanyMovementTypeAdapter());
@@ -44,6 +55,15 @@ void main() async {
     debugPrint('Startup error: $e');
     debugPrintStack(stackTrace: s);
     rethrow;
+  }
+}
+
+/// مجلد ملفات التطبيق (فيه نسخة تانية من علامة القفل)
+Future<Directory?> _appFilesDir() async {
+  try {
+    return await getApplicationSupportDirectory();
+  } catch (_) {
+    return null;
   }
 }
 
@@ -131,6 +151,7 @@ class MainLayout extends StatefulWidget {
 
 class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   int _currentIndex = 0;
+  Timer? _lockTimer;
 
   static const List<Widget> _pages = [
     HomeScreen(),
@@ -143,10 +164,16 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // التاريخ ممكن يوصل والتطبيق مفتوح
+    _lockTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _checkLock(),
+    );
   }
 
   @override
   void dispose() {
+    _lockTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -154,9 +181,14 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // التطبيق كان بالخلفية ورجع بعد تاريخ القفل
-    if (state == AppLifecycleState.resumed && _appLocked) {
-      runApp(const AppErrorScreen());
-    }
+    if (state == AppLifecycleState.resumed) _checkLock();
+  }
+
+  /// وصل تاريخ القفل؟ منسجّله ومنقفل
+  void _checkLock() {
+    if (!AppLock.check()) return;
+    _lockTimer?.cancel();
+    runApp(const AppErrorScreen());
   }
 
   @override

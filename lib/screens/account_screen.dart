@@ -92,9 +92,6 @@ class _AccountScreenState extends State<AccountScreen> {
   String _query = '';
   final FocusNode _searchFocus = FocusNode();
   bool _searchFocused = false;
-  final Set<int> _selectedTxIds = {};
-
-  bool get _selectionMode => _selectedTxIds.isNotEmpty;
 
   @override
   void initState() {
@@ -135,29 +132,7 @@ class _AccountScreenState extends State<AccountScreen> {
     return fields.contains(q);
   }
 
-  void _clearSelection() {
-    setState(() => _selectedTxIds.clear());
-  }
-
-  void _toggleTransactionSelection(TransactionModel tx) {
-    setState(() {
-      if (_selectedTxIds.contains(tx.id)) {
-        _selectedTxIds.remove(tx.id);
-      } else {
-        _selectedTxIds.add(tx.id);
-      }
-    });
-  }
-
-  bool _isSelected(TransactionModel tx) => _selectedTxIds.contains(tx.id);
-
-  List<TransactionModel> _selectedTransactions() {
-    return DatabaseService.transactionsBox.values
-        .where((tx) => _selectedTxIds.contains(tx.id))
-        .toList();
-  }
-
-  Future<bool> _confirmBulkAction(String title, String message) async {
+  Future<bool> _confirmAction(String title, String message) async {
     return await showDialog<bool>(
           context: context,
           builder: (ctx) => Directionality(
@@ -218,117 +193,26 @@ class _AccountScreenState extends State<AccountScreen> {
     );
   }
 
-  Future<void> _moveTransactions(List<TransactionModel> items) async {
-    if (items.isEmpty) return;
+  /// نقل حركة لحساب تاني من نفس النوع
+  Future<void> _moveTransaction(TransactionModel tx) async {
     final target = await _pickTargetAccount(
       excludeAccountId: widget.account.id,
     );
     if (target == null) return;
 
-    final ok = await _confirmBulkAction(
+    final ok = await _confirmAction(
       'تأكيد النقل',
-      'سيتم نقل ${items.length} حركة إلى حساب "${target.name}".',
+      'سيتم نقل الحركة إلى حساب "${target.name}".',
     );
     if (!ok) return;
 
-    for (final tx in items) {
-      tx.accountId = target.id;
-      await tx.save();
-    }
+    tx.accountId = target.id;
+    await tx.save();
 
     if (!mounted) return;
-    _clearSelection();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('تم نقل ${items.length} حركة إلى ${target.name}')),
-    );
-  }
-
-  Future<void> _setTransactionsStatus(
-    List<TransactionModel> items,
-    TransactionStatus status,
-  ) async {
-    if (items.isEmpty) return;
-    final label = _statusLabel(status);
-    final ok = await _confirmBulkAction(
-      'تأكيد تغيير الحالة',
-      'سيتم تحويل ${items.length} حركة إلى "$label".',
-    );
-    if (!ok) return;
-
-    final now = DateTime.now();
-    // حالة الحركات قبل التسليم، للتراجع
-    final delivered = <(TransactionModel, TxStatusSnapshot)>[];
-    for (final tx in items) {
-      final movement = tx.companyMovementType;
-      if (_isCompanyAccount && movement != null) {
-        // حركات الشركات: الإلغاء جزء من نوع الحركة (مثل الإلغاء الفردي)،
-        // حتى تُحسب في الإحصائيات بتاريخ إلغائها.
-        final base = movement.isSent
-            ? CompanyMovementType.sent
-            : CompanyMovementType.received;
-        if (status == TransactionStatus.cancelled) {
-          if (!(tx.effectiveCompanyMovement?.isCancelled ?? false) ||
-              tx.cancelledAt == null) {
-            tx.cancelledAt = now;
-          }
-          tx.companyMovementType = base.cancelled;
-        } else if (status == TransactionStatus.added) {
-          tx.companyMovementType = base;
-          tx.cancelledAt = null;
-        }
-        tx.status = TransactionStatus.added;
-        tx.receivedAt = null;
-      } else {
-        if (status == TransactionStatus.received) {
-          delivered.add((tx, TxStatusSnapshot.of(tx)));
-        }
-        tx.applyStatus(status, at: now);
-      }
-      await tx.save();
-    }
-
-    if (!mounted) return;
-    _clearSelection();
-    final messenger = ScaffoldMessenger.of(context);
-    if (delivered.isEmpty) {
-      messenger.showSnackBar(
-        SnackBar(content: Text('تم تحديث ${items.length} حركة')),
-      );
-      return;
-    }
-    AppMessages.showWithUndo(
-      messenger,
-      'تم تسليم ${delivered.length} حركة',
-      () async {
-        for (final (tx, before) in delivered) {
-          await TxUndo.restoreStatus(tx, before);
-        }
-        _say(messenger, 'تم التراجع عن التسليم');
-      },
-    );
-  }
-
-  Future<void> _deleteTransactions(List<TransactionModel> items) async {
-    if (items.isEmpty) return;
-    final ok = await _confirmBulkAction(
-      'تأكيد الحذف',
-      'سيتم حذف ${items.length} حركة نهائيًا. هل تريد المتابعة؟',
-    );
-    if (!ok) return;
-
-    for (final tx in items) {
-      await tx.delete();
-    }
-
-    if (!mounted) return;
-    _clearSelection();
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text('تم حذف ${items.length} حركة')));
-  }
-
-  Future<void> _moveOneTransaction(TransactionModel tx) async {
-    await _moveTransactions([tx]);
+    ).showSnackBar(SnackBar(content: Text('تم نقل الحركة إلى ${target.name}')));
   }
 
   // 🔹 مقارنة يومين بدون مراعاة الساعة
@@ -799,11 +683,7 @@ class _AccountScreenState extends State<AccountScreen> {
       formatSmartTime: _formatRelativeOrExactTime,
       formatAmount: _formatAmount,
       statusLabel: _movementLabel,
-      selectionMode: _selectionMode,
-      isSelected: _isSelected,
-      onToggleSelected: _toggleTransactionSelection,
-      onStartSelection: _toggleTransactionSelection,
-      onMoveRequested: _moveOneTransaction,
+      onMoveRequested: _moveTransaction,
     );
   }
 
@@ -859,87 +739,35 @@ class _AccountScreenState extends State<AccountScreen> {
           child: Scaffold(
             appBar: AppBar(
               title: Text(
-                _selectionMode
-                    ? 'المحددة: ${_selectedTxIds.length}'
-                    : "${widget.account.type.label}: ${widget.account.name}",
+                "${widget.account.type.label}: ${widget.account.name}",
               ),
-              leading: _selectionMode
-                  ? IconButton(
-                      tooltip: 'إلغاء التحديد',
-                      icon: const Icon(Icons.close_rounded),
-                      onPressed: _clearSelection,
-                    )
-                  : null,
-              actions: _selectionMode
-                  ? [
-                      if (!_isCompanyAccount)
-                        IconButton(
-                          tooltip: 'تسليم المحدد',
-                          icon: const Icon(Icons.verified_rounded),
-                          onPressed: () => _setTransactionsStatus(
-                            _selectedTransactions(),
-                            TransactionStatus.received,
-                          ),
-                        ),
-                      IconButton(
-                        tooltip: 'إلغاء المحدد',
-                        icon: const Icon(Icons.cancel_rounded),
-                        onPressed: () => _setTransactionsStatus(
-                          _selectedTransactions(),
-                          TransactionStatus.cancelled,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'إرجاع كمضافة',
-                        icon: const Icon(Icons.add_circle_rounded),
-                        onPressed: () => _setTransactionsStatus(
-                          _selectedTransactions(),
-                          TransactionStatus.added,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'نقل المحدد',
-                        icon: const Icon(Icons.drive_file_move_rounded),
-                        onPressed: () =>
-                            _moveTransactions(_selectedTransactions()),
-                      ),
-                      IconButton(
-                        tooltip: 'حذف المحدد',
-                        icon: const Icon(Icons.delete_rounded),
-                        onPressed: () =>
-                            _deleteTransactions(_selectedTransactions()),
-                      ),
-                    ]
-                  : [
-                      IconButton(
-                        tooltip: "تفصيل الحساب",
-                        icon: const Icon(Icons.bar_chart_rounded),
-                        onPressed: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                ShareImagePage(account: widget.account),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                    ],
-            ),
-            floatingActionButton: _selectionMode
-                ? null
-                : FloatingActionButton.extended(
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) =>
-                              AddEditTransactionScreen(account: widget.account),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.add_rounded),
-                    label: const Text("إضافة حركة"),
+              actions: [
+                IconButton(
+                  tooltip: "تفصيل الحساب",
+                  icon: const Icon(Icons.bar_chart_rounded),
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ShareImagePage(account: widget.account),
+                    ),
                   ),
+                ),
+                const SizedBox(width: 6),
+              ],
+            ),
+            floatingActionButton: FloatingActionButton.extended(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        AddEditTransactionScreen(account: widget.account),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.add_rounded),
+              label: const Text("إضافة حركة"),
+            ),
             body: LayoutBuilder(
               builder: (context, constraints) {
                 final cs = Theme.of(context).colorScheme;
@@ -1107,11 +935,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                   formatSmartTime: _formatRelativeOrExactTime,
                                   formatAmount: _formatAmount,
                                   statusLabel: _movementLabel,
-                                  selectionMode: _selectionMode,
-                                  isSelected: _isSelected,
-                                  onToggleSelected: _toggleTransactionSelection,
-                                  onStartSelection: _toggleTransactionSelection,
-                                  onMoveRequested: _moveOneTransaction,
+                                  onMoveRequested: _moveTransaction,
                                 ),
 
                               if (!_isCompanyAccount && cancelled.isNotEmpty)
@@ -1144,11 +968,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                   formatSmartTime: _formatRelativeOrExactTime,
                                   formatAmount: _formatAmount,
                                   statusLabel: _movementLabel,
-                                  selectionMode: _selectionMode,
-                                  isSelected: _isSelected,
-                                  onToggleSelected: _toggleTransactionSelection,
-                                  onStartSelection: _toggleTransactionSelection,
-                                  onMoveRequested: _moveOneTransaction,
+                                  onMoveRequested: _moveTransaction,
                                 ),
 
                               if (!_isCompanyAccount && added.isNotEmpty)
@@ -1176,11 +996,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                   formatSmartTime: _formatRelativeOrExactTime,
                                   formatAmount: _formatAmount,
                                   statusLabel: _movementLabel,
-                                  selectionMode: _selectionMode,
-                                  isSelected: _isSelected,
-                                  onToggleSelected: _toggleTransactionSelection,
-                                  onStartSelection: _toggleTransactionSelection,
-                                  onMoveRequested: _moveOneTransaction,
+                                  onMoveRequested: _moveTransaction,
                                 ),
 
                               const SizedBox(height: 70),
@@ -1278,10 +1094,6 @@ class _StatusSection extends StatelessWidget {
   final VoidCallback onToggleExpand;
   final VoidCallback onCopyRequested;
   final void Function(TransactionModel) onCopyItemRequested;
-  final bool selectionMode;
-  final bool Function(TransactionModel) isSelected;
-  final void Function(TransactionModel) onToggleSelected;
-  final void Function(TransactionModel) onStartSelection;
   final Future<void> Function(TransactionModel) onMoveRequested;
 
   // منسّقات من الأعلى
@@ -1301,10 +1113,6 @@ class _StatusSection extends StatelessWidget {
     required this.onToggleExpand,
     required this.onCopyRequested,
     required this.onCopyItemRequested,
-    required this.selectionMode,
-    required this.isSelected,
-    required this.onToggleSelected,
-    required this.onStartSelection,
     required this.onMoveRequested,
     required this.formatDay,
     required this.formatSmartTime,
@@ -1387,6 +1195,28 @@ class _StatusSection extends StatelessWidget {
             if (expanded) const Divider(height: 0),
             if (expanded)
               ...items.map((t) {
+                // إلغاء بعد التأكيد، ورسالة فيها «تراجع»
+                Future<void> cancelWithUndo(
+                  Future<bool?> Function(BuildContext) confirm,
+                ) async {
+                  final messenger = ScaffoldMessenger.of(context);
+                  final ok = await confirm(context);
+                  if (ok != true) return;
+                  final before = await TxUndo.cancel(
+                    t,
+                    company: account?.type.isCompany == true,
+                  );
+                  AppMessages.showWithUndo(
+                    messenger,
+                    'تم إلغاء الحركة',
+                    () async {
+                      await TxUndo.restoreStatus(t, before);
+                      _say(messenger, 'تم التراجع عن الإلغاء');
+                    },
+                    kind: AppMessageKind.error,
+                  );
+                }
+
                 // خلفيات السحب
                 final cancelBg = Container(
                   alignment: Alignment.centerLeft,
@@ -1436,38 +1266,12 @@ class _StatusSection extends StatelessWidget {
                     key: ValueKey(
                       "tx-${t.key}-${t.date.millisecondsSinceEpoch}",
                     ),
-                    direction: selectionMode
-                        ? DismissDirection.none
-                        : DismissDirection.horizontal,
+                    direction: DismissDirection.horizontal,
                     background: cancelBg, // يمين
                     secondaryBackground: editBg, // يسار
                     confirmDismiss: (dir) async {
                       if (dir == DismissDirection.startToEnd) {
-                        final ok = await _confirmCancel(context);
-                        if (ok == true) {
-                          if (account?.type.isCompany == true &&
-                              t.companyMovementType != null) {
-                            // لا نغيّر تاريخ الإلغاء لحركة ملغية مسبقًا
-                            if (!(t.effectiveCompanyMovement?.isCancelled ??
-                                    false) ||
-                                t.cancelledAt == null) {
-                              t.cancelledAt = DateTime.now();
-                            }
-                            t.companyMovementType =
-                                t.companyMovementType!.cancelled;
-                          } else {
-                            t.applyStatus(TransactionStatus.cancelled);
-                          }
-                          await t.save();
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: const Text("تم إلغاء الحركة"),
-                                backgroundColor: cs.error,
-                              ),
-                            );
-                          }
-                        }
+                        await cancelWithUndo(_confirmCancel);
                         return false;
                       } else if (dir == DismissDirection.endToStart) {
                         if (context.mounted) {
@@ -1495,10 +1299,6 @@ class _StatusSection extends StatelessWidget {
                       formatSmartTime: formatSmartTime,
                       formatAmount: formatAmount,
                       statusLabel: statusLabel,
-                      selected: isSelected(t),
-                      selectionMode: selectionMode,
-                      onToggleSelected: () => onToggleSelected(t),
-                      onStartSelection: () => onStartSelection(t),
                       onCopyItemRequested: onCopyItemRequested,
                       onMoveRequested: () => onMoveRequested(t),
                       onEdit: () {
@@ -1527,25 +1327,8 @@ class _StatusSection extends StatelessWidget {
                           },
                         );
                       },
-                      onSetCancelled: (Future<bool?> Function() confirm) async {
-                        final ok = await confirm();
-                        if (ok == true) {
-                          if (account?.type.isCompany == true &&
-                              t.companyMovementType != null) {
-                            // لا نغيّر تاريخ الإلغاء لحركة ملغية مسبقًا
-                            if (!(t.effectiveCompanyMovement?.isCancelled ??
-                                    false) ||
-                                t.cancelledAt == null) {
-                              t.cancelledAt = DateTime.now();
-                            }
-                            t.companyMovementType =
-                                t.companyMovementType!.cancelled;
-                          } else {
-                            t.applyStatus(TransactionStatus.cancelled);
-                          }
-                          await t.save();
-                        }
-                      },
+                      onSetCancelled: (confirm) =>
+                          cancelWithUndo((_) => confirm()),
                       onDelete: () async {
                         await t.delete();
                       },
@@ -1570,10 +1353,6 @@ class _TxBubble extends StatelessWidget {
   final String Function(DateTime) formatSmartTime;
   final String Function(double) formatAmount;
   final String Function(TransactionModel) statusLabel;
-  final bool selected;
-  final bool selectionMode;
-  final VoidCallback onToggleSelected;
-  final VoidCallback onStartSelection;
   final void Function(TransactionModel) onCopyItemRequested;
   final Future<void> Function() onMoveRequested;
   final VoidCallback onEdit;
@@ -1590,10 +1369,6 @@ class _TxBubble extends StatelessWidget {
     required this.formatSmartTime,
     required this.formatAmount,
     required this.statusLabel,
-    required this.selected,
-    required this.selectionMode,
-    required this.onToggleSelected,
-    required this.onStartSelection,
     required this.onCopyItemRequested,
     required this.onMoveRequested,
     required this.onEdit,
@@ -1661,12 +1436,16 @@ class _TxBubble extends StatelessWidget {
     _say(messenger, ok ? 'تم التراجع عن التعديل' : 'تعذّر التراجع عن التعديل');
   }
 
-  /// الضغط على الحركة: تسليم / إلغاء / تعديل، والتراجع عن التسليم والتعديل
+  /// «تراجع عن الإلغاء»: الحركة بترجع مضافة (والشركة لنوعها)
+  Future<void> _undoCancel(ScaffoldMessengerState messenger) async {
+    await TxUndo.undoCancel(t);
+    _say(messenger, 'تم التراجع عن الإلغاء');
+  }
+
+  /// الضغط على الحركة: تسليم / إلغاء / تعديل، والتراجع عنهن
   Future<void> _showActions(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
-    final cancelled = _isCompany
-        ? (t.effectiveCompanyMovement?.isCancelled ?? false)
-        : t.status == TransactionStatus.cancelled;
+    final cancelled = TxUndo.isCancelled(t);
     final received = !_isCompany && t.status == TransactionStatus.received;
     final canUndoEdit = TxUndo.canUndoEdit(t.id);
     final action = await showModalBottomSheet<String>(
@@ -1706,12 +1485,18 @@ class _TxBubble extends StatelessWidget {
                   title: const Text('تراجع عن التسليم'),
                   onTap: () => Navigator.pop(ctx, 'undeliver'),
                 ),
-              ListTile(
-                enabled: !cancelled,
-                leading: const Icon(Icons.cancel_rounded, color: Colors.red),
-                title: const Text('إلغاء'),
-                onTap: () => Navigator.pop(ctx, 'cancel'),
-              ),
+              if (cancelled)
+                ListTile(
+                  leading: const Icon(Icons.undo_rounded, color: Colors.red),
+                  title: const Text('تراجع عن الإلغاء'),
+                  onTap: () => Navigator.pop(ctx, 'undo_cancel'),
+                )
+              else
+                ListTile(
+                  leading: const Icon(Icons.cancel_rounded, color: Colors.red),
+                  title: const Text('إلغاء'),
+                  onTap: () => Navigator.pop(ctx, 'cancel'),
+                ),
               ListTile(
                 leading: const Icon(Icons.edit_rounded, color: Colors.blue),
                 title: const Text('تعديل'),
@@ -1739,6 +1524,9 @@ class _TxBubble extends StatelessWidget {
       case 'cancel':
         await onSetCancelled(confirmCancel);
         break;
+      case 'undo_cancel':
+        await _undoCancel(messenger);
+        break;
       case 'edit':
         onEdit();
         break;
@@ -1757,8 +1545,7 @@ class _TxBubble extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
-        onTap: selectionMode ? onToggleSelected : () => _showActions(context),
-        onLongPress: onStartSelection,
+        onTap: () => _showActions(context),
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
@@ -1767,12 +1554,7 @@ class _TxBubble extends StatelessWidget {
               end: Alignment.bottomRight,
               colors: [cs.surfaceContainerHigh, cs.surface],
             ),
-            border: Border.all(
-              color: selected
-                  ? cs.primary.withOpacity(0.70)
-                  : cs.outlineVariant.withOpacity(0.25),
-              width: selected ? 1.6 : 1,
-            ),
+            border: Border.all(color: cs.outlineVariant.withOpacity(0.25)),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withOpacity(0.04),
@@ -1812,14 +1594,6 @@ class _TxBubble extends StatelessWidget {
                     // السطر العلوي: اسم + مبلغ + حالة + قائمة
                     Row(
                       children: [
-                        if (selectionMode) ...[
-                          Checkbox(
-                            value: selected,
-                            onChanged: (_) => onToggleSelected(),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          const SizedBox(width: 4),
-                        ],
                         // الاسم + أيقونة حالة
                         Flexible(
                           fit: FlexFit.tight,
@@ -1907,6 +1681,9 @@ class _TxBubble extends StatelessWidget {
                               case 'cancel':
                                 await onSetCancelled(confirmCancel);
                                 break;
+                              case 'undo_cancel':
+                                await _undoCancel(messenger);
+                                break;
                               case 'edit':
                                 onEdit();
                                 break;
@@ -1929,6 +1706,7 @@ class _TxBubble extends StatelessWidget {
                             final received =
                                 !isCompany &&
                                 t.status == TransactionStatus.received;
+                            final cancelled = TxUndo.isCancelled(t);
                             return [
                               if (!isCompany && !received)
                                 const PopupMenuItem(
@@ -1940,7 +1718,12 @@ class _TxBubble extends StatelessWidget {
                                   value: 'undeliver',
                                   child: Text("تراجع عن التسليم"),
                                 ),
-                              if (!isCompany)
+                              if (cancelled)
+                                const PopupMenuItem(
+                                  value: 'undo_cancel',
+                                  child: Text("تراجع عن الإلغاء"),
+                                )
+                              else if (!isCompany)
                                 const PopupMenuItem(
                                   value: 'cancel',
                                   child: Text("إلغاء الحركة"),
