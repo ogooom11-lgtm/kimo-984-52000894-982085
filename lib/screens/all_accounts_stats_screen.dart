@@ -30,13 +30,29 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
 
   DateTime _anchor = DateTime.now();
 
-  /// الشكل الثابت، مع تذكّر الفترة ونوع الحسابات ووضع العرض
+  /// الشكل الثابت، مع تذكّر الفترة ونوع الحسابات ووضع العرض، والأقسام
+  /// الظاهرة والحسابات المخفية (من «خيارات العرض»)
   AllStatsPrefs _prefs = _basePrefs();
 
   static AllStatsPrefs _basePrefs() {
     final saved = AllStatsPrefsStore.load();
     final details = saved.showGlobalCards && !saved.showQuickStats;
+
+    // من الأقسام منتذكّر الإظهار بس (الترتيب والأسماء والألوان الأصلية)
+    List<StatsMetricPref> shown(AccountType t) {
+      final list = [
+        for (final m in StatsMetric.values)
+          StatsMetricPref(m, visible: saved.prefOf(m, t).visible),
+      ];
+      return list.any((p) => p.visible)
+          ? list
+          : [for (final m in StatsMetric.values) StatsMetricPref(m)];
+    }
+
     return AllStatsPrefs(
+      officeMetrics: shown(AccountType.office),
+      companyMetrics: shown(AccountType.company),
+      hiddenAccounts: saved.hiddenAccounts,
       period: saved.period,
       accountType: saved.accountType,
       showQuickStats: !details,
@@ -1169,8 +1185,140 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   // Controls (خارج الصورة)
   // ==========================
 
-  Widget _buildControls(ColorScheme cs) {
+  /// خيارات العرض: الأقسام الظاهرة، والحسابات المخفية (ما بتظهر وما
+  /// بتنحسب بالمجموع). [accounts] = كل حسابات النوع المختار.
+  Future<void> _openDisplayOptions(List<Account> accounts) async {
+    final sorted = [...accounts]..sort((a, b) => a.name.compareTo(b.name));
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: StatefulBuilder(
+          builder: (context, setSheet) {
+            final cs = Theme.of(context).colorScheme;
+            final type = _accountTypeFilter;
+            final shown = _metrics;
+            final hidden = sorted.where((a) => _prefs.isHidden(a.id)).toList();
+
+            void apply(AllStatsPrefs next) {
+              setState(() => _update(next));
+              setSheet(() {});
+            }
+
+            Widget groupTitle(String text, {Widget? trailing}) => Padding(
+              padding: const EdgeInsets.only(top: 6, bottom: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      text,
+                      style: TextStyle(
+                        color: cs.primary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  if (trailing != null) trailing,
+                ],
+              ),
+            );
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'خيارات العرض',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      groupTitle('الأقسام'),
+                      for (final m in StatsMetric.values)
+                        CheckboxListTile(
+                          value: shown.contains(m),
+                          // لازم يضل قسم واحد ظاهر على الأقل
+                          onChanged: shown.length == 1 && shown.contains(m)
+                              ? null
+                              : (v) => apply(
+                                  _prefs.updateMetric(
+                                    type,
+                                    m,
+                                    (p) => p.copyWith(visible: v ?? true),
+                                  ),
+                                ),
+                          secondary: Icon(
+                            _metricIcon(m),
+                            color: _metricGradient(m).first,
+                          ),
+                          title: Text(_metricLabel(m)),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      const Divider(height: 24),
+                      groupTitle(
+                        type.isCompany ? 'الشركات' : 'المكاتب',
+                        trailing: hidden.isEmpty
+                            ? null
+                            : TextButton(
+                                onPressed: () {
+                                  var next = _prefs;
+                                  for (final a in hidden) {
+                                    next = next.withAccountHidden(a.id, false);
+                                  }
+                                  apply(next);
+                                },
+                                child: const Text('إظهار الكل'),
+                              ),
+                      ),
+                      if (sorted.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Text(
+                            'لا توجد حسابات',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                      for (final a in sorted)
+                        CheckboxListTile(
+                          value: !_prefs.isHidden(a.id),
+                          onChanged: (v) =>
+                              apply(_prefs.withAccountHidden(a.id, v != true)),
+                          title: Text(
+                            a.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildControls(ColorScheme cs, List<Account> accounts) {
     final daily = _period == AllStatsPeriod.daily;
+    // عدد الأشياء المخفية (أقسام + حسابات من النوع المختار)
+    final hiddenCount =
+        StatsMetric.values.length -
+        _metrics.length +
+        accounts.where((a) => _prefs.isHidden(a.id)).length;
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -1233,6 +1381,16 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
               _details ? Icons.dashboard_rounded : Icons.view_agenda_rounded,
             ),
             label: Text(_details ? 'إظهار الملخص السريع' : 'إظهار التفصيل'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () => _openDisplayOptions(accounts),
+            icon: Badge(
+              isLabelVisible: hiddenCount > 0,
+              label: Text('$hiddenCount'),
+              child: const Icon(Icons.tune_rounded),
+            ),
+            label: const Text('خيارات العرض'),
           ),
         ],
       ),
@@ -1332,7 +1490,12 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         final allOfType = accountsBox.values
             .where((a) => a.type == _accountTypeFilter)
             .toList();
-        final accounts = allOfType;
+        // المخفية ما بتظهر وما بتنحسب بالمجموع
+        final accounts = allOfType
+            .where((a) => !_prefs.isHidden(a.id))
+            .toList();
+        final someHidden = accounts.length != allOfType.length;
+        final metrics = _metrics;
 
         return ValueListenableBuilder(
           valueListenable: DatabaseService.transactionsBox.listenable(),
@@ -1345,9 +1508,13 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                 )
                 .toList();
 
+            // حركات الحساب بالأقسام الظاهرة بس
+            int activity(_AccountStats s) =>
+                metrics.fold(0, (n, m) => n + s.nowOf(m).length);
+
             // الأكثر حركة أولًا
             stats.sort((a, b) {
-              final c = b.totalNow.compareTo(a.totalNow);
+              final c = activity(b).compareTo(activity(a));
               if (c != 0) return c;
               return a.account.name.compareTo(b.account.name);
             });
@@ -1423,7 +1590,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              _buildControls(cs),
+                              _buildControls(cs, allOfType),
                               const SizedBox(height: 12),
                               RepaintBoundary(
                                 key: _shotKey,
@@ -1458,9 +1625,11 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                       ],
 
                                       if (_details)
-                                        for (final m in _metrics) ...[
+                                        for (final m in metrics) ...[
                                           _categoryCard(
-                                            title: _categoryTitle(m),
+                                            title: someHidden
+                                                ? '${_metricLabel(m)} — المجموع'
+                                                : _categoryTitle(m),
                                             count: global.countOf(m),
                                             totals: global.totalsOf(m),
                                             prevTotals: global.prevTotalsOf(m),
@@ -1481,8 +1650,8 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                       // تفصيل كل حساب فيه حركة (بدون البطاقات الفاضية)
                                       if (_details)
                                         for (final s in stats)
-                                          if (s.totalNow > 0) ...[
-                                            for (final m in _metrics)
+                                          if (activity(s) > 0) ...[
+                                            for (final m in metrics)
                                               if (s.nowOf(m).isNotEmpty ||
                                                   s.prevOf(m).isNotEmpty) ...[
                                                 _categoryCard(
