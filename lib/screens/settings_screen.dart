@@ -1,54 +1,23 @@
 // lib/screens/settings_screen.dart
 // -------------------------------------------------------------
-// صفحة الإعدادات (تصميم مصنّف وهادئ):
-//  • صفحة رئيسية فيها مجموعات مرتبة: قراءة الرسائل، التصفية والتنظيف،
-//    العملات، الحسابات والشركات، شاشة الفقاعات — مع بحث سريع في أسماء
-//    الإعدادات وفي محتوى القوائم نفسها.
-//  • كل قسم يفتح في صفحة مستقلة بسيطة بدل صفحة واحدة طويلة ومعجوقة.
-//  • الحفظ تلقائي بعد كل تعديل، والحذف يمكن التراجع عنه من الإشعار.
+// صفحة الإعدادات: العملات والوجهات. الحفظ تلقائي بعد كل تعديل، والحذف
+// يمكن التراجع عنه من الإشعار.
 // -------------------------------------------------------------
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
-import '../bubble_prefs.dart';
 import '../database_service.dart';
 import '../models.dart';
-import '../services/all_stats_prefs.dart';
 import '../services/destinations.dart';
-import '../services/detection/text_tokens.dart' show normalizeArabic;
-import '../services/settings_words.dart';
-import '../services/trace/trace_service.dart';
 import '../services/tx_history_service.dart';
-import '../widgets/destination_picker.dart'
-    show kDestExternalColor, kDestOfficeColor;
-import '../widgets/app_messages.dart';
-import '../widgets/quick_action_defs.dart';
-import 'all_stats_customize_screen.dart';
-import 'clipboard_settings_screen.dart';
-import 'messages_settings_screen.dart';
-import 'trace_warnings_screen.dart';
+import '../widgets/destination_picker.dart' show kDestColor;
 
-// =============================================================
-// الألوان المستخدمة لتمييز الأقسام
-// =============================================================
-
-const _kBlue = Color(0xFF3B82F6);
 const _kGreen = Color(0xFF10B981);
-const _kIndigo = Color(0xFF6366F1);
-const _kPink = Color(0xFFEC4899);
-const _kOrange = Color(0xFFF97316);
-const _kRed = Color(0xFFEF4444);
-const _kAmber = Color(0xFFF59E0B);
-const _kRose = Color(0xFFE11D48);
 const _kPurple = Color(0xFF8B5CF6);
 const _kTeal = Color(0xFF14B8A6);
-const _kCyan = Color(0xFF06B6D4);
-const _kSlate = Color(0xFF64748B);
-const _kViolet = Color(0xFFA855F7);
 
 // =============================================================
 // الصفحة الرئيسية للإعدادات
@@ -64,31 +33,18 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen>
     with WidgetsBindingObserver {
   late final _SettingsStore _store;
-  late final Listenable _accountsListenable;
-  late final Listenable _listenable;
-  final _searchCtrl = TextEditingController();
-  String _query = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _store = _SettingsStore()..attach();
-    _accountsListenable = DatabaseService.accountsBox.listenable();
-    _listenable = Listenable.merge([
-      _store,
-      _accountsListenable,
-      TraceService.prefs,
-      TraceService.activeCount,
-      AppMessages.prefs,
-    ]);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _store.dispose();
-    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -101,72 +57,14 @@ class _SettingsScreenState extends State<SettingsScreen>
   Future<void> _open(Widget page) async {
     FocusScope.of(context).unfocus();
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
-    // ملخصات الصفحات (الرسائل، الإحصائيات…) ممكن تكون تغيّرت
     if (mounted) setState(() {});
   }
 
-  _WordSpec _spec(WordListKind kind) => _specOf(kind);
-
   List<_HubGroup> _buildGroups() {
-    final s = _store.settings;
-
-    _HubTile wordTile(WordListKind kind) {
-      final spec = _spec(kind);
-      final list = SettingsWords.listOf(s, kind);
-      return _HubTile(
-        icon: spec.icon,
-        color: spec.color,
-        title: spec.title,
-        subtitle: spec.subtitle,
-        count: list.length,
-        searchText: '${spec.subtitle} ${spec.keywords}',
-        contents: list,
-        onTap: () => _open(_WordListPage(store: _store, spec: spec)),
-      );
-    }
-
-    final currencies = _store.groupedCurrencies();
-    final accounts = DatabaseService.accountsBox.values.toList();
-    final accountWords = <String>[for (final a in accounts) ...a.keywords];
-    final actions = s.bubbleQuickActions;
-    final tp = TraceService.prefs.value;
-    final warnCount = TraceService.activeCount.value;
+    final currencies = _store.currencyNames();
     final dests = _store.destinationBook;
-    final msgPrefs = AppMessages.prefs.value;
-    final statsPrefs = AllStatsPrefsStore.load();
-    final statsHidden = statsPrefs.hiddenAccounts.length;
 
     return [
-      _HubGroup(
-        title: 'قراءة الرسائل',
-        icon: Icons.auto_awesome_rounded,
-        tiles: [
-          wordTile(WordListKind.nameKeyword),
-          wordTile(WordListKind.amountKeyword),
-          _HubTile(
-            icon: Icons.calculate_rounded,
-            color: _kIndigo,
-            title: 'قيم الكلمات',
-            subtitle: 'كلمات تُقرأ كأرقام، مثل: ستمئة = 600',
-            count: s.amountWordValues.length,
-            searchText: 'رقم ارقام عدد مبلغ بالحروف',
-            contents: s.amountWordValues.keys.toList(),
-            onTap: () => _open(_WordValuesPage(store: _store)),
-          ),
-          wordTile(WordListKind.cancelKeyword),
-          wordTile(WordListKind.editKeyword),
-        ],
-      ),
-      _HubGroup(
-        title: 'التصفية والتنظيف',
-        icon: Icons.filter_alt_rounded,
-        tiles: [
-          wordTile(WordListKind.forbidden),
-          wordTile(WordListKind.forbiddenPhrase),
-          wordTile(WordListKind.ignored),
-          wordTile(WordListKind.lineIgnored),
-        ],
-      ),
       _HubGroup(
         title: 'العملات',
         icon: Icons.payments_rounded,
@@ -174,198 +72,40 @@ class _SettingsScreenState extends State<SettingsScreen>
           _HubTile(
             icon: Icons.currency_exchange_rounded,
             color: _kPurple,
-            title: 'العملات والاختصارات',
+            title: 'العملات',
             subtitle: currencies.isEmpty
-                ? 'لا توجد عملات بعد'
-                : '${currencies.length} عملة • ${s.currencyMap.length} اختصار',
+                ? 'لا توجد عملات'
+                : currencies.take(4).join('، ') +
+                      (currencies.length > 4 ? '…' : ''),
             count: currencies.length,
-            searchText: 'عمله عملات اختصار رمز دولار ريال ليره',
-            contents: [...currencies.keys, ...s.currencyMap.keys],
             onTap: () => _open(_CurrenciesPage(store: _store)),
           ),
           _HubTile(
             icon: Icons.percent_rounded,
             color: _kTeal,
             title: 'تقسيم الحركات حسب العملة',
-            subtitle: 'قسمة مبالغ الحركات المحفوظة لعملة معيّنة',
-            searchText: 'تقسيم قسمه حركات عمله اداه',
             onTap: () => _openSplitTool(context, _store),
           ),
         ],
       ),
       _HubGroup(
-        title: 'الحسابات والشركات',
-        icon: Icons.account_balance_wallet_rounded,
-        tiles: [
-          _HubTile(
-            icon: Icons.manage_search_rounded,
-            color: _kTeal,
-            title: 'كلمات الحسابات',
-            subtitle: 'تساعد على اختيار الحساب تلقائيًا عند التحليل',
-            count: accountWords.length,
-            searchText: 'حساب حسابات اختيار تلقائي',
-            contents: [...accounts.map((a) => a.name), ...accountWords],
-            onTap: () => _open(_AccountKeywordsPage(store: _store)),
-          ),
-          wordTile(WordListKind.companyUser),
-        ],
-      ),
-      _HubGroup(
-        title: 'تتبّع مصدر الحركة',
-        icon: Icons.alt_route_rounded,
+        title: 'الوجهات',
+        icon: Icons.place_rounded,
         tiles: [
           _HubTile(
             icon: Icons.place_rounded,
-            color: _kCyan,
+            color: kDestColor,
             title: 'الوجهات',
             subtitle: dests.isEmpty
-                ? 'وجهات حركات الشركات مع اختصاراتها'
-                : '${dests.items.length} وجهة • '
-                      '${dests.items.where((d) => d.toOffice).length} تابعة لمكتب',
+                ? 'لا توجد وجهات'
+                : dests.names.take(4).join('، ') +
+                      (dests.items.length > 4 ? '…' : ''),
             count: dests.isEmpty ? null : dests.items.length,
-            searchText:
-                'وجهه وجهات اختصار مدينه بلد مكتب تابعه لازم توصل تغيير مسار',
-            contents: [
-              for (final d in dests.items) ...[d.name, ...d.aliases],
-            ],
             onTap: () => _open(_DestinationsPage(store: _store)),
           ),
-          _HubTile(
-            icon: Icons.tune_rounded,
-            color: _kTeal,
-            title: 'إعدادات التتبّع',
-            subtitle:
-                'عادي ${tp.normalHoursSafe} س • أقصى ${tp.maxHoursSafe} س • '
-                '«${tp.unknown}»',
-            searchText:
-                'مصدر مسار شركة مكتب ربط وقت ساعات مجهول تحذير مرسلة إرسال '
-                'استقبال',
-            contents: [tp.unknown],
-            onTap: () => _open(_TracePrefsPage(store: _store)),
-          ),
-          _HubTile(
-            icon: Icons.warning_amber_rounded,
-            color: _kOrange,
-            title: 'صفحة التحذيرات',
-            subtitle: warnCount == 0
-                ? 'ما في تحذيرات'
-                : '$warnCount تحذير بدو انتباهك',
-            count: warnCount == 0 ? null : warnCount,
-            searchText: 'تحذيرات تنبيه مصدر شركة مكتب اسم مبلغ ما راحت',
-            onTap: () => _open(const TraceWarningsScreen()),
-          ),
-        ],
-      ),
-      _HubGroup(
-        title: 'الرسائل',
-        icon: Icons.chat_rounded,
-        tiles: [
-          _HubTile(
-            icon: Icons.mark_chat_read_rounded,
-            color: _kGreen,
-            title: 'رسائل النجاح والخطأ',
-            subtitle:
-                '${msgPrefs.top ? 'فوق الشاشة' : 'تحت الشاشة'} • '
-                '${const ['قصيرة', 'عادية', 'طويلة'][msgPrefs.duration]} • '
-                '${const ['ملوّنة', 'ناعمة', 'داكنة'][msgPrefs.style]}',
-            searchText:
-                'رساله رسائل نجاح خطا تنبيه اشعار فقاعه مكان فوق تحت مده لون شكل',
-            onTap: () => _open(const MessagesSettingsScreen()),
-          ),
-        ],
-      ),
-      _HubGroup(
-        title: 'الإحصائيات',
-        icon: Icons.insights_rounded,
-        tiles: [
-          _HubTile(
-            icon: Icons.dashboard_customize_rounded,
-            color: _kIndigo,
-            title: 'صفحة إحصائيات كل الحسابات',
-            subtitle: statsPrefs.customizedCount == 0
-                ? 'ترتيب الأقسام، الألوان، الأسماء، الحسابات والشكل'
-                : [
-                    'معدّلة',
-                    if (statsHidden > 0) '$statsHidden حساب مخفي',
-                    if (statsPrefs.sortMode == AccountSortMode.manual)
-                      'ترتيب يدوي',
-                    if (statsPrefs.compact) 'مضغوطة',
-                  ].join(' • '),
-            searchText:
-                'احصائيات احصاءات بطاقات اقسام الوان لون اسماء ترتيب حسابات '
-                'مخفيه اخفاء شكل اعمده مضغوط ملخص عنوان تصدير صوره',
-            onTap: () => _open(const AllStatsCustomizeScreen()),
-          ),
-        ],
-      ),
-      _HubGroup(
-        title: 'الحافظة',
-        icon: Icons.sticky_note_2_rounded,
-        tiles: [
-          _HubTile(
-            icon: Icons.sticky_note_2_rounded,
-            color: _kViolet,
-            title: 'الحافظة العائمة',
-            subtitle: 'شكلها، أنواعها، وزرها بلوحة الإشعارات (الستارة)',
-            searchText:
-                'حافظه محفظه ملاحظات عائمه فقاعه ستاره اشعارات زر سريع لون '
-                'حجم لصق نسخ',
-            onTap: () => _open(const ClipboardSettingsScreen()),
-          ),
-        ],
-      ),
-      _HubGroup(
-        title: 'شاشة الفقاعات',
-        icon: Icons.bubble_chart_rounded,
-        tiles: [
-          _HubTile(
-            icon: Icons.palette_rounded,
-            color: _kPink,
-            title: 'المظهر والسلوك',
-            subtitle: 'حجم الخط، الألوان، طريقة العرض والتنبيهات',
-            searchText:
-                'مظهر تصميم الوان لون خط حجم مضغوط تكرار دليل مرسل ترتيب تمديد',
-            onTap: () => _open(_BubbleAppearancePage(store: _store)),
-          ),
-          _HubTile(
-            icon: Icons.touch_app_rounded,
-            color: _kCyan,
-            title: 'الأزرار السريعة',
-            subtitle: 'أزرار داخل الفقاعة: أصفار، لصق، نسخ، حافظة، حفظ…',
-            count: actions.length,
-            searchText:
-                'ازرار زر سريع اصفار لصق نسخ ملخص حافظه حفظ وجهه لون شكل ترتيب',
-            contents: actions.map((a) => a.label).toList(),
-            onTap: () => _open(_QuickActionsPage(store: _store)),
-          ),
-          wordTile(WordListKind.readyName),
         ],
       ),
     ];
-  }
-
-  List<_HubGroup> _filter(List<_HubGroup> groups) {
-    final q = _norm(_query.trim());
-    if (q.isEmpty) return groups;
-    final out = <_HubGroup>[];
-    for (final g in groups) {
-      final tiles = <_HubTile>[];
-      for (final t in g.tiles) {
-        if (_norm('${t.title} ${t.searchText} ${g.title}').contains(q)) {
-          tiles.add(t);
-          continue;
-        }
-        final hit = t.contents.firstWhere(
-          (c) => _norm(c).contains(q),
-          orElse: () => '',
-        );
-        if (hit.isNotEmpty) tiles.add(t.withMatch('يحتوي: «$hit»'));
-      }
-      if (tiles.isNotEmpty) {
-        out.add(_HubGroup(title: g.title, icon: g.icon, tiles: tiles));
-      }
-    }
-    return out;
   }
 
   @override
@@ -374,8 +114,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
-        // عند فتح الإعدادات من شاشة أخرى: نحفظ فورًا قبل أن تعيد الشاشة
-        // السابقة قراءة الإعدادات.
         if (didPop) _store.flush();
       },
       child: Directionality(
@@ -385,50 +123,19 @@ class _SettingsScreenState extends State<SettingsScreen>
           body: SafeArea(
             bottom: false,
             child: ListenableBuilder(
-              listenable: _listenable,
+              listenable: _store,
               builder: (context, _) {
-                final groups = _filter(_buildGroups());
+                final groups = _buildGroups();
                 return ListView(
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
                   padding: EdgeInsets.fromLTRB(16, canPop ? 4 : 14, 16, 130),
                   children: [
                     _HubHeader(saving: _store.isSaving, showBack: canPop),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _searchCtrl,
-                      textInputAction: TextInputAction.search,
-                      onChanged: (v) => setState(() => _query = v),
-                      decoration: _fieldDecoration(
-                        context,
-                        hint: 'ابحث عن إعداد أو كلمة…',
-                        icon: Icons.search_rounded,
-                        suffix: _query.isEmpty
-                            ? null
-                            : IconButton(
-                                tooltip: 'مسح',
-                                icon: const Icon(Icons.close_rounded),
-                                onPressed: () {
-                                  _searchCtrl.clear();
-                                  setState(() => _query = '');
-                                },
-                              ),
-                      ),
-                    ),
                     const SizedBox(height: 22),
-                    if (groups.isEmpty)
-                      _EmptyHint(
-                        icon: Icons.search_off_rounded,
-                        text:
-                            'لا يوجد إعداد أو كلمة مطابقة لـ «${_query.trim()}»',
-                      )
-                    else
-                      for (final g in groups) ...[
-                        _GroupLabel(title: g.title, icon: g.icon),
-                        _GroupCard(tiles: g.tiles),
-                        const SizedBox(height: 22),
-                      ],
-                    const _AutoSaveFooter(),
+                    for (final g in groups) ...[
+                      _GroupLabel(title: g.title, icon: g.icon),
+                      _GroupCard(tiles: g.tiles),
+                      const SizedBox(height: 22),
+                    ],
                   ],
                 );
               },
@@ -446,9 +153,7 @@ class _SettingsScreenState extends State<SettingsScreen>
 
 class _SettingsStore extends ChangeNotifier {
   _SettingsStore()
-    : settings = _copyOf(DatabaseService.getSettings() ?? _defaults()) {
-    _sortAll();
-  }
+    : settings = _copyOf(DatabaseService.getSettings() ?? _defaults());
 
   /// نسخة قابلة للتعديل من الإعدادات (تُحفظ تلقائيًا بعد كل تعديل)
   Settings settings;
@@ -461,30 +166,10 @@ class _SettingsStore extends ChangeNotifier {
   bool get isSaving => _writing || (_saveTimer?.isActive ?? false);
 
   static Settings _defaults() => Settings(
-    nameKeywords: ['المستلم', 'الأسم', 'المستفيد', 'الاسم', 'إلى', 'ل', 'لـ'],
-    amountKeywords: ['المبلغ', 'قيمة', 'amount', r'$'],
+    nameKeywords: [],
+    amountKeywords: [],
     currencyMap: {r'$': 'دولار'},
     ignoredWords: [],
-    lineIgnoredWords: [],
-    cancelKeywords: ['الغاء'],
-    editKeywords: ['تعديل'],
-    amountWordValues: {},
-    bubbleReadyNames: [],
-    bubbleQuickActions: [
-      BubbleQuickActionConfig(
-        id: 1,
-        label: '00',
-        iconKey: 'zeros',
-        actionType: 'appendZeros',
-        value: '2',
-      ),
-      BubbleQuickActionConfig(
-        id: 2,
-        label: 'اسم جاهز',
-        iconKey: 'person',
-        actionType: 'setName',
-      ),
-    ],
   );
 
   static Settings _copyOf(Settings s) => Settings(
@@ -521,15 +206,13 @@ class _SettingsStore extends ChangeNotifier {
     if (_disposed) return;
     final stored = DatabaseService.getSettings();
     if (stored != null && !identical(stored, settings) && !isSaving) {
-      // تغيّرت الإعدادات من مكان آخر (استعادة نسخة احتياطية أو إضافة كلمة من
-      // شاشة الفقاعات): نعيد تحميلها حتى لا نكتب فوقها بنسخة قديمة.
+      // تغيّرت الإعدادات من مكان آخر (مثل إضافة وجهة من صفحة الحركة):
+      // نعيد تحميلها حتى لا نكتب فوقها بنسخة قديمة.
       settings = _copyOf(stored);
-      _sortAll();
     }
     notifyListeners();
   }
 
-  /// يُستدعى بعد كل تعديل: يحدّث الواجهة ويجدول الحفظ.
   void changed() {
     if (_disposed) {
       unawaited(DatabaseService.saveSettings(settings));
@@ -555,7 +238,6 @@ class _SettingsStore extends ChangeNotifier {
     }
   }
 
-  /// حفظ فوري لأي تعديل ما زال بانتظار الحفظ.
   void flush() {
     final t = _saveTimer;
     if (t == null || !t.isActive) return;
@@ -572,88 +254,12 @@ class _SettingsStore extends ChangeNotifier {
     super.dispose();
   }
 
-  // ---------------- القوائم ----------------
-
   static bool _same(String a, String b) =>
       a.trim().toLowerCase() == b.trim().toLowerCase();
 
-  void _sortAll() {
-    for (final k in WordListKind.values) {
-      SettingsWords.listOf(settings, k).sort(_ci);
-    }
-  }
-
-  List<String> listOf(WordListKind k) => SettingsWords.listOf(settings, k);
-
-  /// يضيف عناصر جديدة (بدون تكرار) ويعيد عدد ما أُضيف فعلًا.
-  int addWords(WordListKind k, Iterable<String> values) {
-    final list = listOf(k);
-    var added = 0;
-    for (final raw in values) {
-      final v = raw.trim();
-      if (v.isEmpty || list.any((e) => _same(e, v))) continue;
-      list.add(v);
-      added++;
-    }
-    if (added > 0) {
-      list.sort(_ci);
-      changed();
-    }
-    return added;
-  }
-
-  void removeWord(WordListKind k, String word) {
-    if (listOf(k).remove(word)) changed();
-  }
-
-  /// يعدّل عنصرًا. يعيد false إذا كان الاسم الجديد موجودًا مسبقًا.
-  bool renameWord(WordListKind k, String oldWord, String newWord) {
-    final v = newWord.trim();
-    final list = listOf(k);
-    if (v.isEmpty) return false;
-    if (list.any((e) => e != oldWord && _same(e, v))) return false;
-    final i = list.indexOf(oldWord);
-    if (i < 0) return false;
-    list[i] = v;
-    list.sort(_ci);
-    changed();
-    return true;
-  }
-
-  void clearWords(WordListKind k) {
-    final list = listOf(k);
-    if (list.isEmpty) return;
-    list.clear();
-    changed();
-  }
-
-  // ---------------- قيم الكلمات ----------------
-
-  void setWordValue(String word, double value) {
-    settings.amountWordValues[word] = value;
-    changed();
-  }
-
-  void removeWordValue(String word) {
-    if (settings.amountWordValues.remove(word) != null) changed();
-  }
-
   // ---------------- العملات ----------------
 
-  /// العملات مجمّعة حسب الاسم المعروض: الاسم ← [الاختصارات...]
-  Map<String, List<String>> groupedCurrencies() {
-    final m = <String, List<String>>{};
-    for (final e in settings.currencyMap.entries) {
-      (m[e.value.trim()] ??= []).add(e.key);
-    }
-    for (final list in m.values) {
-      list.sort(_ci);
-    }
-    return Map.fromEntries(
-      m.entries.toList()..sort((a, b) => _ci(a.key, b.key)),
-    );
-  }
-
+  /// أسماء العملات (بدون تكرار)
   List<String> currencyNames() =>
       settings.currencyMap.values
           .map((e) => e.trim())
@@ -662,32 +268,30 @@ class _SettingsStore extends ChangeNotifier {
           .toList()
         ..sort(_ci);
 
-  String? currencyOfAlias(String alias) {
+  String? _currencyOwnerOf(String text) {
     for (final e in settings.currencyMap.entries) {
-      if (_same(e.key, alias)) return e.value.trim();
+      if (_same(e.key, text) || _same(e.value, text)) return e.value.trim();
     }
     return null;
   }
 
-  /// يضيف اختصارًا لعملة (أو ينشئ عملة جديدة). يعيد رسالة خطأ أو null.
-  String? addCurrencyAlias(String alias, String displayName) {
-    final a = alias.trim();
-    final d = displayName.trim();
-    if (a.isEmpty || d.isEmpty) return 'أدخل الاختصار واسم العملة';
-    final owner = currencyOfAlias(a);
-    if (owner != null) return '«$a» موجود مسبقًا ضمن «$owner»';
-    settings.currencyMap[a] = d;
+  /// يضيف عملة جديدة. يعيد رسالة خطأ أو null.
+  String? addCurrency(String name) {
+    final n = name.trim();
+    if (n.isEmpty) return 'أدخل اسم العملة';
+    final owner = _currencyOwnerOf(n);
+    if (owner != null) return '«$owner» موجودة مسبقًا';
+    settings.currencyMap[n] = n;
     changed();
     return null;
   }
 
-  void removeCurrencyAlias(String alias) {
-    if (settings.currencyMap.remove(alias) != null) changed();
-  }
-
-  void renameCurrency(String oldName, String newName) {
+  /// يعيد تسمية العملة. يعيد رسالة خطأ أو null.
+  String? renameCurrency(String oldName, String newName) {
     final v = newName.trim();
-    if (v.isEmpty || v == oldName) return;
+    if (v.isEmpty || v == oldName) return null;
+    final owner = _currencyOwnerOf(v);
+    if (owner != null && owner != oldName) return '«$owner» موجودة مسبقًا';
     final keys = settings.currencyMap.entries
         .where((e) => e.value.trim() == oldName)
         .map((e) => e.key)
@@ -696,9 +300,10 @@ class _SettingsStore extends ChangeNotifier {
       settings.currencyMap[k] = v;
     }
     changed();
+    return null;
   }
 
-  /// يحذف العملة كاملة ويعيد اختصاراتها المحذوفة (للتراجع).
+  /// يحذف العملة ويعيد ما حُذف (للتراجع).
   Map<String, String> deleteCurrency(String name) {
     final removed = <String, String>{};
     settings.currencyMap.removeWhere((k, v) {
@@ -710,176 +315,61 @@ class _SettingsStore extends ChangeNotifier {
     return removed;
   }
 
-  void restoreCurrencyAliases(Map<String, String> entries) {
+  void restoreCurrency(Map<String, String> entries) {
     if (entries.isEmpty) return;
     settings.currencyMap.addAll(entries);
     changed();
   }
 
-  /// يضيف مجموعة عملات شائعة بعدة اختصارات. يعيد عدد الاختصارات المضافة.
+  /// يضيف العملات الشائعة. يعيد عدد العملات المضافة.
   int addCommonCurrencies() {
-    const common = <String, String>{
-      'QAR': 'ريال قطري',
-      '﷼': 'ريال قطري',
-      'ريال': 'ريال قطري',
-      'ريال قطري': 'ريال قطري',
-      r'$': 'دولار',
-      'USD': 'دولار',
-      'Dollar': 'دولار',
-      'دولار': 'دولار',
-      'EUR': 'يورو',
-      '€': 'يورو',
-      'يورو': 'يورو',
-      'GBP': 'جنيه',
-      '£': 'جنيه',
-      'Sterling': 'جنيه',
-      'جنيه': 'جنيه',
-      'TRY': 'ليرة تركية',
-      '₺': 'ليرة تركية',
-      'ليرة': 'ليرة تركية',
-      'ليرة تركية': 'ليرة تركية',
-      'SYP': 'ليرة سورية',
-      'ل.س': 'ليرة سورية',
-      'ليرة سورية': 'ليرة سورية',
-      'EGP': 'جنيه مصري',
-      'جنيه مصري': 'جنيه مصري',
-    };
+    const common = [
+      'دولار',
+      'يورو',
+      'ريال قطري',
+      'ليرة تركية',
+      'ليرة سورية',
+      'جنيه',
+      'جنيه مصري',
+    ];
     var added = 0;
-    common.forEach((alias, name) {
-      if (currencyOfAlias(alias) == null) {
-        settings.currencyMap[alias] = name;
+    for (final name in common) {
+      if (_currencyOwnerOf(name) == null) {
+        settings.currencyMap[name] = name;
         added++;
       }
-    });
+    }
     if (added > 0) changed();
     return added;
-  }
-
-  // ---------------- شاشة الفقاعات ----------------
-
-  BubbleUiPrefs get bubblePrefs => BubbleUiPrefs.fromSettings(settings);
-
-  void setBubblePrefs(BubbleUiPrefs p) {
-    settings.bubbleUiPrefs = p.toMap();
-    changed();
-  }
-
-  void addQuickAction(BubbleQuickActionConfig action, {int? at}) {
-    final list = settings.bubbleQuickActions;
-    if (at != null && at >= 0 && at <= list.length) {
-      list.insert(at, action);
-    } else {
-      list.add(action);
-    }
-    changed();
-  }
-
-  void updateQuickAction(BubbleQuickActionConfig action) {
-    final list = settings.bubbleQuickActions;
-    final i = list.indexWhere((a) => a.id == action.id);
-    if (i < 0) {
-      list.add(action);
-    } else {
-      list[i] = action;
-    }
-    changed();
-  }
-
-  void moveQuickAction(int oldIndex, int newIndex) {
-    final list = settings.bubbleQuickActions;
-    if (oldIndex < 0 || oldIndex >= list.length) return;
-    if (newIndex > oldIndex) newIndex--;
-    newIndex = newIndex.clamp(0, list.length - 1);
-    if (newIndex == oldIndex) return;
-    final a = list.removeAt(oldIndex);
-    list.insert(newIndex, a);
-    changed();
-  }
-
-  /// يحذف الزر ويعيد موضعه السابق (للتراجع)، أو -1 إن لم يوجد.
-  int removeQuickAction(BubbleQuickActionConfig action) {
-    final list = settings.bubbleQuickActions;
-    final i = list.indexWhere((a) => a.id == action.id);
-    if (i >= 0) {
-      list.removeAt(i);
-      changed();
-    }
-    return i;
   }
 
   // ---------------- الوجهات ----------------
 
   DestinationBook get destinationBook => DestinationBook.fromSettings(settings);
 
-  /// اسم الوجهة يلي إلها هالاسم أو الاختصار (أو null)
-  String? destinationOwnerOf(String text) {
-    final k = destinationKey(text);
-    if (k.isEmpty) return null;
-    for (final n in settings.destinationInfo.keys) {
-      if (destinationKey(n) == k) return n;
-    }
-    for (final e in settings.destinationMap.entries) {
-      if (destinationKey(e.key) == k) return e.value.trim();
-    }
-    return null;
-  }
-
-  Map<String, dynamic> _destInfo(String name) {
-    final raw = settings.destinationInfo[name];
-    return raw is Map
-        ? Map<String, dynamic>.from(raw)
-        : <String, dynamic>{'office': false};
-  }
-
-  /// يضيف وجهة جديدة مع اختصاراتها. يعيد رسالة خطأ أو null.
-  String? addDestination(
-    String name,
-    Iterable<String> aliases, {
-    bool toOffice = false,
-  }) {
+  /// يضيف وجهة جديدة. يعيد رسالة خطأ أو null.
+  String? addDestination(String name) {
     final n = name.trim();
     if (n.isEmpty) return 'أدخل اسم الوجهة';
-    final owner = destinationOwnerOf(n);
-    if (owner != null) {
-      return owner == n ? '«$n» موجودة مسبقًا' : '«$n» اختصار لوجهة «$owner»';
-    }
-    settings.destinationInfo[n] = <String, dynamic>{'office': toOffice};
-    for (final raw in aliases) {
-      final a = raw.trim();
-      if (a.isEmpty || destinationKey(a) == destinationKey(n)) continue;
-      if (destinationOwnerOf(a) != null) continue;
-      settings.destinationMap[a] = n;
-    }
+    final owner = destinationBook.byName(n);
+    if (owner != null) return '«${owner.name}» موجودة مسبقًا';
+    settings.destinationInfo[n] = <String, dynamic>{};
     changed();
     return null;
   }
 
-  /// يضيف اختصارًا لوجهة. يعيد رسالة خطأ أو null.
-  String? addDestinationAlias(String name, String alias) {
-    final a = alias.trim();
-    if (a.isEmpty) return 'أدخل الاختصار';
-    final owner = destinationOwnerOf(a);
-    if (owner != null) return '«$a» موجود مسبقًا ضمن «$owner»';
-    settings.destinationMap[a] = name;
-    changed();
-    return null;
-  }
-
-  void removeDestinationAlias(String alias) {
-    if (settings.destinationMap.remove(alias) != null) changed();
-  }
-
-  /// يعيد تسمية الوجهة (مع اختصاراتها). يعيد رسالة خطأ أو null.
+  /// يعيد تسمية الوجهة. يعيد رسالة خطأ أو null.
   String? renameDestination(String oldName, String newName) {
     final v = newName.trim();
     if (v.isEmpty || v == oldName) return null;
-    final owner = destinationOwnerOf(v);
-    if (owner != null && owner != oldName) {
-      return '«$v» موجود مسبقًا ضمن «$owner»';
+    final owner = destinationBook.byName(v);
+    if (owner != null && owner.key != destinationKey(oldName)) {
+      return '«${owner.name}» موجودة مسبقًا';
     }
-    final info = _destInfo(oldName);
-    settings.destinationInfo.remove(oldName);
-    settings.destinationInfo[v] = info;
+    final raw = settings.destinationInfo.remove(oldName);
+    settings.destinationInfo[v] = raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{};
     final keys = settings.destinationMap.entries
         .where((e) => e.value.trim() == oldName)
         .map((e) => e.key)
@@ -887,7 +377,6 @@ class _SettingsStore extends ChangeNotifier {
     for (final k in keys) {
       settings.destinationMap[k] = v;
     }
-    // الاسم الجديد كان اختصارًا لنفس الوجهة: ما عاد لازم
     settings.destinationMap.removeWhere(
       (k, value) => destinationKey(k) == destinationKey(v),
     );
@@ -895,7 +384,7 @@ class _SettingsStore extends ChangeNotifier {
     return null;
   }
 
-  /// يحذف الوجهة كاملة ويعيد ما حُذف (للتراجع).
+  /// يحذف الوجهة ويعيد ما حُذف (للتراجع).
   (Map<String, dynamic>, Map<String, String>) deleteDestination(String name) {
     final info = <String, dynamic>{};
     final raw = settings.destinationInfo.remove(name);
@@ -906,7 +395,7 @@ class _SettingsStore extends ChangeNotifier {
       aliases[k] = v;
       return true;
     });
-    if (info.isNotEmpty || aliases.isNotEmpty) changed();
+    changed();
     return (info, aliases);
   }
 
@@ -915,745 +404,207 @@ class _SettingsStore extends ChangeNotifier {
     settings.destinationMap.addAll(data.$2);
     changed();
   }
-
-  void setDestinationOffice(String name, bool toOffice) {
-    final info = _destInfo(name)..['office'] = toOffice;
-    settings.destinationInfo[name] = info;
-    changed();
-  }
-
-  /// يضيف/يشيل مكتبًا من مكاتب الوجهة (بدون مكاتب = أي مكتب)
-  void toggleDestinationAccount(String name, int accountId) {
-    final info = _destInfo(name);
-    final raw = info['accounts'];
-    final ids = <int>[
-      if (raw is List)
-        for (final x in raw)
-          if (x is num) x.toInt(),
-    ];
-    if (!ids.remove(accountId)) ids.add(accountId);
-    if (ids.isEmpty) {
-      info.remove('accounts');
-    } else {
-      info['accounts'] = ids;
-    }
-    info['office'] = true;
-    settings.destinationInfo[name] = info;
-    changed();
-  }
-
-  void clearDestinationAccounts(String name) {
-    final info = _destInfo(name)..remove('accounts');
-    settings.destinationInfo[name] = info;
-    changed();
-  }
-}
-
-// =============================================================
-// تعريف قوائم الكلمات
-// =============================================================
-
-class _WordSpec {
-  final WordListKind kind;
-  final String title;
-
-  /// وصف قصير يظهر في الصفحة الرئيسية
-  final String subtitle;
-
-  /// شرح كامل يظهر أعلى صفحة القسم
-  final String description;
-  final String hint;
-  final IconData icon;
-  final Color color;
-
-  /// كلمات إضافية للبحث
-  final String keywords;
-  final List<String> presets;
-
-  const _WordSpec({
-    required this.kind,
-    required this.title,
-    required this.subtitle,
-    required this.description,
-    required this.hint,
-    required this.icon,
-    required this.color,
-    this.keywords = '',
-    this.presets = const [],
-  });
-}
-
-const List<_WordSpec> _wordSpecs = [
-  _WordSpec(
-    kind: WordListKind.nameKeyword,
-    title: 'كلمات الاسم',
-    subtitle: 'كلمات تسبق اسم المستفيد في الرسالة',
-    description:
-        'الكلمات التي تساعد التطبيق على معرفة اسم المستفيد أو المستلم داخل الرسالة، مثل: المستفيد، الاسم، إلى.',
-    hint: 'أضف كلمة، مثل: المستفيد',
-    icon: Icons.person_search_rounded,
-    color: _kBlue,
-    keywords: 'اسم المستفيد المستلم',
-  ),
-  _WordSpec(
-    kind: WordListKind.amountKeyword,
-    title: 'كلمات المبلغ',
-    subtitle: 'كلمات تدل على قيمة المبلغ',
-    description:
-        'الكلمات التي يُكتشف بها المبلغ أثناء التحليل، مثل: المبلغ، قيمة، amount.',
-    hint: 'أضف كلمة، مثل: المبلغ',
-    icon: Icons.payments_rounded,
-    color: _kGreen,
-    keywords: 'مبلغ قيمه سعر',
-    presets: ['المبلغ', 'المبلغ:', 'قيمة', 'السعر', 'السعر:', 'amount', r'$'],
-  ),
-  _WordSpec(
-    kind: WordListKind.cancelKeyword,
-    title: 'كلمات الإلغاء',
-    subtitle: 'تجعل الرسالة عملية إلغاء',
-    description:
-        'إذا ظهرت إحدى هذه الكلمات داخل رسالة، تُعامل الفقاعة كعملية إلغاء.',
-    hint: 'أضف كلمة، مثل: الغاء',
-    icon: Icons.cancel_schedule_send_rounded,
-    color: _kPink,
-    keywords: 'الغاء ملغي',
-  ),
-  _WordSpec(
-    kind: WordListKind.editKeyword,
-    title: 'كلمات التعديل',
-    subtitle: 'تجعل الرسالة تعديلًا لحركة موجودة',
-    description:
-        'إذا ظهرت إحدى هذه الكلمات داخل رسالة، تُعامل الفقاعة كتعديل لحركة موجودة: '
-        'يُبحث عن الحركة بالاسم، ثم تختار الحركة وتختار ما تريد تعديله (الاسم أو المبلغ أو العملة).',
-    hint: 'أضف كلمة، مثل: تعديل',
-    icon: Icons.edit_note_rounded,
-    color: _kAmber,
-    keywords: 'تعديل تصحيح تغيير',
-    presets: ['تعديل', 'تعديل:', 'تصحيح', 'عدل'],
-  ),
-  _WordSpec(
-    kind: WordListKind.forbidden,
-    title: 'الكلمات الممنوعة',
-    subtitle: 'لا تدخل ضمن الاسم أبدًا',
-    description:
-        'كلمات لا يمكن أن تكون جزءًا من الاسم: يتوقف عندها تحديد الاسم، وإذا انتهى بها سطر فإن السطر الذي يليه لا يُعتبر اسم المستفيد (مثل: المرسل).',
-    hint: 'أضف كلمة، مثل: المرسل',
-    icon: Icons.block_rounded,
-    color: _kOrange,
-    keywords: 'ممنوع حظر المرسل',
-  ),
-  _WordSpec(
-    kind: WordListKind.forbiddenPhrase,
-    title: 'الجمل الممنوعة',
-    subtitle: 'تنبيه واضح عند ظهورها في الرسالة',
-    description:
-        'إذا ظهرت جملة من هذه القائمة داخل رسالة يتم تمييزها بوضوح في الفقاعات والتنبيه عليها قبل الحفظ.',
-    hint: 'أضف جملة، مثل: لا تسلم',
-    icon: Icons.gpp_bad_rounded,
-    color: _kRed,
-    keywords: 'ممنوع تحذير تنبيه جمله',
-  ),
-  _WordSpec(
-    kind: WordListKind.ignored,
-    title: 'الكلمات المهملة',
-    subtitle: 'تُتجاهل أثناء التحليل',
-    description: 'أي كلمة هنا سيتم تجاهلها أثناء قراءة وتحليل الحركة.',
-    hint: 'أضف كلمة لتجاهلها',
-    icon: Icons.visibility_off_rounded,
-    color: _kAmber,
-    keywords: 'تجاهل مهمل',
-  ),
-  _WordSpec(
-    kind: WordListKind.lineIgnored,
-    title: 'تجاهل السطر كاملًا',
-    subtitle: 'السطر الذي يحتوي الكلمة لا يُقرأ',
-    description:
-        'إذا ظهرت كلمة من هذه القائمة في سطر، يتم تجاهل السطر كاملًا أثناء التحليل.',
-    hint: 'أضف كلمة تُسقط السطر',
-    icon: Icons.playlist_remove_rounded,
-    color: _kRose,
-    keywords: 'تجاهل سطر',
-  ),
-  _WordSpec(
-    kind: WordListKind.readyName,
-    title: 'الأسماء الجاهزة',
-    subtitle: 'أسماء تختارها بسرعة من أزرار الفقاعة',
-    description:
-        'أسماء محفوظة يمكن اعتمادها من الأزرار السريعة داخل الفقاعة بدل كتابتها كل مرة.',
-    hint: 'أضف اسمًا جاهزًا',
-    icon: Icons.person_pin_circle_rounded,
-    color: _kSlate,
-    keywords: 'اسماء جاهزه',
-  ),
-  _WordSpec(
-    kind: WordListKind.companyUser,
-    title: 'مستخدمو الشركة',
-    subtitle: 'رسائلهم تُسجّل كحركات مرسلة',
-    description:
-        'في شاشة الفقاعات لحساب الشركة: إذا كان مرسل الرسالة موجودًا هنا تُسجّل الحركة «مرسلة»، وإلا تُسجّل حركة «استقبال». ويمكن تعديل النوع يدويًا قبل الحفظ.',
-    hint: 'أضف اسم المستخدم كما يظهر في الرسائل',
-    icon: Icons.groups_rounded,
-    color: _kViolet,
-    keywords: 'شركه مستخدم مرسل استقبال',
-  ),
-];
-
-_WordSpec _specOf(WordListKind kind) =>
-    _wordSpecs.firstWhere((s) => s.kind == kind);
-
-// =============================================================
-// صفحة قائمة كلمات (تُستخدم لكل القوائم)
-// =============================================================
-
-class _WordListPage extends StatefulWidget {
-  final _SettingsStore store;
-  final _WordSpec spec;
-
-  const _WordListPage({required this.store, required this.spec});
-
-  @override
-  State<_WordListPage> createState() => _WordListPageState();
-}
-
-class _WordListPageState extends State<_WordListPage> {
-  final _ctrl = TextEditingController();
-  String _text = '';
-
-  _SettingsStore get _store => widget.store;
-  _WordSpec get _spec => widget.spec;
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  List<String> _entries(String raw) =>
-      raw.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
-
-  void _add() {
-    final parts = _entries(_ctrl.text);
-    if (parts.isEmpty) return;
-    final added = _store.addWords(_spec.kind, parts);
-    if (added == 0) {
-      _snack(
-        context,
-        parts.length == 1
-            ? '«${parts.first}» موجودة مسبقًا'
-            : 'كل العناصر موجودة مسبقًا',
-      );
-      return;
-    }
-    _ctrl.clear();
-    setState(() => _text = '');
-    if (parts.length > 1) _snack(context, 'أُضيف $added من ${parts.length}');
-  }
-
-  void _remove(String word) {
-    _store.removeWord(_spec.kind, word);
-    _snack(
-      context,
-      'حُذفت «$word»',
-      onUndo: () => _store.addWords(_spec.kind, [word]),
-    );
-  }
-
-  Future<void> _edit(String word) async {
-    final value = await _promptText(
-      context,
-      title: 'تعديل',
-      initial: word,
-      hint: _spec.hint,
-      icon: _spec.icon,
-    );
-    if (value == null || value == word || !mounted) return;
-    if (!_store.renameWord(_spec.kind, word, value)) {
-      _snack(context, '«$value» موجودة مسبقًا');
-    }
-  }
-
-  void _addPresets() {
-    final added = _store.addWords(_spec.kind, _spec.presets);
-    _snack(
-      context,
-      added == 0 ? 'الكلمات الشائعة موجودة كلها' : 'أُضيفت $added كلمة شائعة',
-    );
-  }
-
-  Future<void> _copyAll(List<String> list) async {
-    await Clipboard.setData(ClipboardData(text: list.join('\n')));
-    if (!mounted) return;
-    _snack(context, 'نُسخت ${list.length} عنصر');
-  }
-
-  Future<void> _clearAll(List<String> list) async {
-    final ok = await _confirm(
-      context,
-      title: 'حذف الكل',
-      message: 'حذف كل عناصر «${_spec.title}» (${list.length})؟',
-      confirmLabel: 'حذف الكل',
-      danger: true,
-    );
-    if (!ok || !mounted) return;
-    final backup = List<String>.from(list);
-    _store.clearWords(_spec.kind);
-    _snack(
-      context,
-      'حُذفت كل العناصر',
-      onUndo: () => _store.addWords(_spec.kind, backup),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPageScaffold(
-      store: _store,
-      title: _spec.title,
-      icon: _spec.icon,
-      color: _spec.color,
-      description: _spec.description,
-      builder: (context) {
-        final cs = Theme.of(context).colorScheme;
-        final list = _store.listOf(_spec.kind);
-        final typed = _text.trim();
-        final q = _norm(typed);
-        final visible = q.isEmpty
-            ? list
-            : list.where((e) => _norm(e).contains(q)).toList();
-        final exists =
-            typed.isNotEmpty &&
-            !typed.contains('\n') &&
-            list.any((e) => _SettingsStore._same(e, typed));
-
-        return [
-          TextField(
-            controller: _ctrl,
-            minLines: 1,
-            maxLines: 3,
-            textInputAction: TextInputAction.done,
-            onChanged: (v) => setState(() => _text = v),
-            onSubmitted: (_) => _add(),
-            decoration: _fieldDecoration(
-              context,
-              hint: _spec.hint,
-              icon: Icons.edit_note_rounded,
-              helper: exists ? 'موجودة مسبقًا في القائمة' : null,
-              suffix: Padding(
-                padding: const EdgeInsets.all(5),
-                child: IconButton.filled(
-                  tooltip: 'إضافة',
-                  onPressed: typed.isEmpty || exists ? null : _add,
-                  icon: const Icon(Icons.add_rounded),
-                ),
-              ),
-            ),
-          ),
-          if (_spec.presets.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: TextButton.icon(
-                onPressed: _addPresets,
-                icon: const Icon(Icons.playlist_add_rounded),
-                label: const Text('إضافة الكلمات الشائعة'),
-              ),
-            ),
-          ],
-          const SizedBox(height: 18),
-          _SectionTitle(
-            text: q.isEmpty
-                ? 'العناصر (${list.length})'
-                : 'المطابقة (${visible.length} من ${list.length})',
-            trailing: list.isEmpty
-                ? null
-                : Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _SmallIconButton(
-                        icon: Icons.copy_rounded,
-                        tooltip: 'نسخ القائمة',
-                        onPressed: () => _copyAll(list),
-                      ),
-                      _SmallIconButton(
-                        icon: Icons.delete_sweep_rounded,
-                        tooltip: 'حذف الكل',
-                        color: cs.error,
-                        onPressed: () => _clearAll(list),
-                      ),
-                    ],
-                  ),
-          ),
-          if (list.isEmpty)
-            _EmptyHint(
-              icon: _spec.icon,
-              color: _spec.color,
-              text: 'القائمة فارغة — اكتب في الحقل بالأعلى ثم اضغط +',
-            )
-          else if (visible.isEmpty)
-            _EmptyHint(
-              icon: Icons.search_off_rounded,
-              text: 'لا توجد عناصر مطابقة — اضغط + لإضافة «$typed»',
-            )
-          else
-            _Card(
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final w in visible)
-                    _WordChip(
-                      text: w,
-                      color: _spec.color,
-                      onTap: () => _edit(w),
-                      onDelete: () => _remove(w),
-                    ),
-                ],
-              ),
-            ),
-          const SizedBox(height: 14),
-          const _TipText(
-            'اضغط على العنصر لتعديله و × لحذفه. يمكنك لصق عدة عناصر دفعة واحدة (كل عنصر في سطر).',
-          ),
-        ];
-      },
-    );
-  }
-}
-
-// =============================================================
-// صفحة قيم الكلمات
-// =============================================================
-
-class _WordValuesPage extends StatefulWidget {
-  final _SettingsStore store;
-
-  const _WordValuesPage({required this.store});
-
-  @override
-  State<_WordValuesPage> createState() => _WordValuesPageState();
-}
-
-class _WordValuesPageState extends State<_WordValuesPage> {
-  final _wordCtrl = TextEditingController();
-  final _valueCtrl = TextEditingController();
-
-  _SettingsStore get _store => widget.store;
-
-  @override
-  void dispose() {
-    _wordCtrl.dispose();
-    _valueCtrl.dispose();
-    super.dispose();
-  }
-
-  void _add() {
-    final word = _wordCtrl.text.trim();
-    final value = _parseNumber(_valueCtrl.text);
-    if (word.isEmpty || value == null || value <= 0) {
-      _snack(context, 'أدخل الكلمة وقيمتها الرقمية بشكل صحيح');
-      return;
-    }
-    final replaced = _store.settings.amountWordValues.containsKey(word);
-    _store.setWordValue(word, value);
-    _wordCtrl.clear();
-    _valueCtrl.clear();
-    _snack(
-      context,
-      replaced ? 'تم تحديث قيمة «$word»' : 'أُضيفت «$word» = ${_fmtNum(value)}',
-    );
-  }
-
-  Future<void> _edit(String word, double current) async {
-    final raw = await _promptText(
-      context,
-      title: 'قيمة «$word»',
-      initial: _fmtNum(current),
-      hint: 'القيمة الرقمية',
-      icon: Icons.pin_rounded,
-      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-    );
-    if (raw == null || !mounted) return;
-    final value = _parseNumber(raw);
-    if (value == null || value <= 0) {
-      _snack(context, 'أدخل رقمًا أكبر من صفر');
-      return;
-    }
-    _store.setWordValue(word, value);
-  }
-
-  void _remove(String word, double value) {
-    _store.removeWordValue(word);
-    _snack(
-      context,
-      'حُذفت «$word»',
-      onUndo: () => _store.setWordValue(word, value),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPageScaffold(
-      store: _store,
-      title: 'قيم الكلمات',
-      icon: Icons.calculate_rounded,
-      color: _kIndigo,
-      description:
-          'اربط أي كلمة بقيمة رقمية ليستخدمها التطبيق أثناء اكتشاف المبلغ. مثال: «ستمئة» = 600.',
-      builder: (context) {
-        final entries = _store.settings.amountWordValues.entries.toList()
-          ..sort((a, b) => _ci(a.key, b.key));
-        return [
-          _Card(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      flex: 3,
-                      child: TextField(
-                        controller: _wordCtrl,
-                        textInputAction: TextInputAction.next,
-                        decoration: _fieldDecoration(
-                          context,
-                          hint: 'الكلمة، مثل: ستمئة',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      flex: 2,
-                      child: TextField(
-                        controller: _valueCtrl,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        textInputAction: TextInputAction.done,
-                        onSubmitted: (_) => _add(),
-                        decoration: _fieldDecoration(context, hint: 'القيمة'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                FilledButton.icon(
-                  onPressed: _add,
-                  icon: const Icon(Icons.add_rounded),
-                  label: const Text('إضافة'),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 18),
-          _SectionTitle(text: 'القيم المعرّفة (${entries.length})'),
-          if (entries.isEmpty)
-            const _EmptyHint(
-              icon: Icons.calculate_outlined,
-              color: _kIndigo,
-              text: 'لا توجد قيم بعد.',
-            )
-          else
-            _Card(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < entries.length; i++) ...[
-                    if (i > 0) _ListDivider(indent: 16),
-                    ListTile(
-                      onTap: () => _edit(entries[i].key, entries[i].value),
-                      contentPadding: const EdgeInsetsDirectional.only(
-                        start: 16,
-                        end: 4,
-                      ),
-                      title: Text(
-                        entries[i].key,
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _ValuePill(
-                            text: _fmtNum(entries[i].value),
-                            color: _kIndigo,
-                          ),
-                          _SmallIconButton(
-                            icon: Icons.delete_outline_rounded,
-                            tooltip: 'حذف',
-                            color: Theme.of(context).colorScheme.error,
-                            onPressed: () =>
-                                _remove(entries[i].key, entries[i].value),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          const SizedBox(height: 14),
-          const _TipText('اضغط على أي قيمة لتعديلها.'),
-        ];
-      },
-    );
-  }
 }
 
 // =============================================================
 // صفحة العملات
 // =============================================================
 
-class _CurrenciesPage extends StatefulWidget {
+class _CurrenciesPage extends StatelessWidget {
   final _SettingsStore store;
 
   const _CurrenciesPage({required this.store});
 
-  @override
-  State<_CurrenciesPage> createState() => _CurrenciesPageState();
-}
-
-class _CurrenciesPageState extends State<_CurrenciesPage> {
-  _SettingsStore get _store => widget.store;
-
-  Future<void> _addCurrency({String? presetName}) async {
-    final result = await showDialog<(String, String)>(
-      context: context,
-      builder: (_) => _NewCurrencyDialog(
-        names: _store.currencyNames(),
-        presetName: presetName,
-        ownerOf: _store.currencyOfAlias,
-      ),
+  Future<void> _add(BuildContext context) async {
+    final v = await _promptText(
+      context,
+      title: 'إضافة عملة',
+      hint: 'اسم العملة',
+      icon: Icons.payments_rounded,
+      confirmLabel: 'إضافة',
     );
-    if (result == null || !mounted) return;
-    final error = _store.addCurrencyAlias(result.$1, result.$2);
+    if (v == null || !context.mounted) return;
+    final error = store.addCurrency(v);
     if (error != null) _snack(context, error);
   }
 
-  void _addCommon() {
-    final added = _store.addCommonCurrencies();
+  void _addCommon(BuildContext context) {
+    final added = store.addCommonCurrencies();
     _snack(
       context,
-      added == 0
-          ? 'العملات الشائعة موجودة كلها'
-          : 'أُضيف $added اختصار لعملات شائعة',
+      added == 0 ? 'العملات الشائعة موجودة كلها' : 'أُضيفت $added عملة',
     );
   }
 
-  Future<void> _rename(String name) async {
+  Future<void> _rename(BuildContext context, String name) async {
     final v = await _promptText(
       context,
       title: 'إعادة تسمية العملة',
       initial: name,
-      hint: 'الاسم المعروض الجديد',
+      hint: 'اسم العملة',
     );
-    if (v == null || !mounted) return;
-    _store.renameCurrency(name, v);
+    if (v == null || !context.mounted) return;
+    final error = store.renameCurrency(name, v);
+    if (error != null) _snack(context, error);
   }
 
-  Future<void> _delete(String name, int aliases) async {
+  Future<void> _delete(BuildContext context, String name) async {
     final ok = await _confirm(
       context,
       title: 'حذف العملة',
-      message: 'سيتم حذف «$name» مع اختصاراتها ($aliases). هل تريد المتابعة؟',
+      message: 'حذف «$name»؟',
       confirmLabel: 'حذف',
       danger: true,
     );
-    if (!ok || !mounted) return;
-    final removed = _store.deleteCurrency(name);
+    if (!ok || !context.mounted) return;
+    final removed = store.deleteCurrency(name);
     _snack(
       context,
       'حُذفت عملة «$name»',
-      onUndo: () => _store.restoreCurrencyAliases(removed),
-    );
-  }
-
-  void _removeAlias(String alias, String name) {
-    _store.removeCurrencyAlias(alias);
-    _snack(
-      context,
-      'حُذف «$alias» من «$name»',
-      onUndo: () => _store.addCurrencyAlias(alias, name),
+      onUndo: () => store.restoreCurrency(removed),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return _SubPageScaffold(
-      store: _store,
-      title: 'العملات والاختصارات',
-      icon: Icons.currency_exchange_rounded,
-      color: _kPurple,
-      description:
-          'كل عملة تضم عدة اختصارات أو أسماء (مثل: \$ و USD و دولار) تُعامل كلها كعملة واحدة أثناء التحليل.',
+      store: store,
+      title: 'العملات',
       actions: [
         IconButton(
           tooltip: 'إضافة العملات الشائعة',
-          onPressed: _addCommon,
+          onPressed: () => _addCommon(context),
           icon: const Icon(Icons.playlist_add_rounded),
         ),
       ],
       builder: (context) {
-        final groups = _store.groupedCurrencies();
+        final names = store.currencyNames();
         return [
           FilledButton.tonalIcon(
-            onPressed: () => _addCurrency(),
+            onPressed: () => _add(context),
             icon: const Icon(Icons.add_rounded),
-            label: const Text('إضافة عملة أو اختصار'),
+            label: const Text('إضافة عملة'),
           ),
           const SizedBox(height: 18),
-          _SectionTitle(text: 'العملات (${groups.length})'),
-          if (groups.isEmpty)
+          _SectionTitle(text: 'العملات (${names.length})'),
+          if (names.isEmpty)
             const _EmptyHint(
               icon: Icons.currency_exchange_rounded,
               color: _kPurple,
-              text:
-                  'لا توجد عملات بعد — أضف عملة، أو اضغط زر العملات الشائعة في الأعلى.',
+              text: 'لا توجد عملات',
             )
           else
-            for (final e in groups.entries)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _CurrencyCard(
-                  name: e.key,
-                  aliases: e.value,
-                  onAddAlias: () => _addCurrency(presetName: e.key),
-                  onRemoveAlias: (a) => _removeAlias(a, e.key),
-                  onRename: () => _rename(e.key),
-                  onDelete: () => _delete(e.key, e.value.length),
-                ),
-              ),
-          const SizedBox(height: 10),
-          _SectionTitle(text: 'أدوات'),
-          _Card(
-            padding: EdgeInsets.zero,
-            child: _HubTileView(
-              tile: _HubTile(
-                icon: Icons.percent_rounded,
-                color: _kTeal,
-                title: 'تقسيم الحركات حسب العملة',
-                subtitle: 'قسمة مبالغ الحركات المحفوظة لعملة معيّنة',
-                onTap: () => _openSplitTool(context, _store),
-              ),
+            _NameList(
+              names: names,
+              icon: Icons.payments_rounded,
+              color: _kPurple,
+              onRename: (n) => _rename(context, n),
+              onDelete: (n) => _delete(context, n),
             ),
-          ),
         ];
       },
     );
   }
 }
 
-class _CurrencyCard extends StatelessWidget {
-  final String name;
-  final List<String> aliases;
-  final VoidCallback onAddAlias;
-  final ValueChanged<String> onRemoveAlias;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
+// =============================================================
+// صفحة الوجهات
+// =============================================================
 
-  const _CurrencyCard({
-    required this.name,
-    required this.aliases,
-    required this.onAddAlias,
-    required this.onRemoveAlias,
+class _DestinationsPage extends StatelessWidget {
+  final _SettingsStore store;
+
+  const _DestinationsPage({required this.store});
+
+  Future<void> _add(BuildContext context) async {
+    final v = await _promptText(
+      context,
+      title: 'إضافة وجهة',
+      hint: 'اسم الوجهة',
+      icon: Icons.place_rounded,
+      confirmLabel: 'إضافة',
+    );
+    if (v == null || !context.mounted) return;
+    final error = store.addDestination(v);
+    if (error != null) _snack(context, error);
+  }
+
+  Future<void> _rename(BuildContext context, String name) async {
+    final v = await _promptText(
+      context,
+      title: 'إعادة تسمية الوجهة',
+      initial: name,
+      hint: 'اسم الوجهة',
+    );
+    if (v == null || !context.mounted) return;
+    final error = store.renameDestination(name, v);
+    if (error != null) _snack(context, error);
+  }
+
+  Future<void> _delete(BuildContext context, String name) async {
+    final ok = await _confirm(
+      context,
+      title: 'حذف الوجهة',
+      message: 'حذف «$name»؟',
+      confirmLabel: 'حذف',
+      danger: true,
+    );
+    if (!ok || !context.mounted) return;
+    final removed = store.deleteDestination(name);
+    _snack(
+      context,
+      'حُذفت «$name»',
+      onUndo: () => store.restoreDestination(removed),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SubPageScaffold(
+      store: store,
+      title: 'الوجهات',
+      builder: (context) {
+        final names = store.destinationBook.names;
+        return [
+          FilledButton.tonalIcon(
+            onPressed: () => _add(context),
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('إضافة وجهة'),
+          ),
+          const SizedBox(height: 18),
+          _SectionTitle(text: 'الوجهات (${names.length})'),
+          if (names.isEmpty)
+            const _EmptyHint(
+              icon: Icons.place_rounded,
+              color: kDestColor,
+              text: 'لا توجد وجهات',
+            )
+          else
+            _NameList(
+              names: names,
+              icon: Icons.place_rounded,
+              color: kDestColor,
+              onRename: (n) => _rename(context, n),
+              onDelete: (n) => _delete(context, n),
+            ),
+        ];
+      },
+    );
+  }
+}
+
+/// قائمة أسماء (عملات/وجهات) مع إعادة تسمية وحذف
+class _NameList extends StatelessWidget {
+  final List<String> names;
+  final IconData icon;
+  final Color color;
+  final ValueChanged<String> onRename;
+  final ValueChanged<String> onDelete;
+
+  const _NameList({
+    required this.names,
+    required this.icon,
+    required this.color,
     required this.onRename,
     required this.onDelete,
   });
@@ -1662,202 +613,43 @@ class _CurrencyCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return _Card(
-      padding: const EdgeInsetsDirectional.fromSTEB(14, 10, 6, 14),
+      padding: EdgeInsets.zero,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              const _IconBadge(
-                icon: Icons.payments_rounded,
-                color: _kPurple,
-                size: 38,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      name,
+          for (var i = 0; i < names.length; i++) ...[
+            if (i > 0) const _ListDivider(indent: 66),
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(14, 8, 6, 8),
+              child: Row(
+                children: [
+                  _IconBadge(icon: icon, color: color, size: 38),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      names[i],
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        fontSize: 16,
+                        fontSize: 15.5,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${aliases.length} اختصار / اسم',
-                      style: TextStyle(color: _muted(context), fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-              _SmallIconButton(
-                icon: Icons.edit_rounded,
-                tooltip: 'إعادة تسمية',
-                onPressed: onRename,
-              ),
-              _SmallIconButton(
-                icon: Icons.delete_outline_rounded,
-                tooltip: 'حذف العملة',
-                color: cs.error,
-                onPressed: onDelete,
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Padding(
-            padding: const EdgeInsetsDirectional.only(end: 8),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final a in aliases)
-                  _WordChip(
-                    text: a,
-                    color: _kPurple,
-                    onDelete: () => onRemoveAlias(a),
                   ),
-                _AddChip(label: 'اختصار', onPressed: onAddAlias),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NewCurrencyDialog extends StatefulWidget {
-  final List<String> names;
-  final String? presetName;
-  final String? Function(String alias) ownerOf;
-
-  const _NewCurrencyDialog({
-    required this.names,
-    required this.ownerOf,
-    this.presetName,
-  });
-
-  @override
-  State<_NewCurrencyDialog> createState() => _NewCurrencyDialogState();
-}
-
-class _NewCurrencyDialogState extends State<_NewCurrencyDialog> {
-  final _aliasCtrl = TextEditingController();
-  late final _nameCtrl = TextEditingController(text: widget.presetName ?? '');
-  String? _error;
-
-  @override
-  void dispose() {
-    _aliasCtrl.dispose();
-    _nameCtrl.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final alias = _aliasCtrl.text.trim();
-    final name = _nameCtrl.text.trim();
-    if (alias.isEmpty || name.isEmpty) {
-      setState(() => _error = 'أدخل الاختصار واسم العملة');
-      return;
-    }
-    final owner = widget.ownerOf(alias);
-    if (owner != null) {
-      setState(() => _error = '«$alias» موجود مسبقًا ضمن «$owner»');
-      return;
-    }
-    Navigator.pop(context, (alias, name));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final forExisting = widget.presetName != null;
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: AlertDialog(
-        title: Text(
-          forExisting ? 'اختصار جديد لـ «${widget.presetName}»' : 'إضافة عملة',
-          style: const TextStyle(fontWeight: FontWeight.w900),
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextField(
-                controller: _aliasCtrl,
-                autofocus: true,
-                textInputAction: forExisting
-                    ? TextInputAction.done
-                    : TextInputAction.next,
-                onSubmitted: forExisting ? (_) => _submit() : null,
-                decoration: _fieldDecoration(
-                  context,
-                  hint: 'الاختصار أو الاسم، مثل: QAR أو ﷼',
-                  icon: Icons.alternate_email_rounded,
-                ),
-              ),
-              if (!forExisting) ...[
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _nameCtrl,
-                  textInputAction: TextInputAction.done,
-                  onChanged: (_) => setState(() {}),
-                  onSubmitted: (_) => _submit(),
-                  decoration: _fieldDecoration(
-                    context,
-                    hint: 'اسم العملة المعروض، مثل: ريال قطري',
-                    icon: Icons.label_important_outline_rounded,
+                  _SmallIconButton(
+                    icon: Icons.edit_rounded,
+                    tooltip: 'إعادة تسمية',
+                    onPressed: () => onRename(names[i]),
                   ),
-                ),
-                if (widget.names.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    'أو أضفه إلى عملة موجودة:',
-                    style: TextStyle(color: _muted(context), fontSize: 12.5),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final n in widget.names)
-                        ChoiceChip(
-                          label: Text(n),
-                          selected: _nameCtrl.text.trim() == n,
-                          showCheckmark: false,
-                          visualDensity: VisualDensity.compact,
-                          onSelected: (_) => setState(() => _nameCtrl.text = n),
-                        ),
-                    ],
+                  _SmallIconButton(
+                    icon: Icons.delete_outline_rounded,
+                    tooltip: 'حذف',
+                    color: cs.error,
+                    onPressed: () => onDelete(names[i]),
                   ),
                 ],
-              ],
-              if (_error != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  _error!,
-                  style: TextStyle(
-                    color: cs.error,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('إلغاء'),
-          ),
-          FilledButton(onPressed: _submit, child: const Text('إضافة')),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1958,11 +750,6 @@ class _CurrencySplitDialogState extends State<_CurrencySplitDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                'تُطبَّق مرة واحدة على الحركات المحفوظة فقط، ولا تؤثر على الحركات الجديدة.',
-                style: TextStyle(color: _muted(context), height: 1.5),
-              ),
-              const SizedBox(height: 14),
               DropdownButtonFormField<String>(
                 value: _selected,
                 items: [
@@ -2025,1467 +812,6 @@ class _CurrencySplitDialogState extends State<_CurrencySplitDialog> {
 }
 
 // =============================================================
-// صفحة كلمات الحسابات
-// =============================================================
-
-class _AccountKeywordsPage extends StatefulWidget {
-  final _SettingsStore store;
-
-  const _AccountKeywordsPage({required this.store});
-
-  @override
-  State<_AccountKeywordsPage> createState() => _AccountKeywordsPageState();
-}
-
-class _AccountKeywordsPageState extends State<_AccountKeywordsPage> {
-  late final Listenable _accounts = DatabaseService.accountsBox.listenable();
-  final _searchCtrl = TextEditingController();
-  String _query = '';
-
-  @override
-  void dispose() {
-    _searchCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _addKeyword(Account account) async {
-    final value = await _promptText(
-      context,
-      title: 'كلمة جديدة لـ «${account.name}»',
-      hint: 'كلمة أو اسم مختصر يدل على الحساب',
-      icon: Icons.add_link_rounded,
-      confirmLabel: 'إضافة',
-    );
-    if (value == null || !mounted) return;
-    if (account.keywords.any((e) => _SettingsStore._same(e, value))) {
-      _snack(context, 'الكلمة موجودة لهذا الحساب مسبقًا');
-      return;
-    }
-    account.keywords = List<String>.from(account.keywords)
-      ..add(value)
-      ..sort(_ci);
-    await account.save();
-  }
-
-  Future<void> _removeKeyword(Account account, String word) async {
-    account.keywords = List<String>.from(account.keywords)..remove(word);
-    await account.save();
-    if (!mounted) return;
-    _snack(
-      context,
-      'حُذفت «$word» من «${account.name}»',
-      onUndo: () async {
-        if (!account.isInBox || account.keywords.contains(word)) return;
-        account.keywords = List<String>.from(account.keywords)
-          ..add(word)
-          ..sort(_ci);
-        await account.save();
-      },
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPageScaffold(
-      store: widget.store,
-      title: 'كلمات الحسابات',
-      icon: Icons.manage_search_rounded,
-      color: _kTeal,
-      description:
-          'كلمات إضافية لكل حساب تساعد التطبيق على اختيار الحساب تلقائيًا عند لصق نص أو استيراد ملف (مثل اسم مختصر أو اسم الشخص المسؤول).',
-      extraListenable: _accounts,
-      builder: (context) {
-        final accounts = DatabaseService.accountsBox.values.toList()
-          ..sort((a, b) => _ci(a.name, b.name));
-        final q = _norm(_query.trim());
-        final visible = q.isEmpty
-            ? accounts
-            : accounts
-                  .where(
-                    (a) =>
-                        _norm(a.name).contains(q) ||
-                        a.keywords.any((k) => _norm(k).contains(q)),
-                  )
-                  .toList();
-        return [
-          if (accounts.length > 4) ...[
-            TextField(
-              controller: _searchCtrl,
-              textInputAction: TextInputAction.search,
-              onChanged: (v) => setState(() => _query = v),
-              decoration: _fieldDecoration(
-                context,
-                hint: 'ابحث عن حساب أو كلمة…',
-                icon: Icons.search_rounded,
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
-          if (accounts.isEmpty)
-            const _EmptyHint(
-              icon: Icons.account_balance_wallet_outlined,
-              color: _kTeal,
-              text: 'لا توجد حسابات بعد — أضف حسابًا من الصفحة الرئيسية أولًا.',
-            )
-          else if (visible.isEmpty)
-            const _EmptyHint(
-              icon: Icons.search_off_rounded,
-              text: 'لا يوجد حساب مطابق',
-            )
-          else
-            for (final a in visible)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _AccountKeywordsCard(
-                  account: a,
-                  onAdd: () => _addKeyword(a),
-                  onRemove: (w) => _removeKeyword(a, w),
-                ),
-              ),
-        ];
-      },
-    );
-  }
-}
-
-class _AccountKeywordsCard extends StatelessWidget {
-  final Account account;
-  final VoidCallback onAdd;
-  final ValueChanged<String> onRemove;
-
-  const _AccountKeywordsCard({
-    required this.account,
-    required this.onAdd,
-    required this.onRemove,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isCompany = account.type.isCompany;
-    final color = isCompany ? _kPurple : _kTeal;
-    return _Card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              _IconBadge(
-                icon: isCompany
-                    ? Icons.business_rounded
-                    : Icons.account_balance_wallet_rounded,
-                color: color,
-                size: 38,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      account.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 15.5,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${account.type.label} • ${account.keywords.length} كلمة',
-                      style: TextStyle(color: _muted(context), fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final w in account.keywords)
-                _WordChip(text: w, color: color, onDelete: () => onRemove(w)),
-              _AddChip(label: 'كلمة', onPressed: onAdd),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// =============================================================
-// صفحة مظهر الفقاعات وسلوكها
-// =============================================================
-
-class _BubbleAppearancePage extends StatelessWidget {
-  final _SettingsStore store;
-
-  const _BubbleAppearancePage({required this.store});
-
-  void _reset(BuildContext context) {
-    final previous = store.bubblePrefs;
-    store.setBubblePrefs(const BubbleUiPrefs());
-    _snack(
-      context,
-      'تمت استعادة التصميم الافتراضي',
-      onUndo: () => store.setBubblePrefs(previous),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPageScaffold(
-      store: store,
-      title: 'مظهر الفقاعات وسلوكها',
-      icon: Icons.palette_rounded,
-      color: _kPink,
-      description:
-          'غيّر شكل شاشة تحليل الرسائل (الفقاعات): حجم الخط، الألوان، ما يظهر في الشاشة وطريقة الترتيب والتنبيهات. تظهر التغييرات في المعاينة مباشرة.',
-      actions: [
-        IconButton(
-          tooltip: 'استعادة الافتراضي',
-          onPressed: () => _reset(context),
-          icon: const Icon(Icons.restart_alt_rounded),
-        ),
-      ],
-      builder: (context) {
-        final p = store.bubblePrefs;
-        void set(BubbleUiPrefs v) => store.setBubblePrefs(v);
-
-        return [
-          const _SectionTitle(text: 'معاينة'),
-          _Card(
-            child: _BubblePreview(
-              prefs: p,
-              actions: [
-                for (final a in store.settings.bubbleQuickActions)
-                  if (a.enabled) a,
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const _SectionTitle(text: 'الخط والعرض'),
-          _Card(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _SliderRow(
-                  icon: Icons.format_size_rounded,
-                  title: 'حجم خط الكلمات',
-                  valueText: p.tokenFontSize.toStringAsFixed(0),
-                  value: p.tokenFontSize,
-                  min: BubbleUiPrefs.minFontSize,
-                  max: BubbleUiPrefs.maxFontSize,
-                  divisions:
-                      (BubbleUiPrefs.maxFontSize - BubbleUiPrefs.minFontSize)
-                          .round(),
-                  onChanged: (v) => set(p.copyWith(tokenFontSize: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.density_small_rounded,
-                  title: 'عرض مضغوط',
-                  subtitle: 'فقاعات أصغر ومسافات أقل لعرض رسائل أكثر',
-                  value: p.compact,
-                  onChanged: (v) => set(p.copyWith(compact: v)),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const _SectionTitle(text: 'ما يظهر في الشاشة'),
-          _Card(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _SwitchRow(
-                  icon: Icons.person_outline_rounded,
-                  title: 'اسم المرسل والوقت',
-                  subtitle: 'يظهر أعلى كل فقاعة',
-                  value: p.showSenderHeader,
-                  onChanged: (v) => set(p.copyWith(showSenderHeader: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.legend_toggle_rounded,
-                  title: 'دليل الألوان',
-                  subtitle: 'شرح مختصر لألوان الفقاعات أعلى الشاشة',
-                  value: p.showLegend,
-                  onChanged: (v) => set(p.copyWith(showLegend: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.touch_app_outlined,
-                  title: 'الأزرار السريعة',
-                  subtitle: 'الأزرار المعرّفة في صفحة «الأزرار السريعة»',
-                  value: p.showQuickActions,
-                  onChanged: (v) => set(p.copyWith(showQuickActions: v)),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const _SectionTitle(text: 'الترتيب والسلوك'),
-          _Card(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _SwitchRow(
-                  icon: Icons.sort_rounded,
-                  title: 'غير المكتمل أولًا',
-                  subtitle:
-                      'ترتيب الفقاعات الناقصة قبل الجاهزة (وإلا الترتيب الزمني)',
-                  value: p.incompleteFirst,
-                  onChanged: (v) => set(p.copyWith(incompleteFirst: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.keyboard_double_arrow_left_rounded,
-                  title: 'تمديد الاسم تلقائيًا',
-                  subtitle:
-                      'عند الضغط على كلمة يمتد الاسم حتى نهاية السطر أو أول كلمة ممنوعة/رقم/عملة',
-                  value: p.autoExtendName,
-                  onChanged: (v) => set(p.copyWith(autoExtendName: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.gpp_maybe_rounded,
-                  title: 'تأكيد قبل حفظ رسالة فيها جملة ممنوعة',
-                  subtitle: 'يظهر تنبيه يعرض الجمل الممنوعة قبل الحفظ',
-                  value: p.confirmForbiddenPhrase,
-                  onChanged: (v) => set(p.copyWith(confirmForbiddenPhrase: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.rule_rounded,
-                  title: 'تأكيد عند وجود مبلغين أو عملتين',
-                  subtitle: p.confirmMultiAmount
-                      ? 'مفعّل: إذا وُجد في الرسالة مبلغان وعملتان، أو مبلغان مختلفان، أو المبلغ بالحروف غير المبلغ بالأرقام، تظهر رسالة تنبيه وتؤكد بنفسك: تعتمد المبلغين معًا (المبلغ + المبلغ الثاني) أو تختار مبلغًا واحدًا'
-                      : 'متوقف: يُختار بدون تأكيد — مبلغان بعملتين يُعتمدان معًا (المبلغ + المبلغ الثاني)، وغير ذلك المبلغ الأرجح، مع تنبيه صغير يمكنك منه التغيير',
-                  value: p.confirmMultiAmount,
-                  onChanged: (v) => set(p.copyWith(confirmMultiAmount: v)),
-                ),
-                const _ListDivider(),
-                _SliderRow(
-                  icon: Icons.content_copy_rounded,
-                  title: 'فحص التكرار',
-                  subtitle:
-                      'البحث عن حركة بنفس الاسم والمبلغ والعملة خلال آخر ${p.duplicateDays} يومًا',
-                  valueText: '${p.duplicateDays} يوم',
-                  value: p.duplicateDays.clamp(1, 90).toDouble(),
-                  min: 1,
-                  max: 90,
-                  divisions: 89,
-                  onChanged: (v) => set(p.copyWith(duplicateDays: v.round())),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const _SectionTitle(text: 'الألوان'),
-          _Card(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _ColorRow(
-                  label: 'لون الاسم',
-                  selected: p.nameColor,
-                  onPick: (c) => set(p.copyWith(nameColor: c)),
-                ),
-                const SizedBox(height: 16),
-                _ColorRow(
-                  label: 'لون المبلغ',
-                  selected: p.amountColor,
-                  onPick: (c) => set(p.copyWith(amountColor: c)),
-                ),
-                const SizedBox(height: 16),
-                _ColorRow(
-                  label: 'لون العملة',
-                  selected: p.currencyColor,
-                  onPick: (c) => set(p.copyWith(currencyColor: c)),
-                ),
-              ],
-            ),
-          ),
-        ];
-      },
-    );
-  }
-}
-
-/// معاينة مصغّرة لفقاعة تعكس التفضيلات الحالية.
-class _BubblePreview extends StatelessWidget {
-  final BubbleUiPrefs prefs;
-  final List<BubbleQuickActionConfig> actions;
-
-  const _BubblePreview({required this.prefs, this.actions = const []});
-
-  @override
-  Widget build(BuildContext context) {
-    final p = prefs;
-    final cs = Theme.of(context).colorScheme;
-    final dark = _isDark(context);
-
-    Widget chip(String text, Color? color, {bool strike = false}) {
-      final fg = color == null
-          ? cs.onSurface.withValues(alpha: .78)
-          : Color.lerp(
-              color,
-              dark ? Colors.white : Colors.black,
-              dark ? .28 : .22,
-            )!;
-      return Container(
-        padding: p.compact
-            ? const EdgeInsets.symmetric(horizontal: 7, vertical: 4)
-            : const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: (color ?? cs.onSurface).withValues(
-            alpha: color == null ? .06 : .14,
-          ),
-          borderRadius: BorderRadius.circular(p.compact ? 10 : 14),
-          border: Border.all(
-            color: (color ?? cs.onSurface).withValues(
-              alpha: color == null ? .14 : .75,
-            ),
-          ),
-        ),
-        child: Text(
-          text,
-          style: TextStyle(
-            color: fg,
-            fontSize: p.tokenFontSize,
-            fontWeight: FontWeight.w700,
-            decoration: strike ? TextDecoration.lineThrough : null,
-            decorationColor: fg,
-          ),
-        ),
-      );
-    }
-
-    Widget legendDot(String label, Color color) => Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 9,
-          height: 9,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 5),
-        Text(label, style: TextStyle(fontSize: 11.5, color: _muted(context))),
-      ],
-    );
-
-    Widget quickButton(String label, IconData icon) => Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.primary.withValues(alpha: .30)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 15, color: cs.primary),
-          const SizedBox(width: 5),
-          Text(
-            label,
-            style: TextStyle(
-              color: cs.primary,
-              fontWeight: FontWeight.w800,
-              fontSize: 12,
-            ),
-          ),
-        ],
-      ),
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (p.showLegend) ...[
-          Wrap(
-            spacing: 14,
-            runSpacing: 6,
-            children: [
-              legendDot('اسم', p.nameColorValue),
-              legendDot('مبلغ', p.amountColorValue),
-              legendDot('عملة', p.currencyColorValue),
-            ],
-          ),
-          const SizedBox(height: 10),
-        ],
-        Container(
-          width: double.infinity,
-          padding: EdgeInsets.all(p.compact ? 10 : 14),
-          decoration: BoxDecoration(
-            color: cs.surfaceContainerHighest.withValues(alpha: .45),
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (p.showSenderHeader) ...[
-                Row(
-                  children: [
-                    Icon(
-                      Icons.person_rounded,
-                      size: 15,
-                      color: _muted(context),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      'محمد • 10:30',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: _muted(context),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: p.compact ? 6 : 10),
-              ],
-              Wrap(
-                spacing: p.compact ? 6 : 8,
-                runSpacing: p.compact ? 6 : 8,
-                children: [
-                  chip('المستفيد', null),
-                  chip('أحمد', p.nameColorValue),
-                  chip('علي', p.nameColorValue),
-                  chip('500', p.amountColorValue),
-                  chip('دولار', p.currencyColorValue),
-                  chip('المرسل', const Color(0xFFD84315), strike: true),
-                ],
-              ),
-              if (p.showQuickActions) ...[
-                SizedBox(height: p.compact ? 8 : 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: actions.isEmpty
-                      ? [
-                          quickButton('00', Icons.exposure_zero_rounded),
-                          quickButton(
-                            'اسم جاهز',
-                            Icons.person_add_alt_1_rounded,
-                          ),
-                        ]
-                      : [
-                          for (final a in actions.take(5))
-                            QuickActionButton(
-                              action: a,
-                              size: p.quickActionsSize,
-                              onPressed: () {},
-                            ),
-                        ],
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ColorRow extends StatelessWidget {
-  final String label;
-  final int selected;
-  final ValueChanged<int> onPick;
-
-  const _ColorRow({
-    required this.label,
-    required this.selected,
-    required this.onPick,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-        ),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final c in BubbleUiPrefs.palette)
-              InkWell(
-                onTap: () => onPick(c),
-                customBorder: const CircleBorder(),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: Color(c),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: c == selected ? cs.onSurface : Colors.transparent,
-                      width: 2.4,
-                    ),
-                    boxShadow: c == selected
-                        ? [
-                            BoxShadow(
-                              color: Color(c).withValues(alpha: .45),
-                              blurRadius: 8,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: c == selected
-                      ? const Icon(Icons.check, color: Colors.white, size: 18)
-                      : null,
-                ),
-              ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-// =============================================================
-// صفحة الأزرار السريعة
-// =============================================================
-
-/// أزرار مقترحة (إضافة بضغطة)
-List<BubbleQuickActionConfig> _quickPresets(List<String> currencies) {
-  var id = DateTime.now().millisecondsSinceEpoch;
-  BubbleQuickActionConfig make(
-    String type, {
-    String? label,
-    String? value,
-    int? color,
-    String style = 'tonal',
-  }) {
-    final t = quickActionTypeOf(type);
-    return BubbleQuickActionConfig(
-      id: id++,
-      label: label ?? t.defaultLabel,
-      iconKey: t.icon,
-      actionType: type,
-      value: value ?? t.defaultValue,
-      colorValue: color,
-      style: style,
-    );
-  }
-
-  return [
-    make('appendZeros', label: '000', value: '3', color: 0xFFF08006),
-    make('removeZeros', label: '÷1000', value: '3', color: 0xFF546E7A),
-    make('copySummary', color: 0xFF1E88E5),
-    make('addToNotes', color: 0xFF8E24AA),
-    make('pasteName', color: 0xFF3F51B5),
-    make('saveNow', color: 0xFF43A047, style: 'filled'),
-    make('setMode', label: 'إلغاء', value: 'cancel', color: 0xFFE53935),
-    make('clearAll', color: 0xFF6D4C41),
-    if (currencies.isNotEmpty)
-      make(
-        'setCurrency',
-        label: currencies.first,
-        value: currencies.first,
-        color: 0xFF00897B,
-      ),
-    make('setDestination', color: 0xFF0E7490),
-  ];
-}
-
-String _quickActionDetails(BubbleQuickActionConfig a) {
-  final t = quickActionTypeOf(a.actionType);
-  final where = <String>[
-    if (a.modes.isNotEmpty)
-      a.modes.map((m) => quickActionModeLabels[m] ?? m).join('/'),
-    if (a.scope == 'office') 'المكاتب',
-    if (a.scope == 'company' || t.companyOnly) 'الشركات',
-  ];
-  return [
-    t.title,
-    if (a.value.trim().isNotEmpty) '«${a.value.trim()}»',
-    if (where.isNotEmpty) 'بـ ${where.join(' • ')}',
-    if (!a.enabled) 'مخفي',
-  ].join(' • ');
-}
-
-class _QuickActionsPage extends StatefulWidget {
-  final _SettingsStore store;
-
-  const _QuickActionsPage({required this.store});
-
-  @override
-  State<_QuickActionsPage> createState() => _QuickActionsPageState();
-}
-
-class _QuickActionsPageState extends State<_QuickActionsPage> {
-  _SettingsStore get _store => widget.store;
-
-  Future<void> _edit([BubbleQuickActionConfig? existing]) async {
-    final action = await showModalBottomSheet<BubbleQuickActionConfig>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      useSafeArea: true,
-      builder: (_) => _QuickActionSheet(
-        initial: existing,
-        currencyNames: _store.currencyNames(),
-        destinationNames: _store.destinationBook.names,
-        size: _store.bubblePrefs.quickActionsSize,
-      ),
-    );
-    if (action == null || !mounted) return;
-    if (existing == null) {
-      _store.addQuickAction(action);
-      _snack(context, 'أُضيف زر «${action.label}»');
-    } else {
-      _store.updateQuickAction(action);
-    }
-  }
-
-  void _remove(BubbleQuickActionConfig action) {
-    final index = _store.removeQuickAction(action);
-    if (index < 0) return;
-    _snack(
-      context,
-      'حُذف زر «${action.label}»',
-      onUndo: () => _store.addQuickAction(action, at: index),
-    );
-  }
-
-  void _duplicate(BubbleQuickActionConfig action) {
-    final list = _store.settings.bubbleQuickActions;
-    final i = list.indexWhere((a) => a.id == action.id);
-    _store.addQuickAction(
-      action.copy(id: DateTime.now().millisecondsSinceEpoch),
-      at: i < 0 ? null : i + 1,
-    );
-    _snack(context, 'انعملت نسخة من «${action.label}»');
-  }
-
-  void _addPreset(BubbleQuickActionConfig preset) {
-    _store.addQuickAction(
-      preset.copy(id: DateTime.now().millisecondsSinceEpoch),
-    );
-    _snack(context, 'أُضيف زر «${preset.label}»');
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPageScaffold(
-      store: _store,
-      title: 'الأزرار السريعة',
-      icon: Icons.touch_app_rounded,
-      color: _kCyan,
-      description:
-          'أزرار داخل كل فقاعة بشاشة التحليل: أصفار، اسم جاهز، لصق، عملة، '
-          'وجهة، نسخ ملخص، إضافة للحافظة، حفظ الفقاعة لحالها… غيّر لون كل '
-          'زر وشكله ووين يظهر، ورتّبها بالسحب.',
-      builder: (context) {
-        final actions = _store.settings.bubbleQuickActions;
-        final p = _store.bubblePrefs;
-        final enabled = [
-          for (final a in actions)
-            if (a.enabled) a,
-        ];
-        final presets = _quickPresets(_store.currencyNames());
-        return [
-          const _SectionTitle(text: 'معاينة'),
-          _Card(
-            child: enabled.isEmpty
-                ? Text(
-                    'ما في أزرار ظاهرة.',
-                    style: TextStyle(color: _muted(context)),
-                  )
-                : Wrap(
-                    spacing: p.quickActionsSize == 0 ? 6 : 8,
-                    runSpacing: p.quickActionsSize == 0 ? 6 : 8,
-                    children: [
-                      for (final a in enabled)
-                        QuickActionButton(
-                          action: a,
-                          size: p.quickActionsSize,
-                          onPressed: () => _edit(a),
-                        ),
-                    ],
-                  ),
-          ),
-          const SizedBox(height: 18),
-          const _SectionTitle(text: 'طريقة العرض'),
-          _Card(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _SwitchRow(
-                  icon: Icons.touch_app_rounded,
-                  title: 'إظهار الأزرار بالفقاعات',
-                  subtitle: 'إذا طفيتها بتختفي كل الأزرار من شاشة التحليل',
-                  value: p.showQuickActions,
-                  onChanged: (v) =>
-                      _store.setBubblePrefs(p.copyWith(showQuickActions: v)),
-                ),
-                const _ListDivider(),
-                _SwitchRow(
-                  icon: Icons.vertical_align_bottom_rounded,
-                  title: 'تحت الفقاعة',
-                  subtitle: 'الأزرار بعد كلمات الرسالة بدل ما تكون فوقها',
-                  value: p.quickActionsBottom,
-                  onChanged: (v) =>
-                      _store.setBubblePrefs(p.copyWith(quickActionsBottom: v)),
-                ),
-                const _ListDivider(),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
-                  child: Row(
-                    children: [
-                      Icon(Icons.format_size_rounded, color: _muted(context)),
-                      const SizedBox(width: 16),
-                      const Expanded(
-                        child: Text(
-                          'حجم الأزرار',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                      SegmentedButton<int>(
-                        showSelectedIcon: false,
-                        segments: const [
-                          ButtonSegment(value: 0, label: Text('صغير')),
-                          ButtonSegment(value: 1, label: Text('عادي')),
-                          ButtonSegment(value: 2, label: Text('كبير')),
-                        ],
-                        selected: {p.quickActionsSize},
-                        onSelectionChanged: (s) => _store.setBubblePrefs(
-                          p.copyWith(quickActionsSize: s.first),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 18),
-          Row(
-            children: [
-              Expanded(
-                child: _SectionTitle(text: 'الأزرار (${actions.length})'),
-              ),
-              FilledButton.icon(
-                onPressed: () => _edit(),
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('زر جديد'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          if (actions.isEmpty)
-            const _EmptyHint(
-              icon: Icons.touch_app_outlined,
-              color: _kCyan,
-              text: 'لا توجد أزرار بعد — أضف زرًا أو اختار من المقترحة تحت.',
-            )
-          else
-            _Card(
-              padding: EdgeInsets.zero,
-              child: ReorderableListView(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                buildDefaultDragHandles: false,
-                onReorder: _store.moveQuickAction,
-                children: [
-                  for (var i = 0; i < actions.length; i++)
-                    _QuickActionRow(
-                      key: ObjectKey(actions[i]),
-                      index: i,
-                      action: actions[i],
-                      onTap: () => _edit(actions[i]),
-                      onToggle: (v) =>
-                          _store.updateQuickAction(actions[i].copy(enabled: v)),
-                      onDuplicate: () => _duplicate(actions[i]),
-                      onDelete: () => _remove(actions[i]),
-                    ),
-                ],
-              ),
-            ),
-          const SizedBox(height: 18),
-          const _SectionTitle(text: 'أزرار مقترحة'),
-          _Card(
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final pr in presets)
-                  ActionChip(
-                    avatar: Icon(
-                      quickActionIcon(pr.iconKey),
-                      size: 18,
-                      color: pr.colorValue == null
-                          ? null
-                          : _fg(context, Color(pr.colorValue!)),
-                    ),
-                    label: Text(
-                      '${pr.label} • ${quickActionTypeOf(pr.actionType).title}',
-                    ),
-                    onPressed: () => _addPreset(pr),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-          const _TipText(
-            'اسحب الزر من المقبض ⋮⋮ لترتيبه. الزر المطفي بيختفي من الفقاعات بدون '
-            'ما ينحذف. أزرار الوجهة ونوع حركة الشركة بتظهر بحسابات الشركات بس.',
-          ),
-        ];
-      },
-    );
-  }
-}
-
-class _QuickActionRow extends StatelessWidget {
-  final int index;
-  final BubbleQuickActionConfig action;
-  final VoidCallback onTap;
-  final ValueChanged<bool> onToggle;
-  final VoidCallback onDuplicate;
-  final VoidCallback onDelete;
-
-  const _QuickActionRow({
-    super.key,
-    required this.index,
-    required this.action,
-    required this.onTap,
-    required this.onToggle,
-    required this.onDuplicate,
-    required this.onDelete,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = action.colorValue == null
-        ? Theme.of(context).colorScheme.primary
-        : Color(action.colorValue!);
-    return Opacity(
-      opacity: action.enabled ? 1 : .55,
-      child: ListTile(
-        onTap: onTap,
-        contentPadding: const EdgeInsetsDirectional.only(start: 4, end: 0),
-        leading: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ReorderableDragStartListener(
-              index: index,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: Icon(
-                  Icons.drag_indicator_rounded,
-                  color: _muted(context),
-                ),
-              ),
-            ),
-            _IconBadge(
-              icon: quickActionIcon(action.iconKey),
-              color: color,
-              size: 38,
-            ),
-          ],
-        ),
-        title: Text(
-          action.label.trim().isEmpty
-              ? quickActionTypeOf(action.actionType).defaultLabel
-              : action.label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontWeight: FontWeight.w800),
-        ),
-        subtitle: Text(
-          _quickActionDetails(action),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: _muted(context), fontSize: 12),
-        ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Switch(value: action.enabled, onChanged: onToggle),
-            PopupMenuButton<String>(
-              tooltip: 'خيارات',
-              onSelected: (v) {
-                if (v == 'edit') onTap();
-                if (v == 'dup') onDuplicate();
-                if (v == 'del') onDelete();
-              },
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'edit', child: Text('تعديل')),
-                PopupMenuItem(value: 'dup', child: Text('نسخة منه')),
-                PopupMenuItem(value: 'del', child: Text('حذف')),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _QuickActionSheet extends StatefulWidget {
-  final BubbleQuickActionConfig? initial;
-  final List<String> currencyNames;
-  final List<String> destinationNames;
-  final int size;
-
-  const _QuickActionSheet({
-    this.initial,
-    required this.currencyNames,
-    required this.destinationNames,
-    this.size = 1,
-  });
-
-  @override
-  State<_QuickActionSheet> createState() => _QuickActionSheetState();
-}
-
-class _QuickActionSheetState extends State<_QuickActionSheet> {
-  late String _type = widget.initial?.actionType ?? 'appendZeros';
-  late String _icon = widget.initial?.iconKey ?? quickActionTypeOf(_type).icon;
-  late bool _iconAbove = widget.initial?.iconAbove ?? false;
-  late int? _color = widget.initial?.colorValue;
-  late String _style = widget.initial?.style ?? 'tonal';
-  late String _display = widget.initial?.display ?? '';
-  late final Set<String> _modes = {...?widget.initial?.modes};
-  late String _scope = widget.initial?.scope ?? '';
-  late final _labelCtrl = TextEditingController(
-    text: widget.initial?.label ?? quickActionTypeOf(_type).defaultLabel,
-  );
-  late final _valueCtrl = TextEditingController(
-    text: widget.initial?.value ?? quickActionTypeOf(_type).defaultValue,
-  );
-  String? _error;
-
-  bool get _editing => widget.initial != null;
-
-  @override
-  void initState() {
-    super.initState();
-    _labelCtrl.addListener(_refresh);
-    _valueCtrl.addListener(_refresh);
-  }
-
-  void _refresh() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    _labelCtrl.dispose();
-    _valueCtrl.dispose();
-    super.dispose();
-  }
-
-  void _selectType(String t) {
-    final old = quickActionTypeOf(_type);
-    final next = quickActionTypeOf(t);
-    setState(() {
-      // نغيّر النص والأيقونة والقيمة إذا كانوا افتراضيين للنوع القديم
-      if (_labelCtrl.text.trim().isEmpty ||
-          _labelCtrl.text.trim() == old.defaultLabel) {
-        _labelCtrl.text = next.defaultLabel;
-      }
-      if (_icon == old.icon) _icon = next.icon;
-      if (_valueCtrl.text.trim().isEmpty ||
-          _valueCtrl.text.trim() == old.defaultValue) {
-        _valueCtrl.text = next.defaultValue;
-      }
-      _type = t;
-      _error = null;
-    });
-  }
-
-  BubbleQuickActionConfig _build() {
-    final t = quickActionTypeOf(_type);
-    final label = _labelCtrl.text.trim();
-    return BubbleQuickActionConfig(
-      id: widget.initial?.id ?? DateTime.now().millisecondsSinceEpoch,
-      label: label.isEmpty ? t.defaultLabel : label,
-      iconKey: _icon,
-      actionType: _type,
-      value: t.hasValue ? _valueCtrl.text.trim() : '',
-      iconAbove: _iconAbove,
-      colorValue: _color,
-      enabled: widget.initial?.enabled ?? true,
-      style: _style,
-      modes: _modes.toList(),
-      scope: _scope,
-      display: _display,
-    );
-  }
-
-  void _submit() {
-    final t = quickActionTypeOf(_type);
-    var value = _asciiDigits(_valueCtrl.text.trim());
-    if (t.valueRequired && value.isEmpty) {
-      setState(() => _error = 'اكتب القيمة: ${t.valueHint}');
-      return;
-    }
-    if (_type == 'appendZeros' || _type == 'removeZeros') {
-      final n = int.tryParse(value);
-      if (n == null || n < 1 || n > 6) {
-        setState(() => _error = 'عدد الأصفار لازم يكون من 1 إلى 6');
-        return;
-      }
-      _valueCtrl.text = value;
-    }
-    if (_type == 'setAmount') {
-      final v = double.tryParse(value.replaceAll(RegExp(r'[^0-9.]'), ''));
-      if (v == null || v <= 0) {
-        setState(() => _error = 'اكتب مبلغ صحيح');
-        return;
-      }
-      _valueCtrl.text = value;
-    }
-    Navigator.pop(context, _build());
-  }
-
-  void _insertToken(String token) {
-    final text = _valueCtrl.text;
-    final sel = _valueCtrl.selection;
-    final at = sel.isValid ? sel.end : text.length;
-    final next = text.replaceRange(at, at, token);
-    _valueCtrl.value = TextEditingValue(
-      text: next,
-      selection: TextSelection.collapsed(offset: at + token.length),
-    );
-  }
-
-  List<(String, String)> get _valueChoices {
-    switch (_type) {
-      case 'setCurrency':
-        return [for (final c in widget.currencyNames) (c, c)];
-      case 'setDestination':
-        return [
-          ('', 'قائمة الوجهات'),
-          for (final d in widget.destinationNames) (d, d),
-        ];
-      case 'setMovement':
-        return const [('sent', 'مرسلة'), ('received', 'استقبال')];
-      case 'setMode':
-        return const [('add', 'إضافة'), ('edit', 'تعديل'), ('cancel', 'إلغاء')];
-      case 'appendZeros':
-      case 'removeZeros':
-        return const [('1', '0'), ('2', '00'), ('3', '000'), ('6', '000000')];
-      default:
-        return const [];
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final t = quickActionTypeOf(_type);
-    final isTemplate = _type == 'copySummary' || _type == 'addToNotes';
-    final choices = _valueChoices;
-
-    Widget section(String title) => Padding(
-      padding: const EdgeInsets.only(top: 16, bottom: 8),
-      child: Text(
-        title,
-        style: TextStyle(
-          fontWeight: FontWeight.w900,
-          fontSize: 14,
-          color: _muted(context),
-        ),
-      ),
-    );
-
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _editing ? 'تعديل الزر' : 'زر سريع جديد',
-                      style: const TextStyle(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: cs.surfaceContainerHighest.withValues(alpha: .5),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: QuickActionButton(
-                      action: _build(),
-                      size: widget.size,
-                      onPressed: () {},
-                    ),
-                  ),
-                ],
-              ),
-              section('شو بيعمل الزر؟'),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  for (final type in quickActionTypes)
-                    ChoiceChip(
-                      avatar: Icon(quickActionIcon(type.icon), size: 17),
-                      label: Text(type.title),
-                      selected: _type == type.id,
-                      showCheckmark: false,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (_) => _selectType(type.id),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                t.description +
-                    (t.companyOnly ? ' — بيظهر بحسابات الشركات بس.' : ''),
-                style: TextStyle(
-                  color: _muted(context),
-                  fontSize: 12.5,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 14),
-              TextField(
-                controller: _labelCtrl,
-                textInputAction: t.hasValue
-                    ? TextInputAction.next
-                    : TextInputAction.done,
-                decoration: _fieldDecoration(
-                  context,
-                  label: 'نص الزر',
-                  hint: t.defaultLabel,
-                  icon: Icons.label_outline_rounded,
-                ),
-              ),
-              if (t.hasValue) ...[
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _valueCtrl,
-                  keyboardType: t.numeric
-                      ? TextInputType.number
-                      : TextInputType.text,
-                  minLines: 1,
-                  maxLines: isTemplate ? 3 : 1,
-                  textInputAction: isTemplate
-                      ? TextInputAction.newline
-                      : TextInputAction.done,
-                  onSubmitted: isTemplate ? null : (_) => _submit(),
-                  decoration: _fieldDecoration(
-                    context,
-                    label: isTemplate ? 'القالب' : 'القيمة',
-                    hint: t.valueHint,
-                    icon: Icons.edit_note_rounded,
-                  ),
-                ),
-                if (choices.isNotEmpty || isTemplate) ...[
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final c in choices)
-                        ChoiceChip(
-                          label: Text(c.$2),
-                          selected: _valueCtrl.text.trim() == c.$1,
-                          showCheckmark: false,
-                          visualDensity: VisualDensity.compact,
-                          onSelected: (_) => _valueCtrl.text = c.$1,
-                        ),
-                      if (isTemplate)
-                        for (final token in quickTemplateTokens)
-                          ActionChip(
-                            label: Text(token),
-                            visualDensity: VisualDensity.compact,
-                            onPressed: () => _insertToken(token),
-                          ),
-                    ],
-                  ),
-                ],
-              ],
-              section('الأيقونة'),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  for (final k in quickActionIconKeys)
-                    ChoiceChip(
-                      label: Icon(quickActionIcon(k), size: 20),
-                      selected: _icon == k,
-                      showCheckmark: false,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (_) => setState(() => _icon = k),
-                    ),
-                ],
-              ),
-              section('اللون'),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  ChoiceChip(
-                    label: const Text('لون التطبيق'),
-                    selected: _color == null,
-                    showCheckmark: false,
-                    visualDensity: VisualDensity.compact,
-                    onSelected: (_) => setState(() => _color = null),
-                  ),
-                  for (final c in quickActionPalette)
-                    InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: () => setState(() => _color = c),
-                      child: Container(
-                        width: 34,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          color: Color(c),
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: _color == c
-                                ? cs.onSurface
-                                : Colors.transparent,
-                            width: 3,
-                          ),
-                        ),
-                        child: _color == c
-                            ? const Icon(
-                                Icons.check_rounded,
-                                color: Colors.white,
-                                size: 18,
-                              )
-                            : null,
-                      ),
-                    ),
-                ],
-              ),
-              section('الشكل'),
-              SegmentedButton<String>(
-                showSelectedIcon: false,
-                segments: [
-                  for (final e in quickActionStyles.entries)
-                    ButtonSegment(value: e.key, label: Text(e.value)),
-                ],
-                selected: {_style},
-                onSelectionChanged: (s) => setState(() => _style = s.first),
-              ),
-              const SizedBox(height: 10),
-              SegmentedButton<String>(
-                showSelectedIcon: false,
-                segments: const [
-                  ButtonSegment(value: '', label: Text('أيقونة ونص')),
-                  ButtonSegment(value: 'icon', label: Text('أيقونة')),
-                  ButtonSegment(value: 'text', label: Text('نص')),
-                ],
-                selected: {_display},
-                onSelectionChanged: (s) => setState(() => _display = s.first),
-              ),
-              if (_display.isEmpty)
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: _iconAbove,
-                  onChanged: (v) => setState(() => _iconAbove = v),
-                  title: const Text(
-                    'الأيقونة فوق النص',
-                    style: TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                ),
-              section('وين يظهر؟'),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  for (final e in quickActionModeLabels.entries)
-                    FilterChip(
-                      label: Text('فقاعات ${e.value}'),
-                      selected: _modes.contains(e.key),
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (v) => setState(
-                        () => v ? _modes.add(e.key) : _modes.remove(e.key),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                _modes.isEmpty
-                    ? 'ما اخترت شي = بيظهر بكل أنواع الفقاعات.'
-                    : 'بيظهر بس بالأنواع المختارة.',
-                style: TextStyle(color: _muted(context), fontSize: 12),
-              ),
-              if (!t.companyOnly) ...[
-                const SizedBox(height: 10),
-                SegmentedButton<String>(
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(value: '', label: Text('كل الحسابات')),
-                    ButtonSegment(value: 'office', label: Text('المكاتب')),
-                    ButtonSegment(value: 'company', label: Text('الشركات')),
-                  ],
-                  selected: {_scope},
-                  onSelectionChanged: (s) => setState(() => _scope = s.first),
-                ),
-              ],
-              if (_error != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  _error!,
-                  style: TextStyle(
-                    color: cs.error,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('إلغاء'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: _submit,
-                      icon: Icon(
-                        _editing ? Icons.check_rounded : Icons.add_rounded,
-                      ),
-                      label: Text(_editing ? 'حفظ' : 'إضافة'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// =============================================================
 // عناصر الواجهة المشتركة
 // =============================================================
 
@@ -3510,12 +836,10 @@ Color _outline(BuildContext context) {
 Color _muted(BuildContext context) =>
     Theme.of(context).colorScheme.onSurfaceVariant;
 
-/// لون الأيقونات/النصوص الملوّنة بتباين مناسب للوضعين.
 Color _fg(BuildContext context, Color c) => _isDark(context)
     ? Color.lerp(c, Colors.white, .25)!
     : Color.lerp(c, Colors.black, .10)!;
 
-/// خلفية خفيفة بلون القسم.
 Color _tint(
   BuildContext context,
   Color c, {
@@ -3523,11 +847,8 @@ Color _tint(
   double dark = .20,
 }) => c.withValues(alpha: _isDark(context) ? dark : light);
 
-String _norm(String s) => normalizeArabic(s).toLowerCase();
-
 int _ci(String a, String b) => a.toLowerCase().compareTo(b.toLowerCase());
 
-/// تحويل الأرقام العربية/الفارسية إلى أرقام لاتينية.
 String _asciiDigits(String s) {
   final b = StringBuffer();
   for (final r in s.runes) {
@@ -3667,979 +988,6 @@ Future<String?> _promptText(
   );
 }
 
-// =============================================================
-// تتبّع مصدر الحركة
-// =============================================================
-
-// =============================================================
-// الوجهات (لحركات الشركات)
-// =============================================================
-
-/// حسابات المكاتب (لاختيار مكاتب الوجهة)
-List<Account> _officeAccounts() {
-  final list = DatabaseService.accountsBox.values
-      .where((a) => !a.type.isCompany)
-      .toList();
-  list.sort((a, b) => _ci(a.name, b.name));
-  return list;
-}
-
-class _DestinationsPage extends StatefulWidget {
-  final _SettingsStore store;
-
-  const _DestinationsPage({required this.store});
-
-  @override
-  State<_DestinationsPage> createState() => _DestinationsPageState();
-}
-
-class _DestinationsPageState extends State<_DestinationsPage> {
-  _SettingsStore get _store => widget.store;
-  final _searchCtrl = TextEditingController();
-  String _query = '';
-
-  @override
-  void dispose() {
-    _searchCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _add() async {
-    final result = await showDialog<_NewDestinationResult>(
-      context: context,
-      builder: (_) => _NewDestinationDialog(ownerOf: _store.destinationOwnerOf),
-    );
-    if (result == null || !mounted) return;
-    final error = _store.addDestination(
-      result.name,
-      result.aliases,
-      toOffice: result.toOffice,
-    );
-    _snack(context, error ?? 'أُضيفت وجهة «${result.name.trim()}»');
-  }
-
-  Future<void> _addAlias(Destination d) async {
-    final v = await _promptText(
-      context,
-      title: 'اختصار جديد لـ «${d.name}»',
-      hint: 'مثلًا: اسطنبول أو TR (أكتر من واحد؟ افصل بفاصلة)',
-      icon: Icons.alternate_email_rounded,
-      confirmLabel: 'إضافة',
-    );
-    if (v == null || !mounted) return;
-    final errors = <String>[];
-    var added = 0;
-    for (final raw in v.split(RegExp(r'[،,\n]'))) {
-      if (raw.trim().isEmpty) continue;
-      final e = _store.addDestinationAlias(d.name, raw);
-      if (e == null) {
-        added++;
-      } else {
-        errors.add(e);
-      }
-    }
-    if (!mounted) return;
-    if (errors.isNotEmpty) {
-      _snack(context, errors.first);
-    } else if (added > 1) {
-      _snack(context, 'أُضيف $added اختصار لـ «${d.name}»');
-    }
-  }
-
-  void _removeAlias(Destination d, String alias) {
-    _store.removeDestinationAlias(alias);
-    _snack(
-      context,
-      'حُذف «$alias» من «${d.name}»',
-      onUndo: () => _store.addDestinationAlias(d.name, alias),
-    );
-  }
-
-  Future<void> _rename(Destination d) async {
-    final v = await _promptText(
-      context,
-      title: 'إعادة تسمية الوجهة',
-      initial: d.name,
-      hint: 'الاسم الجديد',
-      icon: Icons.edit_rounded,
-    );
-    if (v == null || !mounted) return;
-    final newName = v.trim();
-    final error = _store.renameDestination(d.name, newName);
-    if (error != null) {
-      _snack(context, error);
-      return;
-    }
-    if (newName.isEmpty || newName == d.name) return;
-    // الحركات المحفوظة بالاسم القديم بتاخد الاسم الجديد
-    final oldKey = destinationKey(d.name);
-    final changed = <TransactionModel>[];
-    for (final t in DatabaseService.transactionsBox.values) {
-      if (t.destination != null && destinationKey(t.destination) == oldKey) {
-        changed.add(t);
-      }
-    }
-    if (changed.isNotEmpty) {
-      TxHistoryService.annotate([
-        for (final t in changed) t.id,
-      ], 'إعادة تسمية الوجهة');
-      for (final t in changed) {
-        t.destination = newName;
-        await t.save();
-      }
-    }
-    if (!mounted) return;
-    _snack(
-      context,
-      changed.isEmpty
-          ? 'صار اسمها «$newName»'
-          : 'صار اسمها «$newName» وتحدّثت ${changed.length} حركة',
-    );
-  }
-
-  Future<void> _delete(Destination d) async {
-    final used = DatabaseService.transactionsBox.values
-        .where(
-          (t) =>
-              t.destination != null && destinationKey(t.destination) == d.key,
-        )
-        .length;
-    final ok = await _confirm(
-      context,
-      title: 'حذف الوجهة',
-      message:
-          'سيتم حذف «${d.name}» مع اختصاراتها (${d.aliases.length}).'
-          '${used == 0 ? '' : ' الحركات القديمة ($used) بتضل الوجهة مكتوبة فيها بس ما عاد إلها قاعدة بالتتبّع.'}',
-      confirmLabel: 'حذف',
-      danger: true,
-    );
-    if (!ok || !mounted) return;
-    final removed = _store.deleteDestination(d.name);
-    _snack(
-      context,
-      'حُذفت وجهة «${d.name}»',
-      onUndo: () => _store.restoreDestination(removed),
-    );
-  }
-
-  bool _matches(Destination d, String q) {
-    if (q.isEmpty) return true;
-    if (_norm(d.name).contains(q)) return true;
-    return d.aliases.any((a) => _norm(a).contains(q));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPageScaffold(
-      store: _store,
-      title: 'الوجهات',
-      icon: Icons.place_rounded,
-      color: _kCyan,
-      description:
-          'وجهات حركات الشركات: لكل وجهة اختصارات تابعة إلها (متل العملات)، '
-          'والبرنامج بيتعرف عليها من الرسالة وقت إضافة حركة الشركة. حدد إذا '
-          'الوجهة تابعة لمكتب من المكاتب أو لا: التابعة لمكتب لازم توصل لمكتب، '
-          'ويلي مو تابعة ما منستناها — وإذا وصلت لمكتب بيطلع تحذير «يمكن تغيّر '
-          'المسار».',
-      extraListenable: DatabaseService.accountsBox.listenable(),
-      builder: (context) {
-        final all = _store.destinationBook.items;
-        final q = _norm(_query.trim());
-        final shown = [
-          for (final d in all)
-            if (_matches(d, q)) d,
-        ];
-        final offices = _officeAccounts();
-        final officeCount = all.where((d) => d.toOffice).length;
-        return [
-          FilledButton.tonalIcon(
-            onPressed: _add,
-            icon: const Icon(Icons.add_location_alt_rounded),
-            label: const Text('إضافة وجهة'),
-          ),
-          if (all.length > 5) ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: _searchCtrl,
-              onChanged: (v) => setState(() => _query = v),
-              decoration: _fieldDecoration(
-                context,
-                hint: 'ابحث عن وجهة أو اختصار…',
-                icon: Icons.search_rounded,
-              ),
-            ),
-          ],
-          const SizedBox(height: 18),
-          _SectionTitle(
-            text: 'الوجهات (${all.length})',
-            trailing: all.isEmpty
-                ? null
-                : _ValuePill(
-                    text: '$officeCount تابعة لمكتب',
-                    color: kDestOfficeColor,
-                  ),
-          ),
-          if (all.isEmpty)
-            const _EmptyHint(
-              icon: Icons.place_outlined,
-              color: _kCyan,
-              text:
-                  'لا توجد وجهات بعد — أضف وجهة (مثل: حلب، تركيا، دمشق) مع '
-                  'اختصاراتها.',
-            )
-          else if (shown.isEmpty)
-            _EmptyHint(
-              icon: Icons.search_off_rounded,
-              text: 'لا توجد وجهة مطابقة لـ «${_query.trim()}»',
-            )
-          else
-            for (final d in shown)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _DestinationCard(
-                  destination: d,
-                  offices: offices,
-                  onAddAlias: () => _addAlias(d),
-                  onRemoveAlias: (a) => _removeAlias(d, a),
-                  onRename: () => _rename(d),
-                  onDelete: () => _delete(d),
-                  onOffice: (v) => _store.setDestinationOffice(d.name, v),
-                  onToggleAccount: (id) =>
-                      _store.toggleDestinationAccount(d.name, id),
-                  onAnyOffice: () => _store.clearDestinationAccounts(d.name),
-                ),
-              ),
-          const SizedBox(height: 6),
-          const _TipText(
-            'الوجهة بتنسجل بس لحركات الشركات وقت الإضافة (بشاشة الفقاعات أو '
-            'الإضافة اليدوية)، ويمكن تغييرها من الفقاعة نفسها. إذا انذكرت '
-            'وجهتين بنفس الرسالة بتختار أنت.',
-          ),
-        ];
-      },
-    );
-  }
-}
-
-/// شارة صغيرة لوجهة (تابعة لمكتب / مو تابعة)
-class _DestinationTag extends StatelessWidget {
-  final Destination destination;
-
-  const _DestinationTag({required this.destination});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = destination.toOffice ? kDestOfficeColor : kDestExternalColor;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-      decoration: BoxDecoration(
-        color: _tint(context, color, light: .08, dark: .16),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withValues(alpha: .25)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            destination.toOffice
-                ? Icons.storefront_rounded
-                : Icons.place_rounded,
-            size: 14,
-            color: _fg(context, color),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            destination.name,
-            style: TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w800,
-              color: _fg(context, color),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DestinationCard extends StatelessWidget {
-  final Destination destination;
-  final List<Account> offices;
-  final VoidCallback onAddAlias;
-  final ValueChanged<String> onRemoveAlias;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
-  final ValueChanged<bool> onOffice;
-  final ValueChanged<int> onToggleAccount;
-  final VoidCallback onAnyOffice;
-
-  const _DestinationCard({
-    required this.destination,
-    required this.offices,
-    required this.onAddAlias,
-    required this.onRemoveAlias,
-    required this.onRename,
-    required this.onDelete,
-    required this.onOffice,
-    required this.onToggleAccount,
-    required this.onAnyOffice,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final d = destination;
-    final color = d.toOffice ? kDestOfficeColor : kDestExternalColor;
-    final selectedNames = [
-      for (final a in offices)
-        if (d.officeIds.contains(a.id)) a.name,
-    ];
-    final subtitle = d.toOffice
-        ? (selectedNames.isEmpty
-              ? 'تابعة لمكتب (أي مكتب)'
-              : 'تابعة لـ ${selectedNames.join('، ')}')
-        : 'مو تابعة لمكتب';
-
-    return _Card(
-      padding: const EdgeInsetsDirectional.fromSTEB(14, 10, 6, 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              _IconBadge(
-                icon: d.toOffice
-                    ? Icons.storefront_rounded
-                    : Icons.place_rounded,
-                color: color,
-                size: 38,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      d.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '$subtitle • ${d.aliases.length} اختصار',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: _muted(context), fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-              _SmallIconButton(
-                icon: Icons.edit_rounded,
-                tooltip: 'إعادة تسمية',
-                onPressed: onRename,
-              ),
-              _SmallIconButton(
-                icon: Icons.delete_outline_rounded,
-                tooltip: 'حذف الوجهة',
-                color: cs.error,
-                onPressed: onDelete,
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsetsDirectional.only(end: 8),
-            child: SegmentedButton<bool>(
-              showSelectedIcon: false,
-              style: SegmentedButton.styleFrom(
-                selectedBackgroundColor: color,
-                selectedForegroundColor: Colors.white,
-              ),
-              segments: const [
-                ButtonSegment(
-                  value: true,
-                  icon: Icon(Icons.storefront_rounded),
-                  label: Text('تابعة لمكتب'),
-                ),
-                ButtonSegment(
-                  value: false,
-                  icon: Icon(Icons.near_me_disabled_rounded),
-                  label: Text('مو تابعة لمكتب'),
-                ),
-              ],
-              selected: {d.toOffice},
-              onSelectionChanged: (s) => onOffice(s.first),
-            ),
-          ),
-          if (d.toOffice && offices.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Text(
-              'أي مكاتب؟',
-              style: TextStyle(
-                color: _muted(context),
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsetsDirectional.only(end: 8),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  ChoiceChip(
-                    label: const Text('أي مكتب'),
-                    selected: d.officeIds.isEmpty,
-                    showCheckmark: false,
-                    visualDensity: VisualDensity.compact,
-                    onSelected: (_) => onAnyOffice(),
-                  ),
-                  for (final a in offices)
-                    FilterChip(
-                      label: Text(a.name),
-                      selected: d.officeIds.contains(a.id),
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (_) => onToggleAccount(a.id),
-                    ),
-                ],
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Text(
-            'الاختصارات',
-            style: TextStyle(
-              color: _muted(context),
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Padding(
-            padding: const EdgeInsetsDirectional.only(end: 8),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final a in d.aliases)
-                  _WordChip(
-                    text: a,
-                    color: color,
-                    onDelete: () => onRemoveAlias(a),
-                  ),
-                _AddChip(label: 'اختصار', onPressed: onAddAlias),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NewDestinationResult {
-  final String name;
-  final List<String> aliases;
-  final bool toOffice;
-
-  const _NewDestinationResult(this.name, this.aliases, this.toOffice);
-}
-
-class _NewDestinationDialog extends StatefulWidget {
-  final String? Function(String text) ownerOf;
-
-  const _NewDestinationDialog({required this.ownerOf});
-
-  @override
-  State<_NewDestinationDialog> createState() => _NewDestinationDialogState();
-}
-
-class _NewDestinationDialogState extends State<_NewDestinationDialog> {
-  final _nameCtrl = TextEditingController();
-  final _aliasCtrl = TextEditingController();
-  bool _toOffice = true;
-  String? _error;
-
-  @override
-  void dispose() {
-    _nameCtrl.dispose();
-    _aliasCtrl.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final name = _nameCtrl.text.trim();
-    if (name.isEmpty) {
-      setState(() => _error = 'أدخل اسم الوجهة');
-      return;
-    }
-    final owner = widget.ownerOf(name);
-    if (owner != null) {
-      setState(() => _error = '«$name» موجود مسبقًا ضمن «$owner»');
-      return;
-    }
-    final aliases = [
-      for (final raw in _aliasCtrl.text.split(RegExp(r'[،,\n]')))
-        if (raw.trim().isNotEmpty) raw.trim(),
-    ];
-    Navigator.pop(context, _NewDestinationResult(name, aliases, _toOffice));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: AlertDialog(
-        title: const Text(
-          'إضافة وجهة',
-          style: TextStyle(fontWeight: FontWeight.w900),
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextField(
-                controller: _nameCtrl,
-                autofocus: true,
-                textInputAction: TextInputAction.next,
-                decoration: _fieldDecoration(
-                  context,
-                  hint: 'اسم الوجهة، مثل: حلب',
-                  icon: Icons.place_rounded,
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _aliasCtrl,
-                textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _submit(),
-                decoration: _fieldDecoration(
-                  context,
-                  hint: 'اختصارات (اختياري)، مثل: حلب الشهباء، ALP',
-                  icon: Icons.alternate_email_rounded,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'افصل بين الاختصارات بفاصلة. الاسم نفسه بينعرف لحاله.',
-                style: TextStyle(color: _muted(context), fontSize: 12),
-              ),
-              const SizedBox(height: 12),
-              SegmentedButton<bool>(
-                segments: const [
-                  ButtonSegment(
-                    value: true,
-                    icon: Icon(Icons.storefront_rounded),
-                    label: Text('تابعة لمكتب'),
-                  ),
-                  ButtonSegment(
-                    value: false,
-                    icon: Icon(Icons.near_me_disabled_rounded),
-                    label: Text('مو تابعة'),
-                  ),
-                ],
-                selected: {_toOffice},
-                onSelectionChanged: (s) => setState(() => _toOffice = s.first),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _toOffice
-                    ? 'حركاتها لازم توصل لمكتب، وإلا بيطلع تنبيه «ما راحت لمكتب».'
-                    : 'ما منستنى توصل لمكتب. إذا وصلت بيطلع تحذير «يمكن تغيّر المسار».',
-                style: TextStyle(
-                  color: _muted(context),
-                  fontSize: 12,
-                  height: 1.4,
-                ),
-              ),
-              if (_error != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  _error!,
-                  style: TextStyle(
-                    color: cs.error,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('إلغاء'),
-          ),
-          FilledButton(onPressed: _submit, child: const Text('إضافة')),
-        ],
-      ),
-    );
-  }
-}
-
-class _TracePrefsPage extends StatelessWidget {
-  final _SettingsStore store;
-
-  const _TracePrefsPage({required this.store});
-
-  static String _hoursText(int h) {
-    if (h == 1) return 'ساعة';
-    if (h == 2) return 'ساعتين';
-    if (h >= 3 && h <= 10) return '$h ساعات';
-    return '$h ساعة';
-  }
-
-  static String _daysText(int d) {
-    switch (d) {
-      case <= 0:
-        return 'كل الحركات';
-      case 7:
-        return 'أسبوع';
-      case 14:
-        return 'أسبوعين';
-      case 30:
-        return 'شهر';
-      case 60:
-        return 'شهرين';
-      case 90:
-        return '3 أشهر';
-      case 180:
-        return '6 أشهر';
-      case 365:
-        return 'سنة';
-    }
-    return '$d يوم';
-  }
-
-  /// موضع [d] بخيارات «التحذيرات لآخر» (أو أقرب خيار)
-  static int _warnIndex(int d) {
-    const choices = TracePrefs.warnDayChoices;
-    final i = choices.indexOf(d);
-    if (i >= 0) return i;
-    var best = 2;
-    var diff = 1 << 30;
-    for (var k = 0; k < choices.length; k++) {
-      if (choices[k] == 0) continue;
-      final dd = (choices[k] - d).abs();
-      if (dd < diff) {
-        diff = dd;
-        best = k;
-      }
-    }
-    return best;
-  }
-
-  void _set(TracePrefs p) => unawaited(TraceService.setPrefs(p));
-
-  Future<void> _editUnknown(BuildContext context, TracePrefs p) async {
-    final v = await _promptText(
-      context,
-      title: 'كلمة المصدر غير المعروف',
-      hint: 'مثلًا: مجهول',
-      initial: p.unknown,
-      icon: Icons.help_outline_rounded,
-    );
-    if (v == null || v.trim().isEmpty) return;
-    _set(p.copyWith(unknownLabel: v.trim()));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bg = _pageBg(context);
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        backgroundColor: bg,
-        appBar: AppBar(
-          backgroundColor: bg,
-          surfaceTintColor: Colors.transparent,
-          scrolledUnderElevation: 0,
-          centerTitle: false,
-          title: const Text(
-            'تتبّع مصدر الحركة',
-            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 19),
-          ),
-        ),
-        body: ListenableBuilder(
-          listenable: Listenable.merge([TraceService.prefs, store]),
-          builder: (context, _) {
-            final p = TraceService.prefs.value;
-            final normal = p.normalHoursSafe;
-            final max = p.maxHoursSafe;
-            final dests = store.destinationBook.items;
-            return ListView(
-              padding: EdgeInsets.fromLTRB(
-                16,
-                6,
-                16,
-                32 + MediaQuery.paddingOf(context).bottom,
-              ),
-              children: [
-                const _IntroCard(
-                  icon: Icons.alt_route_rounded,
-                  color: _kTeal,
-                  text:
-                      'كل حركة بحساب مكتب إلها مصدر: حركة «استقبال» بحساب شركة '
-                      '(شركة ABC ← مكتب X) أو «مجهول». وحركة الاستقبال كمان '
-                      'ممكن تروح لحركة «إرسال» بشركة تانية (شركة ABC ← إرسال '
-                      'شركة XYZ). البرنامج بيربطها لحاله إذا الاسم مطابق تمامًا '
-                      'والمبلغ والعملة نفسهم والوقت مناسب، وغير هيك بيعطيك '
-                      'تحذير وأنت بتختار. المسار بيبين بتفاصيل الحركة.',
-                ),
-                const SizedBox(height: 18),
-                const _SectionTitle(
-                  text: 'الوقت بين رسالة الشركة وحركة المكتب (أو الإرسال)',
-                ),
-                _Card(
-                  padding: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      _SliderRow(
-                        icon: Icons.schedule_rounded,
-                        title: 'الوقت العادي',
-                        subtitle: 'لحد هالوقت الربط بيصير بدون تحذير',
-                        valueText: _hoursText(normal),
-                        value: normal.toDouble(),
-                        min: 1,
-                        max: 72,
-                        divisions: 71,
-                        onChanged: (v) {
-                          final n = v.round();
-                          _set(
-                            p.copyWith(
-                              normalHours: n,
-                              maxHours: max < n ? n : max,
-                            ),
-                          );
-                        },
-                      ),
-                      const _ListDivider(),
-                      _SliderRow(
-                        icon: Icons.hourglass_bottom_rounded,
-                        title: 'أقصى وقت ممكن',
-                        subtitle:
-                            'بعد الوقت العادي ولحد هون: ممكن بس مع تحذير. '
-                            'بعده: مستحيل، وما بيطلع ربط ولا تحذير',
-                        valueText: _hoursText(max),
-                        value: max.toDouble(),
-                        min: normal.toDouble(),
-                        max: 168,
-                        divisions: 168 - normal > 0 ? 168 - normal : null,
-                        onChanged: (v) => _set(p.copyWith(maxHours: v.round())),
-                      ),
-                      const _ListDivider(),
-                      _SliderRow(
-                        icon: Icons.history_toggle_off_rounded,
-                        title: 'سماحية إذا حركة المكتب قبل الرسالة',
-                        subtitle:
-                            'أحيانًا بتنسجل حركة المكتب قبل ما توصل رسالة الشركة '
-                            'بشوي',
-                        valueText: '${p.earlyMinutes.clamp(0, 120)} دقيقة',
-                        value: p.earlyMinutes.clamp(0, 120).toDouble(),
-                        min: 0,
-                        max: 120,
-                        divisions: 24,
-                        onChanged: (v) =>
-                            _set(p.copyWith(earlyMinutes: v.round())),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const _SectionTitle(text: 'المصدر غير المعروف'),
-                _Card(
-                  padding: EdgeInsets.zero,
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.help_outline_rounded,
-                      color: _muted(context),
-                    ),
-                    title: const Text(
-                      'الكلمة يلي بتظهر',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    subtitle: Text(
-                      '«${p.unknown}» — بتظهر بالتفاصيل بدل اسم الشركة',
-                    ),
-                    trailing: const Icon(Icons.edit_rounded),
-                    onTap: () => _editUnknown(context, p),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                _SectionTitle(
-                  text: 'الوجهات',
-                  trailing: dests.isEmpty
-                      ? null
-                      : _ValuePill(text: '${dests.length}', color: _kCyan),
-                ),
-                _Card(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Text(
-                        'وجهة حركة الشركة بتنسجل وقت الإضافة. يلي وجهتها تابعة '
-                        'لمكتب لازم توصل لمكتب، وإذا ما وصلت خلال الوقت تحت '
-                        'بيطلع تنبيه «ما راحت لمكتب». يلي وجهتها مو تابعة لمكتب '
-                        'ما منستناها، وإذا لقينا إلها حركة مكتب مطابقة بيطلع '
-                        'تحذير «يمكن تغيّر المسار». (ما منحتفظ بنص الرسائل.)',
-                        style: TextStyle(
-                          color: _muted(context),
-                          fontSize: 12.5,
-                          height: 1.5,
-                        ),
-                      ),
-                      if (dests.isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: [
-                            for (final d in dests.take(16))
-                              _DestinationTag(destination: d),
-                            if (dests.length > 16)
-                              _ValuePill(
-                                text: '+${dests.length - 16}',
-                                color: _kSlate,
-                              ),
-                          ],
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      FilledButton.tonalIcon(
-                        onPressed: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => _DestinationsPage(store: store),
-                          ),
-                        ),
-                        icon: const Icon(Icons.place_rounded),
-                        label: Text(
-                          dests.isEmpty ? 'إضافة وجهات' : 'إدارة الوجهات',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 10),
-                _Card(
-                  padding: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      _SliderRow(
-                        icon: Icons.notifications_active_rounded,
-                        title: 'تنبيه «ما راحت لمكتب» بعد',
-                        subtitle:
-                            'لحركات الوجهات التابعة لمكتب: إذا ما انربطت بحركة '
-                            'مكتب خلال هالوقت',
-                        valueText: p.alertAfterHours <= 0
-                            ? 'فورًا'
-                            : _hoursText(p.alertAfterHours.clamp(1, 48)),
-                        value: p.alertAfterHours.clamp(0, 48).toDouble(),
-                        min: 0,
-                        max: 48,
-                        divisions: 48,
-                        onChanged: (v) =>
-                            _set(p.copyWith(alertAfterHours: v.round())),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const _SectionTitle(text: 'صفحة التحذيرات'),
-                _Card(
-                  padding: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      _SliderRow(
-                        icon: Icons.date_range_rounded,
-                        title: 'التحذيرات لحركات آخر',
-                        subtitle:
-                            'الحركات الأقدم ما بتطلع بالتحذيرات (مسارها بيضل '
-                            'ظاهر بالتفاصيل)',
-                        valueText: _daysText(p.warnDays),
-                        value: _warnIndex(p.warnDays).toDouble(),
-                        min: 0,
-                        max: (TracePrefs.warnDayChoices.length - 1).toDouble(),
-                        divisions: TracePrefs.warnDayChoices.length - 1,
-                        onChanged: (v) => _set(
-                          p.copyWith(
-                            warnDays: TracePrefs.warnDayChoices[v.round()],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const _SectionTitle(text: 'أنواع حركات الشركة'),
-                _Card(
-                  padding: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      _SwitchRow(
-                        icon: Icons.outbox_rounded,
-                        title: 'الاستقبال ممكن يروح لإرسال بشركة تانية',
-                        subtitle:
-                            'حركة «استقبال» بشركة ممكن تكون وجهتها حركة «إرسال» '
-                            'بشركة تانية (نفس الاسم والمبلغ والعملة والأوقات '
-                            'متل المكاتب). الإرسال مسار عادي وما بيطلّع تحذير '
-                            'وجهة.',
-                        value: p.sentAsDest,
-                        onChanged: (v) => _set(p.copyWith(sentAsDest: v)),
-                      ),
-                      const _ListDivider(),
-                      _SwitchRow(
-                        icon: Icons.call_made_rounded,
-                        title: 'احسب الحركات المرسلة مصدر لمكاتب',
-                        subtitle: p.sentAsDest
-                            ? 'موقّف لأن الإرسال محسوب وجهة لحركات الاستقبال. '
-                                  'طفّي الخيار يلي فوق إذا حركات «مرسلة» عندك '
-                                  'بتروح لمكاتب.'
-                            : 'عادةً المصدر حركة «استقبال» بحساب الشركة. فعّلها '
-                                  'إذا حركات «مرسلة» كمان بتروح لمكاتب.',
-                        value: p.sentIsSource,
-                        onChanged: p.sentAsDest
-                            ? null
-                            : (v) => _set(p.copyWith(includeSent: v)),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 14),
-                const _TipText(
-                  'قراراتك اليدوية (تأكيد، تغيير، «مجهول»، «مو هي») ما بتتغير لما '
-                  'تغيّر هالإعدادات.',
-                ),
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const TraceWarningsScreen(),
-                    ),
-                  ),
-                  icon: const Icon(Icons.warning_amber_rounded),
-                  label: const Text('فتح صفحة التحذيرات'),
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
 class _TextPromptDialog extends StatefulWidget {
   final String title;
   final String hint;
@@ -4718,30 +1066,19 @@ class _TextPromptDialogState extends State<_TextPromptDialog> {
 class _SubPageScaffold extends StatelessWidget {
   final _SettingsStore store;
   final String title;
-  final IconData icon;
-  final Color color;
-  final String description;
   final List<Widget> actions;
-  final Listenable? extraListenable;
   final List<Widget> Function(BuildContext context) builder;
 
   const _SubPageScaffold({
     required this.store,
     required this.title,
-    required this.icon,
-    required this.color,
-    required this.description,
     required this.builder,
     this.actions = const [],
-    this.extraListenable,
   });
 
   @override
   Widget build(BuildContext context) {
     final bg = _pageBg(context);
-    final listenable = extraListenable == null
-        ? store
-        : Listenable.merge([store, extraListenable]);
 
     return Directionality(
       textDirection: TextDirection.rtl,
@@ -4767,7 +1104,7 @@ class _SubPageScaffold extends StatelessWidget {
           ],
         ),
         body: ListenableBuilder(
-          listenable: listenable,
+          listenable: store,
           builder: (context, _) => ListView(
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             padding: EdgeInsets.fromLTRB(
@@ -4776,11 +1113,7 @@ class _SubPageScaffold extends StatelessWidget {
               16,
               32 + MediaQuery.paddingOf(context).bottom,
             ),
-            children: [
-              _IntroCard(icon: icon, color: color, text: description),
-              const SizedBox(height: 18),
-              ...builder(context),
-            ],
+            children: builder(context),
           ),
         ),
       ),
@@ -4792,38 +1125,18 @@ class _HubTile {
   final IconData icon;
   final Color color;
   final String title;
-  final String subtitle;
+  final String? subtitle;
   final int? count;
-  final String searchText;
-  final List<String> contents;
   final VoidCallback onTap;
-
-  /// سبب ظهور العنصر في نتائج البحث (عند التطابق مع محتوى القائمة)
-  final String? matchNote;
 
   const _HubTile({
     required this.icon,
     required this.color,
     required this.title,
-    required this.subtitle,
     required this.onTap,
+    this.subtitle,
     this.count,
-    this.searchText = '',
-    this.contents = const [],
-    this.matchNote,
   });
-
-  _HubTile withMatch(String note) => _HubTile(
-    icon: icon,
-    color: color,
-    title: title,
-    subtitle: subtitle,
-    onTap: onTap,
-    count: count,
-    searchText: searchText,
-    contents: contents,
-    matchNote: note,
-  );
 }
 
 class _HubGroup {
@@ -4851,29 +1164,14 @@ class _HubHeader extends StatelessWidget {
       children: [
         if (showBack) ...[const BackButton(), const SizedBox(width: 2)],
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'الإعدادات',
-                style: TextStyle(
-                  fontSize: 28,
-                  height: 1.2,
-                  fontWeight: FontWeight.w900,
-                  color: cs.onSurface,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'خصّص طريقة قراءة الرسائل وتحليلها',
-                style: TextStyle(
-                  fontSize: 13.5,
-                  color: _muted(context),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
+          child: Text(
+            'الإعدادات',
+            style: TextStyle(
+              fontSize: 28,
+              height: 1.2,
+              fontWeight: FontWeight.w900,
+              color: cs.onSurface,
+            ),
           ),
         ),
         const SizedBox(width: 8),
@@ -5000,7 +1298,7 @@ class _HubTileView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final note = tile.matchNote;
+    final subtitle = tile.subtitle;
     return InkWell(
       onTap: tile.onTap,
       child: Padding(
@@ -5024,22 +1322,20 @@ class _HubTileView extends StatelessWidget {
                       color: cs.onSurface,
                     ),
                   ),
-                  const SizedBox(height: 3),
-                  Text(
-                    note ?? tile.subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      height: 1.3,
-                      fontWeight: note == null
-                          ? FontWeight.w500
-                          : FontWeight.w700,
-                      color: note == null
-                          ? _muted(context)
-                          : _fg(context, tile.color),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        height: 1.3,
+                        fontWeight: FontWeight.w500,
+                        color: _muted(context),
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
@@ -5128,73 +1424,22 @@ class _ValuePill extends StatelessWidget {
   }
 }
 
-class _IntroCard extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final String text;
-
-  const _IntroCard({
-    required this.icon,
-    required this.color,
-    required this.text,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: _tint(context, color, light: .07, dark: .12),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: color.withValues(alpha: .20)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _IconBadge(icon: icon, color: color),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                fontSize: 13.5,
-                height: 1.55,
-                fontWeight: FontWeight.w500,
-                color: cs.onSurface.withValues(alpha: .86),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _SectionTitle extends StatelessWidget {
   final String text;
-  final Widget? trailing;
 
-  const _SectionTitle({required this.text, this.trailing});
+  const _SectionTitle({required this.text});
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsetsDirectional.only(start: 4, bottom: 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w800,
-                color: _muted(context),
-              ),
-            ),
-          ),
-          if (trailing != null) trailing!,
-        ],
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 13.5,
+          fontWeight: FontWeight.w800,
+          color: _muted(context),
+        ),
       ),
     );
   }
@@ -5221,185 +1466,6 @@ class _SmallIconButton extends StatelessWidget {
       iconSize: 20,
       onPressed: onPressed,
       icon: Icon(icon, color: color ?? _muted(context)),
-    );
-  }
-}
-
-class _WordChip extends StatelessWidget {
-  final String text;
-  final Color color;
-  final VoidCallback? onTap;
-  final VoidCallback onDelete;
-
-  const _WordChip({
-    required this.text,
-    required this.color,
-    required this.onDelete,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return InputChip(
-      label: Text(text),
-      onPressed: onTap,
-      onDeleted: onDelete,
-      deleteIcon: const Icon(Icons.close_rounded, size: 16),
-      deleteButtonTooltipMessage: 'حذف',
-      backgroundColor: _tint(context, color, light: .07, dark: .14),
-      side: BorderSide(
-        color: color.withValues(alpha: _isDark(context) ? .30 : .22),
-      ),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      labelStyle: TextStyle(
-        fontWeight: FontWeight.w700,
-        fontSize: 13.5,
-        color: cs.onSurface,
-      ),
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      showCheckmark: false,
-    );
-  }
-}
-
-class _AddChip extends StatelessWidget {
-  final String label;
-  final VoidCallback onPressed;
-
-  const _AddChip({required this.label, required this.onPressed});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = _fg(context, Theme.of(context).colorScheme.primary);
-    return ActionChip(
-      avatar: Icon(Icons.add_rounded, size: 18, color: color),
-      label: Text(
-        label,
-        style: TextStyle(color: color, fontWeight: FontWeight.w700),
-      ),
-      onPressed: onPressed,
-      backgroundColor: Colors.transparent,
-      side: BorderSide(color: color.withValues(alpha: .40)),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-    );
-  }
-}
-
-class _SwitchRow extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool value;
-
-  /// null = موقّف
-  final ValueChanged<bool>? onChanged;
-
-  const _SwitchRow({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SwitchListTile(
-      value: value,
-      onChanged: onChanged,
-      contentPadding: const EdgeInsetsDirectional.only(start: 16, end: 10),
-      secondary: Icon(icon, color: _muted(context)),
-      title: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5),
-      ),
-      subtitle: Text(
-        subtitle,
-        style: TextStyle(color: _muted(context), fontSize: 12.5, height: 1.35),
-      ),
-    );
-  }
-}
-
-class _SliderRow extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final String valueText;
-  final double value;
-  final double min;
-  final double max;
-  final int? divisions;
-  final ValueChanged<double> onChanged;
-
-  const _SliderRow({
-    required this.icon,
-    required this.title,
-    required this.valueText,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.onChanged,
-    this.subtitle,
-    this.divisions,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 2),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Icon(icon, color: _muted(context)),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 14.5,
-                      ),
-                    ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle!,
-                        style: TextStyle(
-                          color: _muted(context),
-                          fontSize: 12.5,
-                          height: 1.35,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              _ValuePill(text: valueText, color: cs.primary),
-            ],
-          ),
-          Slider(
-            value: value.clamp(min, max),
-            min: min,
-            max: max,
-            divisions: divisions,
-            label: valueText,
-            onChanged: onChanged,
-          ),
-        ],
-      ),
     );
   }
 }
@@ -5441,56 +1507,6 @@ class _EmptyHint extends StatelessWidget {
             text,
             textAlign: TextAlign.center,
             style: TextStyle(color: _muted(context), height: 1.5),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TipText extends StatelessWidget {
-  final String text;
-
-  const _TipText(this.text);
-
-  @override
-  Widget build(BuildContext context) {
-    final c = _muted(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.lightbulb_outline_rounded, size: 16, color: c),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(color: c, fontSize: 12.5, height: 1.5),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AutoSaveFooter extends StatelessWidget {
-  const _AutoSaveFooter();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = _muted(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.cloud_done_outlined, size: 16, color: c),
-          const SizedBox(width: 6),
-          Text(
-            'تُحفظ التغييرات تلقائيًا فور إجرائها',
-            style: TextStyle(color: c, fontSize: 12.5),
           ),
         ],
       ),

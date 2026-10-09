@@ -8,20 +8,12 @@ class DatabaseService {
   static const String accountsBoxName = "accounts";
   static const String transactionsBoxName = "transactions";
   static const String settingsBoxName = "settings";
-  static const String parsesBoxName = "parses";
-
-  /// سجل العمليات (خرائط بسيطة بدون Adapter) — راجع OperationLogService
-  static const String operationLogBoxName = "operation_logs";
 
   /// سجل تعديلات الحركات (خرائط بسيطة بدون Adapter) — راجع TxHistoryService
   static const String txHistoryBoxName = "tx_edit_history";
 
   /// تفضيلات عرض بسيطة (خرائط بدون Adapter) — مثل خيارات صورة المشاركة
   static const String uiPrefsBoxName = "ui_prefs";
-
-  /// تتبّع مصدر الحركة: قرارات الربط اليدوية وإعداداته (خرائط بدون Adapter)
-  /// — راجع TraceService
-  static const String txLinksBoxName = "tx_links";
 
   // ===========================
   // 🚀 التهيئة
@@ -31,16 +23,12 @@ class DatabaseService {
     await Hive.openBox<Account>(accountsBoxName);
     await Hive.openBox<TransactionModel>(transactionsBoxName);
     await Hive.openBox<Settings>(settingsBoxName);
-    await Hive.openBox<ParsedText>(parsesBoxName);
-    await _openLogBox(operationLogBoxName);
     // صندوق كسول: السجل قد يكبر كثيرًا، فلا نحمّله كله في الذاكرة
     await _openLogBox(txHistoryBoxName, lazy: true);
     await _openLogBox(uiPrefsBoxName);
-    await _openLogBox(txLinksBoxName);
 
     // ✅ اختيارية: ترحيل مفاتيح int قديمة (لو كنت سابقًا تستخدم put(id))
     // await migrateTransactionsIntKeysToString(); // فعّله مرة لو احتجت
-    // await migrateParsesIntKeysToString();       // فعّله مرة لو احتجت
   }
 
   /// صناديق السجلات والتفضيلات: إذا تلف الملف لا نمنع تشغيل التطبيق، نحذفه
@@ -65,7 +53,6 @@ class DatabaseService {
   static Box<TransactionModel> get transactionsBox =>
       Hive.box<TransactionModel>(transactionsBoxName);
   static Box<Settings> get settingsBox => Hive.box<Settings>(settingsBoxName);
-  static Box<ParsedText> get parsesBox => Hive.box<ParsedText>(parsesBoxName);
 
   /// صندوق تفضيلات العرض، أو null إن لم يكن مفتوحًا (الشاشات تعمل بدونه)
   static Box<dynamic>? get uiPrefsBoxOrNull =>
@@ -270,44 +257,6 @@ class DatabaseService {
   }
 
   // ====================================================================
-  // 📌 المحفوظات (Parsed Texts)
-  // التوحيد على add(...) لتفادي مفاتيح int كبيرة.
-  // ====================================================================
-
-  /// إضافة نصّ محلَّل بمفتاح تلقائي
-  static Future<void> addParsedText(ParsedText item) async {
-    await parsesBox.add(item);
-  }
-
-  /// جميع المحفوظات مرتبة (الأحدث أولًا)
-  static List<ParsedText> getAllParses() {
-    final list = parsesBox.values.toList();
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return list;
-  }
-
-  /// حذف محفوظ بمفتاح Hive
-  static Future<void> deleteParsedTextByHiveKey(dynamic hiveKey) async {
-    if (parsesBox.containsKey(hiveKey)) {
-      await parsesBox.delete(hiveKey);
-    }
-  }
-
-  /// حذف محفوظ عبر "الـ id التجاري" داخل الموديل (إن وُجد)
-  static Future<void> deleteParsedTextByBusinessId(int businessId) async {
-    final key = _findKeyByPredicate<ParsedText>(
-      parsesBox,
-      (p) => (p.id == businessId),
-    );
-    if (key != null) await parsesBox.delete(key);
-  }
-
-  /// مسح كل المحفوظات
-  static Future<void> clearParses() async {
-    await parsesBox.clear();
-  }
-
-  // ====================================================================
   // 🧰 أدوات مساعدة عامة
   // ====================================================================
 
@@ -335,21 +284,6 @@ class DatabaseService {
     for (final k in keys) {
       if (k is int && k > 0xFFFFFFFF) {
         // نقل من مفتاح int كبير إلى مفتاح نصي (تجنّبًا للخطأ)
-        final v = box.get(k);
-        if (v != null) {
-          await box.put(k.toString(), v);
-          await box.delete(k);
-        }
-      }
-    }
-  }
-
-  static Future<void> migrateParsesIntKeysToString() async {
-    final box = parsesBox;
-    final keys = box.keys.toList();
-
-    for (final k in keys) {
-      if (k is int && k > 0xFFFFFFFF) {
         final v = box.get(k);
         if (v != null) {
           await box.put(k.toString(), v);

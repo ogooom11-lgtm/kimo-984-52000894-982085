@@ -12,7 +12,6 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/tx_history_service.dart';
-import '../widgets/trace_widgets.dart';
 
 /// افتح صفحة سجل تعديلات الحركة
 Future<void> openTransactionHistory(BuildContext context, TransactionModel tx) {
@@ -23,7 +22,7 @@ Future<void> openTransactionHistory(BuildContext context, TransactionModel tx) {
   );
 }
 
-enum _HistoryFilter { all, data, status, link }
+enum _HistoryFilter { all, data, status }
 
 class _DayLabel {
   final String text;
@@ -104,7 +103,9 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         _dirty = false;
         // حسب الوقت: التعديل من رسالة يحمل وقت الرسالة لا وقت الحفظ
         final list = sortEntriesByTime(
-          await TxHistoryService.entriesFor(widget.txId),
+          (await TxHistoryService.entriesFor(
+            widget.txId,
+          )).where((e) => !e.touchesLink).toList(),
         );
         if (!mounted) return;
         setState(() => _entries = list);
@@ -141,8 +142,6 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         return e.touchesData;
       case _HistoryFilter.status:
         return e.touchesStatus;
-      case _HistoryFilter.link:
-        return e.touchesLink;
     }
   }
 
@@ -426,14 +425,6 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
               ),
             ),
           ),
-          // مسار الحركة (شركة ← مكتب) مختصر
-          if (tx != null && live != null)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              sliver: SliverToBoxAdapter(
-                child: TracePathCard(tx: tx, compact: true),
-              ),
-            ),
           if (entries.isNotEmpty)
             SliverToBoxAdapter(child: _buildFilterBar(context, entries)),
           if (!loaded)
@@ -783,7 +774,6 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
   Widget _buildFilterBar(BuildContext context, List<TxHistoryEntry> entries) {
     final data = entries.where((e) => e.touchesData).length;
     final status = entries.where((e) => e.touchesStatus).length;
-    final link = entries.where((e) => e.touchesLink).length;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
       child: SingleChildScrollView(
@@ -795,10 +785,6 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
             _filterChip(context, 'البيانات', data, _HistoryFilter.data),
             const SizedBox(width: 8),
             _filterChip(context, 'الحالة', status, _HistoryFilter.status),
-            if (link > 0 || _filter == _HistoryFilter.link) ...[
-              const SizedBox(width: 8),
-              _filterChip(context, 'المسار', link, _HistoryFilter.link),
-            ],
           ],
         ),
       ),
@@ -1228,28 +1214,6 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
               color: cs.onSurface,
             ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            filtered
-                ? 'جرّب تصفية أخرى لعرض باقي التعديلات.'
-                : 'أي تعديل على هذه الحركة — المبلغ، الاسم، العملة، الحالة، '
-                      'النقل بين الحسابات — سيُحفظ هنا تلقائيًا مع التاريخ '
-                      'والوقت.',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 13,
-              color: cs.onSurfaceVariant,
-              height: 1.5,
-            ),
-          ),
-          if (!filtered && since != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              'بدأ حفظ السجل في ${TxHistoryFormatter.day(since)}.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-            ),
-          ],
         ],
       ),
     );

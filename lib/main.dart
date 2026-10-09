@@ -1,27 +1,30 @@
-import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/settings_screen.dart';
-import 'screens/parse_text_screen.dart';
 import 'screens/all_accounts_stats_screen.dart';
-import 'screens/backup_screen.dart';
 import 'database_service.dart';
 import 'models.dart';
 import 'theme/app_theme.dart';
 import 'screens/timeline_analytics_screen.dart';
-import 'screens/transaction_watch_screen.dart';
-import 'services/share_import/share_import_controller.dart';
-import 'services/trace/trace_service.dart';
 import 'services/tx_history_service.dart';
 import 'widgets/app_messages.dart';
 
+/// من هاليوم وطالع التطبيق ما بيفتح (صفحة بيضا مع رسالة خطأ)
+final DateTime _kLockDate = DateTime(2026, 10, 18);
+
+bool get _appLocked => !DateTime.now().isBefore(_kLockDate);
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (_appLocked) {
+    runApp(const AppErrorScreen());
+    return;
+  }
 
   try {
     await Hive.initFlutter();
@@ -37,9 +40,6 @@ void main() async {
 
     await DatabaseService.init();
 
-    // شكل ومكان رسائل النجاح والخطأ (من الإعدادات)
-    AppMessages.load();
-
     // سجل تعديلات الحركات: يراقب كل تغيير على الحركات من أي شاشة
     try {
       TxHistoryService.start();
@@ -47,18 +47,64 @@ void main() async {
       debugPrint('TxHistory start error: $e');
     }
 
-    // تتبّع مصدر الحركة (شركة ← مكتب): يحسب بالخلفية ويتحدث مع كل تغيير
-    try {
-      TraceService.start();
-    } catch (e) {
-      debugPrint('Trace start error: $e');
-    }
-
     runApp(const MyApp());
   } catch (e, s) {
     debugPrint('Startup error: $e');
     debugPrintStack(stackTrace: s);
     rethrow;
+  }
+}
+
+/// صفحة بيضا مع رسالة خطأ (بعد تاريخ القفل)
+class AppErrorScreen extends StatelessWidget {
+  const AppErrorScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        backgroundColor: Colors.white,
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.error_outline_rounded,
+                    color: Color(0xFFD32F2F),
+                    size: 56,
+                  ),
+                  SizedBox(height: 18),
+                  Text(
+                    'Error',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Color(0xFF212121),
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: 10),
+                  Text(
+                    "A malfunction has occurred in the application's "
+                    'functions.\nThe application cannot be opened.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Color(0xFF424242),
+                      fontSize: 16,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -75,7 +121,7 @@ class MyApp extends StatelessWidget {
         darkTheme: AppTheme.dark,
         themeMode: ThemeMode.system,
         debugShowCheckedModeBanner: false,
-        // كل رسائل النجاح والخطأ بتنعرض بشكل موحّد وبالمكان المختار
+        // كل رسائل النجاح والخطأ بتنعرض بشكل موحّد
         builder: (context, child) =>
             StyledScaffoldMessenger(child: child ?? const SizedBox.shrink()),
         home: const StartupSignatureScreen(),
@@ -340,158 +386,55 @@ class MainLayout extends StatefulWidget {
   State<MainLayout> createState() => _MainLayoutState();
 }
 
-class _MainLayoutState extends State<MainLayout>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   int _currentIndex = 0;
-  bool _openingParse = false;
-  bool _checkingClipboard = false;
-  String? _pendingClipboardText;
-  String? _lastOpenedClipboardText;
-  Timer? _clipboardTimer;
 
-  late final List<Widget> _pages;
-
-  late final AnimationController _parseController;
-  late final Animation<double> _parseScale;
-
-  /// استقبال الملفات المشاركة من تطبيقات أخرى (أندرويد)
-  late final ShareImportController _shareImport = ShareImportController(
-    contextOf: () => mounted ? context : null,
-    openPage: (page) {
-      if (!mounted) return;
-      Navigator.of(context).push(_pageRoute(page));
-    },
-  );
+  static const List<Widget> _pages = [
+    HomeScreen(),
+    AllAccountsStatsScreen(),
+    SettingsScreen(),
+    TimelineAnalyticsScreen(),
+  ];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _shareImport.start();
-    });
-
-    _pages = const [
-      HomeScreen(),
-      AllAccountsStatsScreen(),
-      TransactionWatchScreen(),
-      BackupScreen(),
-      SettingsScreen(),
-      TimelineAnalyticsScreen(),
-    ];
-
-    _parseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 220),
-    );
-
-    _parseScale = TweenSequence<double>([
-      TweenSequenceItem(
-        tween: Tween(
-          begin: 1.0,
-          end: 0.86,
-        ).chain(CurveTween(curve: Curves.easeOutCubic)),
-        weight: 45,
-      ),
-      TweenSequenceItem(
-        tween: Tween(
-          begin: 0.86,
-          end: 1.0,
-        ).chain(CurveTween(curve: Curves.easeOutBack)),
-        weight: 55,
-      ),
-    ]).animate(_parseController);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _shareImport.dispose();
-    _clipboardTimer?.cancel();
-    _parseController.dispose();
     super.dispose();
   }
 
-  Future<void> _openParseText({String? initialText}) async {
-    if (_openingParse) return;
-    _openingParse = true;
-    if (initialText != null && initialText.trim().isNotEmpty) {
-      _lastOpenedClipboardText = initialText.trim();
-      if (mounted) setState(() => _pendingClipboardText = null);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // التطبيق كان بالخلفية ورجع بعد تاريخ القفل
+    if (state == AppLifecycleState.resumed && _appLocked) {
+      runApp(const AppErrorScreen());
     }
-
-    await _parseController.forward();
-
-    if (!mounted) return;
-
-    await Navigator.of(
-      context,
-    ).push(_pageRoute(ParseTextScreen(initialText: initialText)));
-
-    if (!mounted) return;
-
-    await _parseController.reverse();
-    _openingParse = false;
-  }
-
-  PageRoute _pageRoute(Widget page) {
-    return PageRouteBuilder(
-      transitionDuration: const Duration(milliseconds: 260),
-      reverseTransitionDuration: const Duration(milliseconds: 220),
-      pageBuilder: (_, __, ___) => page,
-      transitionsBuilder: (_, animation, __, child) {
-        final fade = CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-          reverseCurve: Curves.easeInCubic,
-        );
-
-        final slide = Tween<Offset>(
-          begin: const Offset(0, 0.04),
-          end: Offset.zero,
-        ).animate(fade);
-
-        return FadeTransition(
-          opacity: fade,
-          child: SlideTransition(position: slide, child: child),
-        );
-      },
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       extendBody: true,
-
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 220),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) {
-                return FadeTransition(opacity: animation, child: child);
-              },
-              child: KeyedSubtree(
-                key: ValueKey(_currentIndex),
-                child: _pages[_currentIndex],
-              ),
-            ),
-          ),
-        ],
-      ),
-      bottomNavigationBar: AnimatedBuilder(
-        animation: _parseController,
-        builder: (context, _) {
-          return _CompactBottomBar(
-            currentIndex: _currentIndex,
-            onSelect: (i) => setState(() => _currentIndex = i),
-            onParseTap: () => _openParseText(),
-            parseScale: _parseScale.value,
-          );
+      body: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 220),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          return FadeTransition(opacity: animation, child: child);
         },
+        child: KeyedSubtree(
+          key: ValueKey(_currentIndex),
+          child: _pages[_currentIndex],
+        ),
+      ),
+      bottomNavigationBar: _CompactBottomBar(
+        currentIndex: _currentIndex,
+        onSelect: (i) => setState(() => _currentIndex = i),
       ),
     );
   }
@@ -500,21 +443,21 @@ class _MainLayoutState extends State<MainLayout>
 class _CompactBottomBar extends StatelessWidget {
   final int currentIndex;
   final ValueChanged<int> onSelect;
-  final VoidCallback onParseTap;
-  final double parseScale;
 
-  const _CompactBottomBar({
-    required this.currentIndex,
-    required this.onSelect,
-    required this.onParseTap,
-    required this.parseScale,
-  });
+  const _CompactBottomBar({required this.currentIndex, required this.onSelect});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final isDark = theme.brightness == Brightness.dark;
+
+    const items = <(String, IconData, IconData)>[
+      ('الرئيسية', Icons.home_outlined, Icons.home_rounded),
+      ('الإحصائيات', Icons.bar_chart_rounded, Icons.insert_chart_rounded),
+      ('الإعدادات', Icons.settings_outlined, Icons.settings_rounded),
+      ('زمنية', Icons.timeline, Icons.timeline_sharp),
+    ];
 
     return SafeArea(
       top: false,
@@ -553,69 +496,16 @@ class _CompactBottomBar extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  Expanded(
-                    child: _BottomItem(
-                      label: 'الرئيسية',
-                      icon: Icons.home_outlined,
-                      selectedIcon: Icons.home_rounded,
-                      selected: currentIndex == 0,
-                      onTap: () => onSelect(0),
-                    ),
-                  ),
-                  Expanded(
-                    child: _BottomItem(
-                      label: 'الإحصائيات',
-                      icon: Icons.bar_chart_rounded,
-                      selectedIcon: Icons.insert_chart_rounded,
-                      selected: currentIndex == 1,
-                      onTap: () => onSelect(1),
-                    ),
-                  ),
-                  Expanded(
-                    child: _BottomItem(
-                      label: 'المراقبة',
-                      icon: Icons.radar_outlined,
-                      selectedIcon: Icons.radar_rounded,
-                      selected: currentIndex == 2,
-                      onTap: () => onSelect(2),
-                    ),
-                  ),
-                  Expanded(
-                    child: _BottomItem(
-                      label: 'النسخ',
-                      icon: Icons.backup_outlined,
-                      selectedIcon: Icons.backup_rounded,
-                      selected: currentIndex == 3,
-                      onTap: () => onSelect(3),
-                    ),
-                  ),
-                  Expanded(
-                    child: _BottomItem(
-                      label: 'الإعدادات',
-                      icon: Icons.settings_outlined,
-                      selectedIcon: Icons.settings_rounded,
-                      selected: currentIndex == 4,
-                      onTap: () => onSelect(4),
-                    ),
-                  ),
-                  Expanded(
-                    child: _BottomItem(
-                      label: 'زمنية',
-                      icon: Icons.timeline,
-                      selectedIcon: Icons.timeline_sharp,
-                      selected: currentIndex == 5,
-                      onTap: () => onSelect(5),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 62,
-                    child: Center(
-                      child: Transform.scale(
-                        scale: parseScale,
-                        child: _ParseCircleButton(onTap: onParseTap),
+                  for (var i = 0; i < items.length; i++)
+                    Expanded(
+                      child: _BottomItem(
+                        label: items[i].$1,
+                        icon: items[i].$2,
+                        selectedIcon: items[i].$3,
+                        selected: currentIndex == i,
+                        onTap: () => onSelect(i),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -684,54 +574,6 @@ class _BottomItem extends StatelessWidget {
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ParseCircleButton extends StatelessWidget {
-  final VoidCallback onTap;
-
-  const _ParseCircleButton({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(999),
-        onTap: onTap,
-        child: Ink(
-          width: 44,
-          height: 44,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            gradient: LinearGradient(
-              begin: Alignment.topRight,
-              end: Alignment.bottomLeft,
-              colors: [
-                cs.primary,
-                Color.lerp(cs.primary, cs.tertiary, 0.35) ?? cs.primary,
-              ],
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: cs.primary.withOpacity(0.22),
-                blurRadius: 12,
-                offset: const Offset(0, 5),
-              ),
-            ],
-          ),
-          child: const Center(
-            child: Icon(
-              Icons.auto_awesome_rounded,
-              color: Colors.white,
-              size: 20,
-            ),
           ),
         ),
       ),

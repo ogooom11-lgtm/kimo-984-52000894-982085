@@ -4,9 +4,6 @@ import 'package:flutter/services.dart';
 import '../database_service.dart';
 import '../models.dart';
 import '../services/destinations.dart';
-import '../services/detection/text_tokens.dart'
-    show stripEdgePunct, tokensFromLine;
-import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
 import '../widgets/destination_picker.dart';
 import 'settings_screen.dart';
@@ -42,11 +39,9 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
   bool _isSaving = false;
   CompanyMovementType _companyMovement = CompanyMovementType.received;
 
-  /// وجهة حركة الشركة (null = بدون) — تنكشف من النص الخام إلا إذا اخترتها
+  /// وجهة حركة الشركة (null = بدون)
   DestinationBook _destBook = DestinationBook.empty;
   String? _destination;
-  bool _destinationManual = false;
-  List<String> _destDetected = const [];
 
   // ===== ألوان متوافقة مع الوضع الفاتح والداكن =====
   ColorScheme get _cs => Theme.of(context).colorScheme;
@@ -132,15 +127,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     _date = t.date;
     _companyMovement = t.companyMovementType ?? CompanyMovementType.received;
     _destination = t.destination;
-    _destinationManual = true;
-  }
-
-  /// كشف الوجهة من النص الخام (إذا ما اخترتها أنت)
-  void _detectDestination() {
-    if (!widget.account.type.isCompany || _destBook.isEmpty) return;
-    final det = _destBook.detect(_rawController.text.split('\n'));
-    _destDetected = det.names;
-    if (!_destinationManual) _destination = det.single;
   }
 
   Future<void> _pickDestination() async {
@@ -148,96 +134,20 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
       context,
       book: _destBook,
       current: _destination,
-      detected: _destDetected,
     );
-    if (picked == null || !mounted) return;
+    if (!mounted) return;
     setState(() {
-      _destination = picked.isEmpty ? null : picked;
-      _destinationManual = true;
-    });
-  }
-
-  /// سحب كلمة من النص لخانة الوجهة: إذا معروفة بتنختار، وإلا بتتحدد كوجهة
-  /// جديدة أو كاختصار لوجهة موجودة (وبتنحفظ بالإعدادات).
-  Future<void> _onDestinationDrop(String data) async {
-    final text = data.trim();
-    if (text.isEmpty) return;
-    final det = _destBook.detect([text]);
-    if (det.single case final known?) {
-      setState(() {
-        _destination = known;
-        _destinationManual = true;
-      });
-      return;
-    }
-    if (det.ambiguous) {
-      final picked = await showDestinationPicker(
-        context,
-        book: _destBook,
-        current: _destination,
-        detected: det.names,
-      );
-      if (picked == null || !mounted) return;
-      setState(() {
-        _destination = picked.isEmpty ? null : picked;
-        _destinationManual = true;
-      });
-      return;
-    }
-    final tokens = tokensFromLine(text);
-    final options = <String>[];
-    for (final o in [
-      if (tokens.length > 1 && tokens.length <= 4)
-        tokens.map(stripEdgePunct).join(' '),
-      ...destinationPhraseOptions(tokens, 0),
-    ]) {
-      final k = destinationKey(o);
-      if (k.isNotEmpty && !options.any((e) => destinationKey(e) == k)) {
-        options.add(o);
-      }
-    }
-    if (options.isEmpty) return;
-    final res = await showDestinationWordSheet(
-      context,
-      options: options,
-      book: _destBook,
-      suggestedDestination: _destination,
-    );
-    if (res == null || !mounted) return;
-    setState(() {
+      // ممكن تنضاف وجهة جديدة من القائمة نفسها
       _destBook = DestinationBook.fromSettings(DatabaseService.getSettings());
-      _destination = res.destination;
-      _destinationManual = true;
-      _detectDestination();
+      if (picked != null) _destination = picked.isEmpty ? null : picked;
     });
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(
-            res.created
-                ? 'تم حفظ «${res.destination}» كوجهة جديدة'
-                : 'تم حفظ «${res.phrase}» كاختصار لـ«${res.destination}»',
-          ),
-        ),
-      );
   }
 
   Widget _buildDestinationPicker() {
     final name = _destination?.trim() ?? '';
-    final d = _destBook.byName(name);
     final color = name.isEmpty
         ? (_isDark ? Colors.white70 : Colors.black54)
-        : destinationColor(d);
-    final ambiguous = !_destinationManual && _destDetected.length > 1;
-    final subtitle = ambiguous
-        ? 'انذكرت أكتر من وجهة: ${_destDetected.join('، ')} — اختار'
-        : (name.isEmpty
-              ? 'اضغط للاختيار، أو اسحب كلمة من النص لهون'
-              : (d == null
-                    ? 'ما عادت موجودة بالإعدادات'
-                    : '${d.toOffice ? 'تابعة لمكتب' : 'مو تابعة لمكتب'}'
-                          '${_destinationManual ? '' : ' • من النص'}'));
+        : kDestColor;
     return Padding(
       padding: const EdgeInsets.only(top: 14),
       child: Column(
@@ -245,81 +155,46 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         children: [
           const Text('الوجهة', style: TextStyle(fontWeight: FontWeight.w900)),
           const SizedBox(height: 8),
-          DragTarget<String>(
-            onWillAcceptWithDetails: (details) =>
-                details.data.trim().isNotEmpty,
-            onAcceptWithDetails: (details) => _onDestinationDrop(details.data),
-            builder: (context, candidates, rejected) => AnimatedScale(
-              scale: candidates.isNotEmpty ? 1.02 : 1,
-              duration: const Duration(milliseconds: 160),
-              child: _destinationBox(
-                name: name,
-                d: d,
-                color: candidates.isNotEmpty ? kDestOfficeColor : color,
-                ambiguous: ambiguous,
-                subtitle: candidates.isNotEmpty
-                    ? 'اترك الكلمة هون لتصير وجهة'
-                    : subtitle,
+          Material(
+            color: color.withValues(alpha: _isDark ? .16 : .07),
+            borderRadius: BorderRadius.circular(16),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: _pickDestination,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: color.withValues(alpha: .4)),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      name.isEmpty
+                          ? Icons.not_listed_location_rounded
+                          : Icons.place_rounded,
+                      color: color,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        name.isEmpty ? 'بدون وجهة' : name,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          color: color,
+                        ),
+                      ),
+                    ),
+                    Icon(Icons.expand_more_rounded, color: color),
+                  ],
+                ),
               ),
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _destinationBox({
-    required String name,
-    required Destination? d,
-    required Color color,
-    required bool ambiguous,
-    required String subtitle,
-  }) {
-    return Material(
-      color: color.withValues(alpha: _isDark ? .16 : .07),
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: _pickDestination,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: (ambiguous ? Colors.orange : color).withValues(alpha: .4),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(destinationIcon(d), color: color),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name.isEmpty ? 'بدون وجهة' : name,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        color: color,
-                      ),
-                    ),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: ambiguous
-                            ? Colors.orange.shade800
-                            : (_isDark ? Colors.white60 : Colors.black54),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.expand_more_rounded, color: color),
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -511,7 +386,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     try {
       if (widget.existing != null) {
         final tx = widget.existing!;
-        final before = OperationLogService.snapshot(tx);
         tx.beneficiary = _beneficiaryController.text.trim();
         tx.amount = amount1;
         tx.secondAmount = secondAmount;
@@ -526,17 +400,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         }
         TxHistoryService.annotate([tx.id], 'تعديل يدوي');
         await tx.save();
-        await OperationLogService.log(
-          kind: OperationKind.manualEdit,
-          title: 'تعديل حركة «${tx.beneficiary}» في «${widget.account.name}»',
-          records: [
-            OperationTxRecord(
-              txId: tx.id,
-              before: before,
-              after: OperationLogService.snapshot(tx),
-            ),
-          ],
-        );
       } else {
         final tx = TransactionModel(
           id: DatabaseService.newTransactionId(),
@@ -556,16 +419,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         );
 
         await DatabaseService.addTransaction(tx);
-        await OperationLogService.log(
-          kind: OperationKind.manualAdd,
-          title: 'إضافة حركة «${tx.beneficiary}» إلى «${widget.account.name}»',
-          records: [
-            OperationTxRecord(
-              txId: tx.id,
-              after: OperationLogService.snapshot(tx),
-            ),
-          ],
-        );
       }
 
       if (!mounted) return;
@@ -585,59 +438,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         setState(() => _isSaving = false);
       }
     }
-  }
-
-  Widget _buildHeader(bool isEdit) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(26),
-        gradient: LinearGradient(
-          colors: [
-            Colors.blue.shade700,
-            Colors.indigo.shade500,
-            Colors.purple.shade400,
-          ],
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.indigo.withValues(alpha: 0.18),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            isEdit ? Icons.edit_rounded : Icons.add_circle_rounded,
-            color: Colors.white,
-            size: 32,
-          ),
-          const SizedBox(height: 10),
-          Text(
-            isEdit ? 'تعديل حركة' : 'إضافة حركة جديدة',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'ألصق النص في الأعلى ثم اسحب أي جزء إلى الاسم أو المبلغ. يوجد تراجع سريع عند الخطأ.',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 13.5,
-              height: 1.4,
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _buildCompanyMovementSelector() {
@@ -736,10 +536,8 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
             controller: _rawController,
             minLines: 4,
             maxLines: 7,
-            onChanged: (_) => setState(_detectDestination),
+            onChanged: (_) => setState(() {}),
             decoration: InputDecoration(
-              hintText:
-                  'ألصق النص هنا...\nثم اسحب الكلمات أو السطور إلى الحقول أدناه',
               filled: true,
               fillColor: _fieldFill,
               border: OutlineInputBorder(
@@ -760,7 +558,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                       tooltip: 'مسح النص',
                       onPressed: () {
                         _rawController.clear();
-                        setState(_detectDestination);
+                        setState(() {});
                       },
                       icon: const Icon(Icons.close_rounded),
                     ),
@@ -768,11 +566,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           ),
           const SizedBox(height: 14),
           if (parts.isNotEmpty) ...[
-            const Text(
-              'عناصر قابلة للسحب',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 10),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -847,7 +640,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     required String title,
     required IconData icon,
     required TextEditingController controller,
-    required String hint,
+    String? hint,
     required String undoKey,
     required void Function(String value) onAccept,
     bool Function(String? value)? canAccept,
@@ -914,17 +707,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                 inputFormatters: inputFormatters,
                 decoration: _fieldDecoration(hintText: hint),
               ),
-              if (isHovering) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'أفلِت هنا للاستبدال',
-                  style: TextStyle(
-                    color: _focusBorder,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 12.5,
-                  ),
-                ),
-              ],
             ],
           ),
         );
@@ -964,7 +746,29 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
     );
   }
 
-  Widget _buildInfoCard() {
+  String _two(int v) => v.toString().padLeft(2, '0');
+
+  /// تاريخ ووقت الحركة
+  Future<void> _pickDateTime() async {
+    final day = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+    if (day == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_date),
+    );
+    if (!mounted) return;
+    final t = time ?? TimeOfDay.fromDateTime(_date);
+    setState(() {
+      _date = DateTime(day.year, day.month, day.day, t.hour, t.minute);
+    });
+  }
+
+  Widget _buildDateTimeCard() {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -978,16 +782,24 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
           ),
         ],
       ),
-      child: Row(
-        children: [
-          _miniInfoChip(Icons.flag_rounded, 'الحالة', 'مضافة'),
-          const SizedBox(width: 10),
-          _miniInfoChip(
-            Icons.calendar_month_rounded,
-            'التاريخ',
-            '${_date.year}/${_date.month.toString().padLeft(2, '0')}/${_date.day.toString().padLeft(2, '0')}',
-          ),
-        ],
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: _pickDateTime,
+        child: Row(
+          children: [
+            _miniInfoChip(
+              Icons.calendar_month_rounded,
+              'التاريخ',
+              '${_date.year}/${_two(_date.month)}/${_two(_date.day)}',
+            ),
+            const SizedBox(width: 10),
+            _miniInfoChip(
+              Icons.access_time_rounded,
+              'الوقت',
+              '${_two(_date.hour)}:${_two(_date.minute)}',
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1132,8 +944,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
         body: ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
           children: [
-            _buildHeader(isEdit),
-            const SizedBox(height: 16),
             _buildCompanyMovementSelector(),
             if (widget.account.type.isCompany) const SizedBox(height: 16),
             _buildRawInputCard(),
@@ -1159,9 +969,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
                     'لا توجد عملات مُعرّفة بعد',
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
-                  subtitle: const Text(
-                    'أضف العملات من الإعدادات حتى تظهر في هذه الشاشة.',
-                  ),
                   trailing: TextButton(
                     onPressed: () async {
                       await Navigator.push(
@@ -1184,7 +991,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
               title: 'اسم المستفيد',
               icon: Icons.person_rounded,
               controller: _beneficiaryController,
-              hint: 'اكتب الاسم أو اسحب النص إليه',
               undoKey: 'beneficiary',
               onAccept: (value) =>
                   setState(() => _applyDropToBeneficiary(value)),
@@ -1195,7 +1001,6 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
               title: 'المبلغ الأول',
               icon: Icons.payments_rounded,
               controller: _amountController,
-              hint: 'اكتب المبلغ أو اسحب رقمًا صالحًا',
               undoKey: 'amount1',
               keyboardType: TextInputType.number,
               inputFormatters: [
@@ -1244,7 +1049,7 @@ class _AddEditTransactionScreenState extends State<AddEditTransactionScreen> {
             ),
 
             const SizedBox(height: 16),
-            _buildInfoCard(),
+            _buildDateTimeCard(),
             const SizedBox(height: 20),
             _buildSaveButton(isEdit),
           ],

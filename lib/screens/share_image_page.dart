@@ -13,6 +13,8 @@ import 'package:permission_handler/permission_handler.dart';
 // تأكد من مسار هذا الاستيراد في مشروعك أو احذفه إذا لم تستخدم الويب
 import '../utils/web_saver.dart' as web_saver;
 import '../database_service.dart';
+import '../models.dart';
+import '../services/period_stats.dart';
 import '../utils/amount_format.dart';
 
 /// بيانات الإحصائية
@@ -76,6 +78,94 @@ class ShareStatsData {
   });
 }
 
+/// إحصائية حساب ليوم معيّن (الإضافة بتاريخ الإضافة، والإلغاء بتاريخ الإلغاء)
+ShareStatsData shareStatsFor(Account account, DateTime day) {
+  final isCompany = account.type.isCompany;
+  final all = DatabaseService.transactionsBox.values
+      .where((t) => t.accountId == account.id)
+      .toList();
+  final y = day.subtract(const Duration(days: 1));
+  final today = PeriodStats.compute(
+    all,
+    StatsPeriod.day(day),
+    company: isCompany,
+  );
+  final yesterday = PeriodStats.compute(
+    all,
+    StatsPeriod.day(y),
+    company: isCompany,
+  );
+
+  List<(String, double)> partsOf(TransactionModel t) {
+    final parts = <(String, double)>[(t.currency, t.amount)];
+    final second = t.secondAmount;
+    if (second != null && second > 0) {
+      final c = t.secondCurrency?.trim() ?? '';
+      parts.add((c.isEmpty ? t.currency : c, second));
+    }
+    return parts;
+  }
+
+  Map<String, double> totals(List<TransactionModel> list) {
+    final out = <String, double>{};
+    for (final t in list) {
+      for (final (cur, amount) in partsOf(t)) {
+        final c = cur.trim();
+        if (c.isEmpty) continue;
+        out.update(c, (v) => v + amount, ifAbsent: () => amount);
+      }
+    }
+    return out;
+  }
+
+  Map<String, int> counts(List<TransactionModel> list) {
+    final out = <String, int>{};
+    for (final t in list) {
+      for (final (cur, _) in partsOf(t)) {
+        final c = cur.trim();
+        if (c.isEmpty) continue;
+        out.update(c, (v) => v + 1, ifAbsent: () => 1);
+      }
+    }
+    return out;
+  }
+
+  final now = DateTime.now();
+  final d0 = DateTime(day.year, day.month, day.day);
+  final t0 = DateTime(now.year, now.month, now.day);
+  final dateLabel = d0 == t0
+      ? 'اليوم'
+      : d0 == t0.subtract(const Duration(days: 1))
+      ? 'أمس'
+      : "${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}";
+
+  return ShareStatsData(
+    accountName: account.name,
+    dateLabel: dateLabel,
+    addedCount: today.added.length,
+    receivedCount: today.received.length,
+    cancelledCount: today.cancelled.length,
+    unreceivedCount: today.fourth.length,
+    yesterdayAddedCount: yesterday.added.length,
+    yesterdayReceivedCount: yesterday.received.length,
+    yesterdayCancelledCount: yesterday.cancelled.length,
+    yesterdayUnreceivedCount: yesterday.fourth.length,
+    totalsAdded: totals(today.added),
+    totalsReceived: totals(today.received),
+    totalsCancelled: totals(today.cancelled),
+    totalsUnreceived: totals(today.fourth),
+    countsAddedByCurrency: counts(today.added),
+    countsReceivedByCurrency: counts(today.received),
+    countsCancelledByCurrency: counts(today.cancelled),
+    countsUnreceivedByCurrency: counts(today.fourth),
+    addedLabel: PeriodStats.label(PeriodMetric.added, company: isCompany),
+    receivedLabel: PeriodStats.label(PeriodMetric.received, company: isCompany),
+    cancelledLabel: PeriodStats.label(PeriodMetric.cancelled, company: isCompany),
+    unreceivedLabel: PeriodStats.label(PeriodMetric.fourth, company: isCompany),
+    isCompany: isCompany,
+  );
+}
+
 /// قسم من أقسام الإحصائية: فقاعة في الملخص السريع وبطاقة في التفاصيل
 class _ShareSection {
   final String label;
@@ -100,8 +190,8 @@ class _ShareSection {
 }
 
 class ShareImagePage extends StatefulWidget {
-  final ShareStatsData data;
-  const ShareImagePage({super.key, required this.data});
+  final Account account;
+  const ShareImagePage({super.key, required this.account});
 
   @override
   State<ShareImagePage> createState() => _ShareImagePageState();
@@ -127,16 +217,35 @@ class _ShareImagePageState extends State<ShareImagePage> {
   bool _showCurrencyRows = true;
   bool _showDeltaStrip = true;
 
+  /// يوم الإحصائية (اليوم افتراضيًا)
+  DateTime _day = DateTime.now();
+  late ShareStatsData _data;
+
   @override
   void initState() {
     super.initState();
+    _data = shareStatsFor(widget.account, _day);
     _loadDisplayPrefs();
+  }
+
+  Future<void> _pickDay() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _day,
+      firstDate: DateTime(2020, 1, 1),
+      lastDate: DateTime.now(),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _day = picked;
+      _data = shareStatsFor(widget.account, _day);
+    });
   }
 
   /// الأقسام الأربعة بالترتيب (مكتب: مضافة/مستلمة/ملغاة/غير مستلمة،
   /// شركة: إرسال/استقبال/إلغاء مرسل/إلغاء استقبال)
   List<_ShareSection> _sections() {
-    final d = widget.data;
+    final d = _data;
     final company = d.isCompany;
     return [
       _ShareSection(
@@ -205,7 +314,9 @@ class _ShareImagePageState extends State<ShareImagePage> {
   /// =================== حفظ خيارات العرض ===================
   /// تُحفظ منفصلة للمكاتب وللشركات لأن أقسامهما مختلفة.
   String get _prefsKey =>
-      widget.data.isCompany ? 'share_design_company' : 'share_design_office';
+      widget.account.type.isCompany
+          ? 'share_design_company'
+          : 'share_design_office';
 
   void _loadDisplayPrefs() {
     final raw = DatabaseService.uiPrefsBoxOrNull?.get(_prefsKey);
@@ -495,16 +606,6 @@ class _ShareImagePageState extends State<ShareImagePage> {
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          widget.data.isCompany
-                              ? 'حساب شركة — الاختيارات تُحفظ لحسابات الشركات'
-                              : 'حساب مكتب — الاختيارات تُحفظ لحسابات المكاتب',
-                          style: TextStyle(
-                            color: cs.onSurfaceVariant,
-                            fontSize: 12.5,
-                          ),
-                        ),
                         const SizedBox(height: 8),
 
                         tile(
@@ -518,7 +619,6 @@ class _ShareImagePageState extends State<ShareImagePage> {
                         groupTitle('الملخص السريع', Icons.dashboard_rounded),
                         tile(
                           title: 'إظهار الملخص السريع',
-                          subtitle: 'الفقاعات الصغيرة في أعلى الصورة',
                           value: _showQuickStats,
                           onChanged: (v) => sync(() => _showQuickStats = v),
                           icon: Icons.dashboard_rounded,
@@ -540,7 +640,6 @@ class _ShareImagePageState extends State<ShareImagePage> {
                         groupTitle('التفاصيل', Icons.view_agenda_rounded),
                         tile(
                           title: 'عرض التفاصيل',
-                          subtitle: 'بطاقات الأقسام مع مبالغ كل عملة',
                           value: _showDetails,
                           onChanged: (v) => sync(() => _showDetails = v),
                           icon: Icons.tune_rounded,
@@ -879,7 +978,7 @@ class _ShareImagePageState extends State<ShareImagePage> {
   }
 
   Widget _buildHeader(ColorScheme cs) {
-    final d = widget.data;
+    final d = _data;
     return Row(
       children: [
         Icon(
@@ -1022,6 +1121,11 @@ class _ShareImagePageState extends State<ShareImagePage> {
           title: const Text('تصميم صورة المشاركة'),
           centerTitle: true,
           actions: [
+            IconButton(
+              tooltip: 'التاريخ',
+              onPressed: _busy ? null : _pickDay,
+              icon: const Icon(Icons.calendar_month_rounded),
+            ),
             IconButton(
               tooltip: 'خيارات العرض',
               onPressed: _openDisplayOptions,

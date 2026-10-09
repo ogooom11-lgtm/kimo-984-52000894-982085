@@ -14,7 +14,6 @@ import '../database_service.dart';
 import '../models.dart';
 import '../services/all_stats_prefs.dart';
 import '../services/period_stats.dart';
-import 'all_stats_customize_screen.dart';
 
 class AllAccountsStatsScreen extends StatefulWidget {
   const AllAccountsStatsScreen({super.key});
@@ -31,8 +30,19 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
 
   DateTime _anchor = DateTime.now();
 
-  /// التخصيص (محفوظ — الصفحة بترجع متل ما تركتها)
-  AllStatsPrefs _prefs = AllStatsPrefsStore.load();
+  /// الشكل الافتراضي، مع تذكّر الفترة والترتيب ونوع الحسابات
+  AllStatsPrefs _prefs = _basePrefs();
+
+  static AllStatsPrefs _basePrefs() {
+    final saved = AllStatsPrefsStore.load();
+    return AllStatsPrefs(
+      period: saved.period,
+      sortMode: saved.sortMode == AccountSortMode.manual
+          ? AccountSortMode.name
+          : saved.sortMode,
+      accountType: saved.accountType,
+    );
+  }
 
   bool _busy = false;
 
@@ -64,44 +74,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   void _update(AllStatsPrefs p) {
     _prefs = p;
     AllStatsPrefsStore.save(p);
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    AllStatsPrefsStore.prefs.addListener(_onPrefsChanged);
-  }
-
-  @override
-  void dispose() {
-    AllStatsPrefsStore.prefs.removeListener(_onPrefsChanged);
-    super.dispose();
-  }
-
-  void _onPrefsChanged() {
-    final p = AllStatsPrefsStore.prefs.value;
-    if (!mounted || identical(p, _prefs)) return;
-    setState(() => _prefs = p);
-  }
-
-  Future<void> _openCustomize() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) =>
-            AllStatsCustomizeScreen(initialType: _accountTypeFilter),
-      ),
-    );
-    if (mounted) setState(() => _prefs = AllStatsPrefsStore.prefs.value);
-  }
-
-  int _compareManual(_AccountStats a, _AccountStats b) {
-    final order = _prefs.orderFor(_accountTypeFilter);
-    final ia = order.indexOf(a.account.id);
-    final ib = order.indexOf(b.account.id);
-    if (ia >= 0 && ib >= 0) return ia.compareTo(ib);
-    if (ia >= 0) return -1;
-    if (ib >= 0) return 1;
-    return a.account.name.compareTo(b.account.name);
   }
 
   // ==========================
@@ -222,7 +194,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   String _sortModeLabel() {
     switch (_sortMode) {
       case AccountSortMode.priority:
-        return 'ترتيب ذكي';
+        return 'حسب الأهمية';
       case AccountSortMode.name:
         return 'حسب الاسم';
       case AccountSortMode.operations:
@@ -1229,50 +1201,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     );
   }
 
-  Widget _hiddenAccountsNote(ColorScheme cs, int hiddenCount) {
-    return Material(
-      color: cs.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: _openCustomize,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: [
-              Icon(
-                Icons.visibility_off_rounded,
-                size: 18,
-                color: cs.onSurfaceVariant,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  hiddenCount == 1
-                      ? 'في حساب مخفي — ما بينحسب هون'
-                      : 'في $hiddenCount حسابات مخفية — ما بتنحسب هون',
-                  style: TextStyle(
-                    color: cs.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 12.5,
-                  ),
-                ),
-              ),
-              Text(
-                'تخصيص',
-                style: TextStyle(
-                  color: cs.primary,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 12.5,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Future<void> _export({required bool alsoShare}) async {
     if (_busy) return;
     setState(() => _exporting = true);
@@ -1329,7 +1257,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
 
               Widget actionTile({
                 required String title,
-                required String subtitle,
+                String? subtitle,
                 required IconData icon,
                 required VoidCallback? onTap,
                 bool selected = false,
@@ -1372,15 +1300,17 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                   fontSize: 14.5,
                                 ),
                               ),
-                              const SizedBox(height: 4),
-                              Text(
-                                subtitle,
-                                style: TextStyle(
-                                  color: cs.onSurfaceVariant,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12.5,
+                              if (subtitle != null) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  subtitle,
+                                  style: TextStyle(
+                                    color: cs.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 12.5,
+                                  ),
                                 ),
-                              ),
+                              ],
                             ],
                           ),
                         ),
@@ -1500,7 +1430,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'عرض يومي',
-                            subtitle: 'يعرض إحصائيات يوم واحد',
                             icon: Icons.today_rounded,
                             selected: _period == AllStatsPeriod.daily,
                             onTap: () {
@@ -1510,7 +1439,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'عرض شهري',
-                            subtitle: 'يعرض إحصائيات الشهر المحدد',
                             icon: Icons.calendar_view_month_rounded,
                             selected: _period == AllStatsPeriod.monthly,
                             onTap: () {
@@ -1520,7 +1448,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'عرض سنوي',
-                            subtitle: 'يعرض إحصائيات السنة المحددة',
                             icon: Icons.calendar_today_rounded,
                             selected: _period == AllStatsPeriod.yearly,
                             onTap: () {
@@ -1536,7 +1463,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'اختيار التاريخ',
-                            subtitle: 'افتح التقويم واختر تاريخًا مرجعيًا',
                             icon: Icons.edit_calendar_rounded,
                             onTap: () async {
                               Navigator.pop(context);
@@ -1548,8 +1474,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'الفترة السابقة',
-                            subtitle:
-                                'انتقل إلى اليوم أو الشهر أو السنة السابقة',
                             icon: Icons.chevron_right_rounded,
                             onTap: () {
                               _shiftPeriod(-1);
@@ -1558,7 +1482,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'الفترة التالية',
-                            subtitle: 'انتقل إلى الفترة التالية إن كانت متاحة',
                             icon: Icons.chevron_left_rounded,
                             onTap: _canGoNext()
                                 ? () {
@@ -1571,10 +1494,8 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           const SizedBox(height: 8),
                           sectionTitle('الترتيب', Icons.leaderboard_rounded),
                           actionTile(
-                            title: 'ترتيب ذكي حسب الأهمية',
-                            subtitle:
-                                'غير المستلمة ثم المضافة ثم المستلمة ثم الأقل إلغاء',
-                            icon: Icons.auto_awesome_rounded,
+                            title: 'ترتيب حسب الأهمية',
+                            icon: Icons.flag_rounded,
                             selected: _sortMode == AccountSortMode.priority,
                             onTap: () {
                               setState(
@@ -1585,7 +1506,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'ترتيب حسب العمليات',
-                            subtitle: 'الأكثر إجماليًا في الأعلى',
                             icon: Icons.bar_chart_rounded,
                             selected: _sortMode == AccountSortMode.operations,
                             onTap: () {
@@ -1597,7 +1517,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'ترتيب حسب التغير',
-                            subtitle: 'الأعلى تغيرًا مقارنة بالفترة السابقة',
                             icon: Icons.trending_up_rounded,
                             selected: _sortMode == AccountSortMode.trend,
                             onTap: () {
@@ -1607,7 +1526,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'ترتيب حسب المبالغ',
-                            subtitle: 'الأعلى مجموعًا في الأعلى',
                             icon: Icons.payments_rounded,
                             selected: _sortMode == AccountSortMode.amount,
                             onTap: () {
@@ -1619,23 +1537,10 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           ),
                           actionTile(
                             title: 'ترتيب حسب الاسم',
-                            subtitle: 'ترتيب أبجدي',
                             icon: Icons.sort_by_alpha_rounded,
                             selected: _sortMode == AccountSortMode.name,
                             onTap: () {
                               setState(() => _sortMode = AccountSortMode.name);
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'ترتيب يدوي',
-                            subtitle: 'حسب الترتيب يلي حددته بـ«تخصيص الصفحة»',
-                            icon: Icons.low_priority_rounded,
-                            selected: _sortMode == AccountSortMode.manual,
-                            onTap: () {
-                              setState(
-                                () => _sortMode = AccountSortMode.manual,
-                              );
                               Navigator.pop(context);
                             },
                           ),
@@ -1771,11 +1676,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         final allOfType = accountsBox.values
             .where((a) => a.type == _accountTypeFilter)
             .toList();
-        // الحسابات المخفية بالتخصيص ما بتنعرض وما بتنحسب
-        final accounts = allOfType
-            .where((a) => !_prefs.isHidden(a.id))
-            .toList();
-        final hiddenCount = allOfType.length - accounts.length;
+        final accounts = allOfType;
 
         return ValueListenableBuilder(
           valueListenable: DatabaseService.transactionsBox.listenable(),
@@ -1793,6 +1694,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                 case AccountSortMode.priority:
                   return _compareStatsByPriority(a, b);
                 case AccountSortMode.name:
+                case AccountSortMode.manual:
                   return a.account.name.compareTo(b.account.name);
                 case AccountSortMode.operations:
                   return b.totalNow.compareTo(a.totalNow);
@@ -1802,8 +1704,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                   return bDiff.compareTo(aDiff);
                 case AccountSortMode.amount:
                   return b.totalAmountNow.compareTo(a.totalAmountNow);
-                case AccountSortMode.manual:
-                  return _compareManual(a, b);
               }
             });
 
@@ -1839,11 +1739,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                       tooltip: 'الفترة والترتيب',
                       onPressed: _openPeriodAndSortSheet,
                       icon: const Icon(Icons.calendar_month_rounded),
-                    ),
-                    IconButton(
-                      tooltip: 'تخصيص الصفحة',
-                      onPressed: _openCustomize,
-                      icon: const Icon(Icons.tune_rounded),
                     ),
                     IconButton(
                       tooltip: _busy ? 'جارٍ التنفيذ...' : 'حفظ الصورة',
@@ -1909,11 +1804,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                                     ),
 
                                   if (_showHeader) const SizedBox(height: 12),
-
-                                  if (hiddenCount > 0 && !_exporting) ...[
-                                    _hiddenAccountsNote(cs, hiddenCount),
-                                    const SizedBox(height: 12),
-                                  ],
 
                                   if (_showQuickStats) ...[
                                     _buildQuickStats(stats, global),

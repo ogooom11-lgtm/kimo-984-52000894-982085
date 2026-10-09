@@ -1815,7 +1815,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
 
               Widget switchTile({
                 required String title,
-                required String subtitle,
                 required bool value,
                 required ValueChanged<bool> onChanged,
                 required IconData icon,
@@ -1853,14 +1852,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                       style: const TextStyle(
                         fontWeight: FontWeight.w800,
                         fontSize: 14.5,
-                      ),
-                    ),
-                    subtitle: Text(
-                      subtitle,
-                      style: TextStyle(
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12.5,
                       ),
                     ),
                   ),
@@ -1951,14 +1942,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                                         style: TextStyle(
                                           fontWeight: FontWeight.w900,
                                           fontSize: 17,
-                                        ),
-                                      ),
-                                      SizedBox(height: 4),
-                                      Text(
-                                        'تحكم كامل بالفترة والبيانات والمظهر',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 12.5,
                                         ),
                                       ),
                                     ],
@@ -2067,7 +2050,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                           ),
                           switchTile(
                             title: 'المضافة',
-                            subtitle: 'إظهار / إخفاء خط المضافة',
                             value: _showAdded,
                             onChanged: (v) => sync(() => _showAdded = v),
                             icon: Icons.add_circle_rounded,
@@ -2075,7 +2057,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                           ),
                           switchTile(
                             title: 'المستلمة',
-                            subtitle: 'إظهار / إخفاء خط المستلمة',
                             value: _showReceived,
                             onChanged: (v) => sync(() => _showReceived = v),
                             icon: Icons.check_circle_rounded,
@@ -2083,7 +2064,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                           ),
                           switchTile(
                             title: 'الملغاة',
-                            subtitle: 'إظهار / إخفاء خط الملغاة',
                             value: _showCancelled,
                             onChanged: (v) => sync(() => _showCancelled = v),
                             icon: Icons.cancel_rounded,
@@ -2091,7 +2071,6 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                           ),
                           switchTile(
                             title: 'الباقي',
-                            subtitle: 'إظهار / إخفاء خط الباقي',
                             value: _showUnreceived,
                             onChanged: (v) => sync(() => _showUnreceived = v),
                             icon: Icons.hourglass_bottom_rounded,
@@ -2104,92 +2083,78 @@ class _TimelineAnalyticsScreenState extends State<TimelineAnalyticsScreen> {
                           ),
                           switchTile(
                             title: 'الهيدر',
-                            subtitle: 'إظهار اسم الحساب ومعلومات الفترة',
                             value: _showHeader,
                             onChanged: (v) => sync(() => _showHeader = v),
                             icon: Icons.view_agenda_rounded,
                           ),
                           switchTile(
                             title: 'شريط المعلومات',
-                            subtitle: 'إظهار التاريخ والفترة والوقت',
                             value: _showMetaBar,
                             onChanged: (v) => sync(() => _showMetaBar = v),
                             icon: Icons.badge_rounded,
                           ),
                           switchTile(
                             title: 'بطاقات الملخص',
-                            subtitle: 'إظهار بطاقات المضافة والمستلمة وغيرها',
                             value: _showSummaryCards,
                             onChanged: (v) => sync(() => _showSummaryCards = v),
                             icon: Icons.space_dashboard_rounded,
                           ),
                           switchTile(
                             title: 'دليل الألوان',
-                            subtitle: 'إظهار أسماء الخطوط أسفل الرسم',
                             value: _showLegend,
                             onChanged: (v) => sync(() => _showLegend = v),
                             icon: Icons.label_rounded,
                           ),
                           switchTile(
                             title: 'شبكة الرسم',
-                            subtitle: 'إظهار خطوط الخلفية',
                             value: _showGrid,
                             onChanged: (v) => sync(() => _showGrid = v),
                             icon: Icons.grid_4x4_rounded,
                           ),
                           switchTile(
                             title: 'محور أفقي',
-                            subtitle: 'إظهار تسميات المحور الأفقي',
                             value: _showXAxis,
                             onChanged: (v) => sync(() => _showXAxis = v),
                             icon: Icons.swap_horiz_rounded,
                           ),
                           switchTile(
                             title: 'محور عمودي',
-                            subtitle: 'إظهار تسميات المحور العمودي',
                             value: _showYAxis,
                             onChanged: (v) => sync(() => _showYAxis = v),
                             icon: Icons.swap_vert_rounded,
                           ),
                           switchTile(
                             title: 'أرقام النقاط',
-                            subtitle: 'إظهار رقم كل نقطة على المخطط',
                             value: _showPoints,
                             onChanged: (v) => sync(() => _showPoints = v),
                             icon: Icons.bubble_chart_rounded,
                           ),
                           switchTile(
                             title: 'تعبئة أسفل الخط',
-                            subtitle: 'تأثير بصري أنيق أسفل الخطوط',
                             value: _showArea,
                             onChanged: (v) => sync(() => _showArea = v),
                             icon: Icons.waterfall_chart_rounded,
                           ),
                           switchTile(
                             title: 'خطوط ناعمة',
-                            subtitle: 'يجعل الرسم أكثر نعومة',
                             value: _smoothLines,
                             onChanged: (v) => sync(() => _smoothLines = v),
                             icon: Icons.auto_graph_rounded,
                           ),
                           switchTile(
                             title: 'تجاهل الفراغ في الأطراف',
-                            subtitle:
-                                'يقصّ الفترات الفارغة من بداية ونهاية المخطط فقط',
                             value: _trimEmptyEdges,
                             onChanged: (v) => sync(() => _trimEmptyEdges = v),
                             icon: Icons.compress_rounded,
                           ),
                           switchTile(
                             title: 'بادج أعلى قيمة',
-                            subtitle: 'إظهار القيمة الأعلى بشكل مميز',
                             value: _showMaxBadge,
                             onChanged: (v) => sync(() => _showMaxBadge = v),
                             icon: Icons.star_rounded,
                           ),
                           switchTile(
                             title: 'خط إرشادي لأعلى قيمة',
-                            subtitle: 'إظهار خط عمودي عند أعلى نقطة',
                             value: _showMaxGuide,
                             onChanged: (v) => sync(() => _showMaxGuide = v),
                             icon: Icons.straighten_rounded,

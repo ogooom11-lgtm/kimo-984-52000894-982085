@@ -3,9 +3,7 @@
 // رسائل النجاح والخطأ (SnackBar) بشكل موحّد بكل التطبيق:
 //  • كل رسالة بتنعرف لحالها: نجاح (أخضر)، خطأ (أحمر)، تنبيه (برتقالي)،
 //    أو معلومة — حسب نصها («تم…»، «تعذّر…»، «لا توجد…») أو لونها.
-//  • بأعلى الشاشة (افتراضيًا) حتى ما تغطي أزرار الحفظ تحت، أو تحت.
-//  • قابلة للتخصيص من الإعدادات: المكان، المدة، الشكل، الأيقونة، حجم الخط،
-//    وزر الإغلاق.
+//  • بأعلى الشاشة حتى ما تغطي أزرار الحفظ تحت.
 // ما في داعي نغيّر أي مكان بيعرض رسالة: [StyledScaffoldMessenger] بأعلى
 // التطبيق بيعيد تنسيق كل SnackBar قبل ما يظهر.
 // -------------------------------------------------------------
@@ -13,8 +11,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-
-import '../database_service.dart';
 
 enum AppMessageKind { success, error, warning, info }
 
@@ -141,27 +137,11 @@ class AppMessagePrefs {
 class AppMessages {
   AppMessages._();
 
-  static const String _prefsKey = 'app_messages';
   static const String _kindKeyPrefix = 'app_msg:';
 
+  /// شكل الرسائل (ثابت: فوق الشاشة، ملوّنة)
   static final ValueNotifier<AppMessagePrefs> prefs =
       ValueNotifier<AppMessagePrefs>(const AppMessagePrefs());
-
-  /// يقرأ التخصيص المحفوظ (بعد فتح صناديق Hive)
-  static void load() {
-    try {
-      prefs.value = AppMessagePrefs.fromMap(
-        DatabaseService.uiPrefsBoxOrNull?.get(_prefsKey),
-      );
-    } catch (_) {}
-  }
-
-  static Future<void> save(AppMessagePrefs p) async {
-    prefs.value = p;
-    try {
-      await DatabaseService.uiPrefsBoxOrNull?.put(_prefsKey, p.toMap());
-    } catch (_) {}
-  }
 
   /// يعرض رسالة بنوع محدد (للأماكن الجديدة). الأماكن القديمة بتنعرف لحالها.
   static void show(

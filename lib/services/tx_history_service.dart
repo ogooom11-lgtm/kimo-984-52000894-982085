@@ -313,32 +313,6 @@ class TxHistoryService {
     }
   }
 
-  /// يسجّل حدثًا بـ«مسار الحركة» (تحديد المصدر/الوجهة يدويًا) في سجل الحركة.
-  static void recordLink(
-    int txId, {
-    required String title,
-    String label = 'المصدر',
-    String? from,
-    String? to,
-    String? note,
-  }) {
-    if (!_historyOpen) return;
-    _record(
-      txId,
-      TxHistoryEntry(
-        at: DateTime.now(),
-        kind: TxHistoryKind.link,
-        ctx: {
-          'title': title,
-          'label': label,
-          if (from != null && from.trim().isNotEmpty) 'from': from,
-          if (to != null && to.trim().isNotEmpty) 'to': to,
-          if (note != null && note.trim().isNotEmpty) 'note': note,
-        },
-      ),
-    );
-  }
-
   // ===========================
   // تعديلات الاسم/المبلغ/العملة (لتتبّع مصدر الحركة)
   // ===========================

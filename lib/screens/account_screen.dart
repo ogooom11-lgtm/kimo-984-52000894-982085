@@ -1,94 +1,30 @@
-import 'dart:io' show Platform;
-import 'dart:typed_data';
-
-import 'package:flutter/foundation.dart' show kIsWeb;
-
-import 'package:excel/excel.dart' as xls;
-import 'package:file_saver/file_saver.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'unreceived_reconcile_screen.dart'; // 👈 جديد
 
 import '../database_service.dart';
 import '../models.dart';
-import '../services/operation_log_service.dart';
 import '../services/tx_history_service.dart';
 import 'add_edit_transaction_screen.dart';
-import 'account_stats_screen.dart';
-import 'transaction_details_screen.dart';
+import 'share_image_page.dart';
 import 'transaction_history_screen.dart';
 
 enum SortField { date, name, status, amount }
 
-enum ExportFileType { excel, pdf }
+/// الحقول يلي بتنسخ: الاسم، المبلغ 1 والمبلغ 2 (مع العملات)، والتاريخ
+class _CopyFields {
+  bool name = true;
+  bool amount1 = true;
+  bool amount2 = true;
+  bool day = true;
 
-class _ExportFields {
-  bool name;
-  bool amount1;
-  bool currency1;
-  bool amount2;
-  bool currency2;
-  bool total;
-  bool day;
-  bool time;
-  bool status;
-  bool statusStamp;
-
-  _ExportFields({
-    this.name = true,
-    this.amount1 = true,
-    this.currency1 = true,
-    this.amount2 = true,
-    this.currency2 = true,
-    this.total = false,
-    this.day = false,
-    this.time = false,
-    this.status = false,
-    this.statusStamp = false,
-  });
-
-  bool get hasAny =>
-      name ||
-      amount1 ||
-      currency1 ||
-      amount2 ||
-      currency2 ||
-      total ||
-      day ||
-      time ||
-      status ||
-      statusStamp;
-}
-
-class _ExportColumn {
-  final String title;
-  final String value;
-  const _ExportColumn(this.title, this.value);
+  bool get hasAny => name || amount1 || amount2 || day;
 }
 
 class AccountScreen extends StatefulWidget {
   final Account account;
 
-  /// حركات تُحدَّد تلقائيًا عند فتح الحساب (مثلًا من سجل العمليات)
-  final Set<int>? initialSelectedTxIds;
-
-  /// عنوان يوضح مصدر التحديد (مثل عنوان العملية في السجل)
-  final String? selectionTitle;
-
-  /// عنوان شريط التحديد (افتراضيًا: «حركات من سجل العمليات»)
-  final String? focusLabel;
-
-  const AccountScreen({
-    super.key,
-    required this.account,
-    this.initialSelectedTxIds,
-    this.selectionTitle,
-    this.focusLabel,
-  });
+  const AccountScreen({super.key, required this.account});
 
   @override
   State<AccountScreen> createState() => _AccountScreenState();
@@ -151,27 +87,11 @@ class _AccountScreenState extends State<AccountScreen> {
   bool _searchFocused = false;
   final Set<int> _selectedTxIds = {};
 
-  /// عند الفتح من سجل العمليات: نعرض حركات العملية فقط (مع إمكانية عرض الكل)
-  final Set<int> _focusTxIds = {};
-  bool _showOnlyFocused = false;
-
   bool get _selectionMode => _selectedTxIds.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
-    final initial = widget.initialSelectedTxIds;
-    if (initial != null && initial.isNotEmpty) {
-      _selectedTxIds.addAll(initial);
-      _focusTxIds.addAll(initial);
-      _showOnlyFocused = true;
-      for (final k in _expanded.keys.toList()) {
-        _expanded[k] = true;
-      }
-      for (final k in _companyExpanded.keys.toList()) {
-        _companyExpanded[k] = true;
-      }
-    }
     _searchCtrl.addListener(() {
       setState(() => _query = _searchCtrl.text.trim());
     });
@@ -307,25 +227,10 @@ class _AccountScreenState extends State<AccountScreen> {
     if (items.length > 1) {
       TxHistoryService.annotate(items.map((t) => t.id), 'نقل جماعي');
     }
-    final records = <OperationTxRecord>[];
     for (final tx in items) {
-      final before = OperationLogService.snapshot(tx);
       tx.accountId = target.id;
       await tx.save();
-      records.add(
-        OperationTxRecord(
-          txId: tx.id,
-          before: before,
-          after: OperationLogService.snapshot(tx),
-        ),
-      );
     }
-    await OperationLogService.log(
-      kind: OperationKind.move,
-      title:
-          'نقل ${items.length} حركة من «${widget.account.name}» إلى «${target.name}»',
-      records: records,
-    );
 
     if (!mounted) return;
     _clearSelection();
@@ -348,9 +253,7 @@ class _AccountScreenState extends State<AccountScreen> {
 
     final now = DateTime.now();
     TxHistoryService.annotate(items.map((t) => t.id), 'إجراء جماعي');
-    final records = <OperationTxRecord>[];
     for (final tx in items) {
-      final before = OperationLogService.snapshot(tx);
       final movement = tx.companyMovementType;
       if (_isCompanyAccount && movement != null) {
         // حركات الشركات: الإلغاء جزء من نوع الحركة (مثل الإلغاء الفردي)،
@@ -374,20 +277,7 @@ class _AccountScreenState extends State<AccountScreen> {
         tx.applyStatus(status, at: now);
       }
       await tx.save();
-      records.add(
-        OperationTxRecord(
-          txId: tx.id,
-          before: before,
-          after: OperationLogService.snapshot(tx),
-        ),
-      );
     }
-    await OperationLogService.log(
-      kind: OperationKind.statusChange,
-      title:
-          'تحويل ${items.length} حركة إلى «$label» في «${widget.account.name}»',
-      records: records,
-    );
 
     if (!mounted) return;
     _clearSelection();
@@ -404,22 +294,10 @@ class _AccountScreenState extends State<AccountScreen> {
     );
     if (!ok) return;
 
-    final records = <OperationTxRecord>[
-      for (final tx in items)
-        OperationTxRecord(
-          txId: tx.id,
-          before: OperationLogService.snapshot(tx),
-        ),
-    ];
     TxHistoryService.annotate(items.map((t) => t.id), 'حذف جماعي');
     for (final tx in items) {
       await tx.delete();
     }
-    await OperationLogService.log(
-      kind: OperationKind.delete,
-      title: 'حذف ${items.length} حركة من «${widget.account.name}»',
-      records: records,
-    );
 
     if (!mounted) return;
     _clearSelection();
@@ -536,17 +414,6 @@ class _AccountScreenState extends State<AccountScreen> {
     }
   }
 
-  String _statusStampLabel(TransactionModel t) {
-    switch (t.status) {
-      case TransactionStatus.received:
-        return 'تاريخ التسليم';
-      case TransactionStatus.cancelled:
-        return 'تاريخ الإلغاء';
-      case TransactionStatus.added:
-        return 'تاريخ الحركة';
-    }
-  }
-
   String _formatExactDateTime(DateTime dt) {
     final mm = dt.month.toString().padLeft(2, '0');
     final dd = dt.day.toString().padLeft(2, '0');
@@ -601,7 +468,6 @@ class _AccountScreenState extends State<AccountScreen> {
                   const ListTile(
                     leading: Icon(Icons.sort_rounded),
                     title: Text("الفرز"),
-                    subtitle: Text("اختر الحقل واتجاه الفرز"),
                   ),
                   const SizedBox(height: 6),
                   DropdownButtonFormField<SortField>(
@@ -677,297 +543,29 @@ class _AccountScreenState extends State<AccountScreen> {
     );
   }
 
-  List<_ExportColumn> _buildExportColumns(
-    TransactionModel t,
-    _ExportFields fields,
-  ) {
-    final columns = <_ExportColumn>[];
-
-    if (fields.name) {
-      columns.add(_ExportColumn('الاسم', t.beneficiary));
-    }
-    if (fields.amount1) {
-      columns.add(_ExportColumn('المبلغ 1', _formatAmount(t.amount)));
-    }
-    if (fields.currency1) {
-      columns.add(_ExportColumn('العملة 1', t.currency));
-    }
-    if (fields.amount2) {
-      columns.add(
-        _ExportColumn(
-          'المبلغ 2',
-          t.hasSecondAmount ? _formatAmount(t.secondAmount!) : '',
-        ),
-      );
-    }
-    if (fields.currency2) {
-      columns.add(
-        _ExportColumn(
-          'العملة 2',
-          t.hasSecondAmount ? (t.secondCurrency ?? t.currency) : '',
-        ),
-      );
-    }
-    if (fields.total) {
-      columns.add(_ExportColumn('الإجمالي', _formatAmount(t.totalAmount)));
-    }
-    if (fields.day) {
-      columns.add(_ExportColumn('التاريخ', _formatDayLabel(t.date)));
-    }
-    if (fields.time) {
-      columns.add(_ExportColumn('الوقت', _formatRelativeOrExactTime(t.date)));
-    }
-    if (fields.status) {
-      columns.add(_ExportColumn('الحالة', _statusLabel(t.status)));
-    }
-    if (fields.statusStamp) {
-      final stamp = _statusStamp(t) ?? t.date;
-      columns.add(
-        _ExportColumn(_statusStampLabel(t), _formatExactDateTime(stamp)),
-      );
-    }
-
-    return columns;
+  String _copyDate(DateTime dt) {
+    final mm = dt.month.toString().padLeft(2, '0');
+    final dd = dt.day.toString().padLeft(2, '0');
+    return '${dt.year}-$mm-$dd';
   }
 
-  String _buildCopyLine(TransactionModel t, _ExportFields fields) {
-    return _buildExportColumns(
-      t,
-      fields,
-    ).map((c) => c.value).where((value) => value.trim().isNotEmpty).join(' | ');
+  String _copyMoney(double amount, String currency) =>
+      '${_formatAmount(amount)} ${currency.trim()}'.trim();
+
+  String _buildCopyLine(TransactionModel t, _CopyFields fields) {
+    final parts = <String>[
+      if (fields.name) t.beneficiary.trim(),
+      if (fields.amount1 && (t.amount != 0 || !t.hasSecondAmount))
+        _copyMoney(t.amount, t.currency),
+      if (fields.amount2 && t.hasSecondAmount)
+        _copyMoney(t.secondAmount!, t.secondCurrency ?? t.currency),
+      if (fields.day) _copyDate(t.date),
+    ];
+    return parts.where((v) => v.isNotEmpty).join(' | ');
   }
 
-  String _buildCopyText(List<TransactionModel> items, _ExportFields fields) {
+  String _buildCopyText(List<TransactionModel> items, _CopyFields fields) {
     return items.map((t) => _buildCopyLine(t, fields)).join('\n');
-  }
-
-  List<String> _buildExportHeaders(
-    List<TransactionModel> items,
-    _ExportFields fields,
-  ) {
-    if (items.isEmpty) return const [];
-    return _buildExportColumns(
-      items.first,
-      fields,
-    ).map((c) => c.title).toList();
-  }
-
-  List<List<String>> _buildExportRows(
-    List<TransactionModel> items,
-    _ExportFields fields,
-  ) {
-    return items
-        .map((t) => _buildExportColumns(t, fields).map((c) => c.value).toList())
-        .toList();
-  }
-
-  String _safeFileName(String value) {
-    final cleaned = value
-        .trim()
-        .replaceAll(RegExp(r'[\\/:*?"<>|]+'), '_')
-        .replaceAll(RegExp(r'\s+'), '_');
-    return cleaned.isEmpty ? 'export' : cleaned;
-  }
-
-  String _exportBaseName(String sectionTitle) {
-    final now = DateTime.now();
-    final stamp =
-        '${now.year}'
-        '${now.month.toString().padLeft(2, '0')}'
-        '${now.day.toString().padLeft(2, '0')}_'
-        '${now.hour.toString().padLeft(2, '0')}'
-        '${now.minute.toString().padLeft(2, '0')}';
-    return _safeFileName('${widget.account.name}_${sectionTitle}_$stamp');
-  }
-
-  Future<String?> _saveExportFile({
-    required String baseName,
-    required Uint8List bytes,
-    required String extension,
-    required MimeType mimeType,
-  }) async {
-    // ملاحظة مهمة:
-    // FileSaver.saveFile على Android يحفظ داخل مجلد التطبيق:
-    // Android/data/<package>/files
-    // لذلك نستخدم saveAs على Android حتى تظهر نافذة النظام
-    // ويستطيع المستخدم اختيار مجلد Downloads مباشرة.
-    if (!kIsWeb && Platform.isAndroid) {
-      return FileSaver.instance.saveAs(
-        name: baseName,
-        bytes: bytes,
-        ext: extension,
-        mimeType: mimeType,
-      );
-    }
-
-    return FileSaver.instance.saveFile(
-      name: baseName,
-      bytes: bytes,
-      ext: extension,
-      mimeType: mimeType,
-    );
-  }
-
-  Future<String?> _exportSectionToExcel({
-    required String sectionTitle,
-    required List<TransactionModel> items,
-    required _ExportFields fields,
-  }) async {
-    final headers = _buildExportHeaders(items, fields);
-    final rows = _buildExportRows(items, fields);
-
-    final book = xls.Excel.createExcel();
-    const sheetName = 'التقرير';
-    final sheet = book[sheetName];
-
-    sheet.appendRow(headers.map((h) => xls.TextCellValue(h)).toList());
-    for (final row in rows) {
-      sheet.appendRow(row.map((v) => xls.TextCellValue(v)).toList());
-    }
-
-    final bytes = book.encode();
-    if (bytes == null) {
-      throw Exception('تعذر إنشاء ملف Excel');
-    }
-
-    return _saveExportFile(
-      baseName: _exportBaseName(sectionTitle),
-      bytes: Uint8List.fromList(bytes),
-      extension: 'xlsx',
-      mimeType: MimeType.microsoftExcel,
-    );
-  }
-
-  Future<String?> _exportSectionToPdf({
-    required String sectionTitle,
-    required List<TransactionModel> items,
-    required _ExportFields fields,
-  }) async {
-    final headers = _buildExportHeaders(items, fields);
-    final rows = _buildExportRows(items, fields);
-    final regularFont = await PdfGoogleFonts.cairoRegular();
-    final boldFont = await PdfGoogleFonts.cairoBold();
-
-    final document = pw.Document(
-      theme: pw.ThemeData.withFont(base: regularFont, bold: boldFont),
-    );
-
-    document.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4.landscape,
-        margin: const pw.EdgeInsets.all(22),
-        build: (ctx) => [
-          pw.Directionality(
-            textDirection: pw.TextDirection.rtl,
-            child: pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-              children: [
-                pw.Text(
-                  'تقرير $sectionTitle - ${widget.account.name}',
-                  textAlign: pw.TextAlign.right,
-                  style: pw.TextStyle(font: boldFont, fontSize: 18),
-                ),
-                pw.SizedBox(height: 6),
-                pw.Text(
-                  'عدد الحركات: ${items.length}',
-                  textAlign: pw.TextAlign.right,
-                  style: const pw.TextStyle(fontSize: 10),
-                ),
-                pw.SizedBox(height: 12),
-                pw.TableHelper.fromTextArray(
-                  headers: headers,
-                  data: rows,
-                  border: pw.TableBorder.all(
-                    color: PdfColors.grey400,
-                    width: .4,
-                  ),
-                  headerAlignment: pw.Alignment.centerRight,
-                  cellAlignment: pw.Alignment.centerRight,
-                  headerDecoration: const pw.BoxDecoration(
-                    color: PdfColors.blueGrey800,
-                  ),
-                  headerStyle: pw.TextStyle(
-                    font: boldFont,
-                    color: PdfColors.white,
-                    fontSize: 9,
-                  ),
-                  cellStyle: pw.TextStyle(font: regularFont, fontSize: 8),
-                  cellPadding: const pw.EdgeInsets.symmetric(
-                    horizontal: 5,
-                    vertical: 4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-
-    return _saveExportFile(
-      baseName: _exportBaseName(sectionTitle),
-      bytes: await document.save(),
-      extension: 'pdf',
-      mimeType: MimeType.pdf,
-    );
-  }
-
-  Future<void> _runExport({
-    required String sectionTitle,
-    required List<TransactionModel> items,
-    required _ExportFields fields,
-    required ExportFileType fileType,
-  }) async {
-    if (items.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('لا يوجد عناصر لتصديرها')));
-      return;
-    }
-
-    if (!fields.hasAny) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('اختر حقلاً واحداً على الأقل')),
-      );
-      return;
-    }
-
-    try {
-      final savedPath = fileType == ExportFileType.excel
-          ? await _exportSectionToExcel(
-              sectionTitle: sectionTitle,
-              items: items,
-              fields: fields,
-            )
-          : await _exportSectionToPdf(
-              sectionTitle: sectionTitle,
-              items: items,
-              fields: fields,
-            );
-
-      if (!mounted) return;
-      if (savedPath == null || savedPath.trim().isEmpty) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('تم إلغاء حفظ الملف')));
-        return;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            fileType == ExportFileType.excel
-                ? 'تم تصدير ملف Excel بنجاح إلى: $savedPath'
-                : 'تم تصدير ملف PDF بنجاح إلى: $savedPath',
-          ),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('حدث خطأ أثناء التصدير: $e')));
-    }
   }
 
   Widget _fieldChip({
@@ -986,9 +584,18 @@ class _AccountScreenState extends State<AccountScreen> {
   Future<void> _showCopyOptionsForSection({
     required String sectionTitle,
     required List<TransactionModel> items,
+  }) => _showCopySheet(title: 'نسخ — $sectionTitle', items: items);
+
+  // نسخ عنصر واحد
+  Future<void> _showCopyOptionsForItem(TransactionModel t) =>
+      _showCopySheet(title: 'نسخ', items: [t]);
+
+  /// نسخ فقط: الاسم، المبلغ 1، المبلغ 2 (مع العملات) والتاريخ
+  Future<void> _showCopySheet({
+    required String title,
+    required List<TransactionModel> items,
   }) async {
-    final fields = _ExportFields();
-    ExportFileType fileType = ExportFileType.excel;
+    final fields = _CopyFields();
 
     await showModalBottomSheet(
       context: context,
@@ -1002,7 +609,7 @@ class _AccountScreenState extends State<AccountScreen> {
             padding: EdgeInsets.only(
               left: 16,
               right: 16,
-              top: 8,
+              top: 4,
               bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
             ),
             child: StatefulBuilder(
@@ -1012,26 +619,16 @@ class _AccountScreenState extends State<AccountScreen> {
                 return SingleChildScrollView(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      ListTile(
-                        leading: const Icon(Icons.ios_share_rounded),
-                        title: Text('نسخ / تصدير — $sectionTitle'),
-                        subtitle: const Text(
-                          'اختر المعلومات المطلوبة ثم اختر نوع الملف واضغط تصدير',
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
-                      const Divider(),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: Text(
-                          'المعلومات داخل الملف',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: cs.onSurface,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 12),
                       Wrap(
                         spacing: 8,
                         runSpacing: 8,
@@ -1048,91 +645,15 @@ class _AccountScreenState extends State<AccountScreen> {
                                 setSheet(() => fields.amount1 = v),
                           ),
                           _fieldChip(
-                            label: 'العملة 1',
-                            selected: fields.currency1,
-                            onSelected: (v) =>
-                                setSheet(() => fields.currency1 = v),
-                          ),
-                          _fieldChip(
                             label: 'المبلغ 2',
                             selected: fields.amount2,
                             onSelected: (v) =>
                                 setSheet(() => fields.amount2 = v),
                           ),
                           _fieldChip(
-                            label: 'العملة 2',
-                            selected: fields.currency2,
-                            onSelected: (v) =>
-                                setSheet(() => fields.currency2 = v),
-                          ),
-                          _fieldChip(
-                            label: 'الإجمالي',
-                            selected: fields.total,
-                            onSelected: (v) => setSheet(() => fields.total = v),
-                          ),
-                          _fieldChip(
                             label: 'التاريخ',
                             selected: fields.day,
                             onSelected: (v) => setSheet(() => fields.day = v),
-                          ),
-                          _fieldChip(
-                            label: 'الوقت',
-                            selected: fields.time,
-                            onSelected: (v) => setSheet(() => fields.time = v),
-                          ),
-                          _fieldChip(
-                            label: 'الحالة',
-                            selected: fields.status,
-                            onSelected: (v) =>
-                                setSheet(() => fields.status = v),
-                          ),
-                          _fieldChip(
-                            label: 'تاريخ الحالة',
-                            selected: fields.statusStamp,
-                            onSelected: (v) =>
-                                setSheet(() => fields.statusStamp = v),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: Text(
-                          'نوع الملف',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: cs.onSurface,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ChoiceChip(
-                              avatar: const Icon(
-                                Icons.table_chart_rounded,
-                                size: 18,
-                              ),
-                              label: const Text('Excel'),
-                              selected: fileType == ExportFileType.excel,
-                              onSelected: (_) => setSheet(
-                                () => fileType = ExportFileType.excel,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: ChoiceChip(
-                              avatar: const Icon(
-                                Icons.picture_as_pdf_rounded,
-                                size: 18,
-                              ),
-                              label: const Text('PDF'),
-                              selected: fileType == ExportFileType.pdf,
-                              onSelected: (_) =>
-                                  setSheet(() => fileType = ExportFileType.pdf),
-                            ),
                           ),
                         ],
                       ),
@@ -1147,213 +668,35 @@ class _AccountScreenState extends State<AccountScreen> {
                         constraints: const BoxConstraints(maxHeight: 160),
                         child: SingleChildScrollView(
                           child: Text(
-                            preview.isEmpty ? 'لا توجد معاينة' : preview,
+                            preview,
                             style: const TextStyle(fontFamily: 'monospace'),
                           ),
                         ),
                       ),
                       const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: FilledButton.icon(
-                              onPressed: () async {
+                      FilledButton.icon(
+                        onPressed: !fields.hasAny
+                            ? null
+                            : () async {
+                                await Clipboard.setData(
+                                  ClipboardData(
+                                    text: _buildCopyText(items, fields),
+                                  ),
+                                );
+                                if (!ctx.mounted) return;
                                 Navigator.pop(ctx);
-                                await _runExport(
-                                  sectionTitle: sectionTitle,
-                                  items: items,
-                                  fields: fields,
-                                  fileType: fileType,
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('تم النسخ')),
                                 );
                               },
-                              icon: const Icon(Icons.file_download_rounded),
-                              label: const Text('تصدير'),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          OutlinedButton.icon(
-                            onPressed: () async {
-                              if (!fields.hasAny) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'اختر حقلاً واحداً على الأقل',
-                                    ),
-                                  ),
-                                );
-                                return;
-                              }
-                              await Clipboard.setData(
-                                ClipboardData(
-                                  text: _buildCopyText(items, fields),
-                                ),
-                              );
-                              if (mounted) {
-                                Navigator.pop(ctx);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    backgroundColor: cs.primary,
-                                    content: const Text('تم النسخ إلى الحافظة'),
-                                  ),
-                                );
-                              }
-                            },
-                            icon: const Icon(Icons.content_copy_rounded),
-                            label: const Text('نسخ'),
-                          ),
-                        ],
+                        icon: const Icon(Icons.content_copy_rounded),
+                        label: const Text('نسخ'),
                       ),
                     ],
                   ),
                 );
               },
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  // نسخ عنصر واحد
-  Future<void> _showCopyOptionsForItem(TransactionModel t) async {
-    final fields = _ExportFields(total: true, statusStamp: true);
-
-    await showModalBottomSheet(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) {
-        final cs = Theme.of(ctx).colorScheme;
-        return Directionality(
-          textDirection: TextDirection.rtl,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-            child: StatefulBuilder(
-              builder: (ctx, setSheet) => SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const ListTile(
-                      leading: Icon(Icons.copy_rounded),
-                      title: Text('خيارات النسخ — عنصر'),
-                      subtitle: Text('اختر الحقول المراد نسخها'),
-                    ),
-                    const Divider(),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        _fieldChip(
-                          label: 'الاسم',
-                          selected: fields.name,
-                          onSelected: (v) => setSheet(() => fields.name = v),
-                        ),
-                        _fieldChip(
-                          label: 'المبلغ 1',
-                          selected: fields.amount1,
-                          onSelected: (v) => setSheet(() => fields.amount1 = v),
-                        ),
-                        _fieldChip(
-                          label: 'العملة 1',
-                          selected: fields.currency1,
-                          onSelected: (v) =>
-                              setSheet(() => fields.currency1 = v),
-                        ),
-                        _fieldChip(
-                          label: 'المبلغ 2',
-                          selected: fields.amount2,
-                          onSelected: (v) => setSheet(() => fields.amount2 = v),
-                        ),
-                        _fieldChip(
-                          label: 'العملة 2',
-                          selected: fields.currency2,
-                          onSelected: (v) =>
-                              setSheet(() => fields.currency2 = v),
-                        ),
-                        _fieldChip(
-                          label: 'الإجمالي',
-                          selected: fields.total,
-                          onSelected: (v) => setSheet(() => fields.total = v),
-                        ),
-                        _fieldChip(
-                          label: 'التاريخ',
-                          selected: fields.day,
-                          onSelected: (v) => setSheet(() => fields.day = v),
-                        ),
-                        _fieldChip(
-                          label: 'الوقت',
-                          selected: fields.time,
-                          onSelected: (v) => setSheet(() => fields.time = v),
-                        ),
-                        _fieldChip(
-                          label: 'الحالة',
-                          selected: fields.status,
-                          onSelected: (v) => setSheet(() => fields.status = v),
-                        ),
-                        _fieldChip(
-                          label: 'تاريخ الحالة',
-                          selected: fields.statusStamp,
-                          onSelected: (v) =>
-                              setSheet(() => fields.statusStamp = v),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: cs.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        _buildCopyLine(t, fields),
-                        style: const TextStyle(fontFamily: 'monospace'),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: () async {
-                              if (!fields.hasAny) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'اختر حقلاً واحداً على الأقل',
-                                    ),
-                                  ),
-                                );
-                                return;
-                              }
-                              await Clipboard.setData(
-                                ClipboardData(text: _buildCopyLine(t, fields)),
-                              );
-                              if (mounted) {
-                                Navigator.pop(ctx);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    backgroundColor: cs.primary,
-                                    content: const Text('تم نسخ العنصر'),
-                                  ),
-                                );
-                              }
-                            },
-                            icon: const Icon(Icons.content_copy),
-                            label: const Text('نسخ'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        OutlinedButton.icon(
-                          onPressed: () => Navigator.pop(ctx),
-                          icon: const Icon(Icons.close),
-                          label: const Text('إلغاء'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
             ),
           ),
         );
@@ -1443,67 +786,6 @@ class _AccountScreenState extends State<AccountScreen> {
     );
   }
 
-  Widget _buildFocusBanner(BuildContext context, bool focusActive) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cs.primaryContainer.withValues(alpha: .55),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cs.primary.withValues(alpha: .35)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.history_rounded, color: cs.primary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  focusActive
-                      ? '${widget.focusLabel ?? 'حركات من سجل العمليات'} '
-                            '(${_focusTxIds.length})'
-                      : (widget.focusLabel == null
-                            ? 'تم تحديد حركات العملية ضمن كل الحركات'
-                            : 'تم تحديد ${widget.focusLabel} ضمن كل الحركات'),
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    color: cs.onPrimaryContainer,
-                  ),
-                ),
-                if ((widget.selectionTitle ?? '').isNotEmpty)
-                  Text(
-                    widget.selectionTitle!,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: cs.onPrimaryContainer.withValues(alpha: .8),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          TextButton(
-            onPressed: () =>
-                setState(() => _showOnlyFocused = !_showOnlyFocused),
-            child: Text(focusActive ? 'عرض كل الحركات' : 'عرضها فقط'),
-          ),
-          IconButton(
-            tooltip: 'إغلاق',
-            onPressed: () => setState(() {
-              _focusTxIds.clear();
-              _showOnlyFocused = false;
-            }),
-            icon: const Icon(Icons.close_rounded, size: 20),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
@@ -1514,11 +796,7 @@ class _AccountScreenState extends State<AccountScreen> {
             .toList();
 
         // 🔹 أولاً: نفلتر حسب اليوم + نبقي "مضافة" دائماً
-        // (أو نعرض حركات العملية القادمة من سجل العمليات فقط)
-        final focusActive = _showOnlyFocused && _focusTxIds.isNotEmpty;
-        final filteredByDay = focusActive
-            ? allRaw.where((t) => _focusTxIds.contains(t.id)).toList()
-            : _filterBySelectedDay(allRaw);
+        final filteredByDay = _filterBySelectedDay(allRaw);
 
         // 🔹 بعدها نطبق البحث
         final all = filteredByDay.where(_matchesQuery).toList();
@@ -1613,29 +891,16 @@ class _AccountScreenState extends State<AccountScreen> {
                     ]
                   : [
                       IconButton(
-                        tooltip: "إحصائيات الحساب",
+                        tooltip: "تفصيل الحساب",
                         icon: const Icon(Icons.bar_chart_rounded),
                         onPressed: () => Navigator.push(
                           context,
                           MaterialPageRoute(
                             builder: (_) =>
-                                AccountStatsScreen(account: widget.account),
+                                ShareImagePage(account: widget.account),
                           ),
                         ),
                       ),
-                      IconButton(
-                        tooltip: "مطابقة غير المستلمة (Excel)",
-                        icon: const Icon(Icons.compare_arrows_rounded),
-                        onPressed: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => UnreceivedReconcileScreen(
-                              account: widget.account,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
                       const SizedBox(width: 6),
                     ],
             ),
@@ -1687,8 +952,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                         focusNode: _searchFocus, // 👈 مهم
                                         textInputAction: TextInputAction.search,
                                         decoration: InputDecoration(
-                                          hintText:
-                                              "ابحث بالاسم أو العملة أو التاريخ أو المبلغ…",
+                                          hintText: "بحث",
                                           prefixIcon: const Icon(
                                             Icons.search_rounded,
                                           ),
@@ -1750,33 +1014,29 @@ class _AccountScreenState extends State<AccountScreen> {
 
                               const SizedBox(height: 10),
 
-                              if (_focusTxIds.isNotEmpty)
-                                _buildFocusBanner(context, focusActive),
-
                               // 🔹 اختيار التاريخ (اليوم / يوم آخر)
-                              if (!focusActive)
-                                Align(
-                                  alignment: Alignment.centerRight,
-                                  child: TextButton.icon(
-                                    onPressed: () async {
-                                      final picked = await showDatePicker(
-                                        context: context,
-                                        initialDate: _selectedDay,
-                                        firstDate: DateTime(2020),
-                                        lastDate: DateTime.now(),
-                                      );
-                                      if (picked != null) {
-                                        setState(() {
-                                          _selectedDay = picked;
-                                        });
-                                      }
-                                    },
-                                    icon: const Icon(Icons.calendar_month),
-                                    label: Text(
-                                      "التاريخ: ${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}",
-                                    ),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton.icon(
+                                  onPressed: () async {
+                                    final picked = await showDatePicker(
+                                      context: context,
+                                      initialDate: _selectedDay,
+                                      firstDate: DateTime(2020),
+                                      lastDate: DateTime.now(),
+                                    );
+                                    if (picked != null) {
+                                      setState(() {
+                                        _selectedDay = picked;
+                                      });
+                                    }
+                                  },
+                                  icon: const Icon(Icons.calendar_month),
+                                  label: Text(
+                                    "التاريخ: ${_selectedDay.year}-${_selectedDay.month.toString().padLeft(2, '0')}-${_selectedDay.day.toString().padLeft(2, '0')}",
                                   ),
                                 ),
+                              ),
 
                               if (_query.isNotEmpty)
                                 Padding(
@@ -2085,12 +1345,10 @@ class _StatusSection extends StatelessWidget {
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Tooltip(
-                    message: "نسخ / تصدير هذه الفئة",
-                    child: IconButton(
-                      icon: const Icon(Icons.ios_share_rounded, size: 18),
-                      onPressed: onCopyRequested,
-                    ),
+                  IconButton(
+                    tooltip: "نسخ",
+                    icon: const Icon(Icons.ios_share_rounded, size: 18),
+                    onPressed: onCopyRequested,
                   ),
                   IconButton(
                     tooltip: expanded ? "إخفاء العناصر" : "إظهار العناصر",
@@ -2121,7 +1379,7 @@ class _StatusSection extends StatelessWidget {
                       Icon(Icons.cancel_rounded, color: Colors.red, size: 20),
                       SizedBox(width: 6),
                       Text(
-                        "سحب لليمين: إلغاء",
+                        "إلغاء",
                         style: TextStyle(color: Colors.red, fontSize: 12),
                       ),
                     ],
@@ -2139,7 +1397,7 @@ class _StatusSection extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: const [
                       Text(
-                        "سحب لليسار: تعديل",
+                        "تعديل",
                         style: TextStyle(color: Colors.blue, fontSize: 12),
                       ),
                       SizedBox(width: 6),
@@ -2222,19 +1480,6 @@ class _StatusSection extends StatelessWidget {
                       onStartSelection: () => onStartSelection(t),
                       onCopyItemRequested: onCopyItemRequested,
                       onMoveRequested: () => onMoveRequested(t),
-                      onOpenDetails: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => TransactionDetailsScreen(
-                              account:
-                                  account ??
-                                  Account(id: t.accountId, name: accountName),
-                              transactionHiveKey: t.key,
-                            ),
-                          ),
-                        );
-                      },
                       onEdit: () {
                         Navigator.push(
                           context,
@@ -2293,7 +1538,6 @@ class _TxBubble extends StatelessWidget {
   final String accountName;
   final ColorScheme colorScheme;
   final String Function(DateTime) formatDay;
-  final VoidCallback onOpenDetails;
   final String Function(DateTime) formatSmartTime;
   final String Function(double) formatAmount;
   final String Function(TransactionModel) statusLabel;
@@ -2323,7 +1567,6 @@ class _TxBubble extends StatelessWidget {
     required this.onStartSelection,
     required this.onCopyItemRequested,
     required this.onMoveRequested,
-    required this.onOpenDetails,
     required this.onEdit,
     required this.onSetReceived,
     required this.onSetCancelled,
@@ -2375,15 +1618,86 @@ class _TxBubble extends StatelessWidget {
     }
   }
 
+  bool get _isCompany => t.companyMovementType != null;
+
+  /// الضغط على الحركة: تسليم / إلغاء / تعديل
+  Future<void> _showActions(BuildContext context) async {
+    final cancelled = _isCompany
+        ? (t.effectiveCompanyMovement?.isCancelled ?? false)
+        : t.status == TransactionStatus.cancelled;
+    final received = !_isCompany && t.status == TransactionStatus.received;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Text(
+                  t.beneficiary,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              if (!_isCompany)
+                ListTile(
+                  enabled: !received,
+                  leading: const Icon(
+                    Icons.verified_rounded,
+                    color: Colors.green,
+                  ),
+                  title: const Text('تسليم'),
+                  onTap: () => Navigator.pop(ctx, 'deliver'),
+                ),
+              ListTile(
+                enabled: !cancelled,
+                leading: const Icon(Icons.cancel_rounded, color: Colors.red),
+                title: const Text('إلغاء'),
+                onTap: () => Navigator.pop(ctx, 'cancel'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit_rounded, color: Colors.blue),
+                title: const Text('تعديل'),
+                onTap: () => Navigator.pop(ctx, 'edit'),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+    switch (action) {
+      case 'deliver':
+        await onSetReceived();
+        break;
+      case 'cancel':
+        await onSetCancelled(confirmCancel);
+        break;
+      case 'edit':
+        onEdit();
+        break;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = colorScheme;
+    final destination = t.destination?.trim() ?? '';
 
     return Material(
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
-        onTap: selectionMode ? onToggleSelected : onOpenDetails,
+        onTap: selectionMode ? onToggleSelected : () => _showActions(context),
         onLongPress: onStartSelection,
         child: Container(
           decoration: BoxDecoration(
@@ -2519,16 +1833,6 @@ class _TxBubble extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 6),
-                        IconButton(
-                          tooltip: "تفاصيل الحركة",
-                          onPressed: onOpenDetails,
-                          icon: Icon(
-                            Icons.article_outlined,
-                            color: cs.onSurfaceVariant,
-                            size: 18,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
                         PopupMenuButton<String>(
                           tooltip: "خيارات",
                           onSelected: (val) async {
@@ -2550,9 +1854,6 @@ class _TxBubble extends StatelessWidget {
                                 break;
                               case 'copy':
                                 onCopyItemRequested(t);
-                                break;
-                              case 'details':
-                                onOpenDetails();
                                 break;
                               case 'history':
                                 await openTransactionHistory(context, t);
@@ -2594,10 +1895,6 @@ class _TxBubble extends StatelessWidget {
                               const PopupMenuItem(
                                 value: 'copy',
                                 child: Text("نسخ…"),
-                              ),
-                              const PopupMenuItem(
-                                value: 'details',
-                                child: Text("تفاصيل الحركة"),
                               ),
                               const PopupMenuItem(
                                 value: 'history',
@@ -2666,6 +1963,17 @@ class _TxBubble extends StatelessWidget {
                             labelStyle: const TextStyle(color: Colors.orange),
                             side: const BorderSide(color: Colors.orange),
                           ),
+                          if (destination.isNotEmpty)
+                            Chip(
+                              label: Text(destination),
+                              avatar: const Icon(
+                                Icons.place_rounded,
+                                size: 14,
+                                color: Colors.purple,
+                              ),
+                              labelStyle: const TextStyle(color: Colors.purple),
+                              side: const BorderSide(color: Colors.purple),
+                            ),
                         ],
                       ),
                     ),

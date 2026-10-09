@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-  <!-- اسم زر لوحة الإعدادات السريعة -->
-  <string name="floating_notes_tile_label">الحافظة</string>
-</resources>

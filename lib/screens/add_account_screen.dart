@@ -170,15 +170,6 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                     fontWeight: FontWeight.w900,
                   ),
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  "اكتب اسم الحساب ليظهر لاحقًا ضمن الحسابات والحركات.",
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: Colors.white.withOpacity(0.86),
-                    height: 1.35,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
               ],
             ),
           ),
@@ -272,7 +263,6 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
             onSubmitted: (_) => _save(),
             decoration: InputDecoration(
               labelText: "اسم الحساب",
-              hintText: "مثال: حساب محمد / حساب الشركة",
               prefixIcon: Icon(
                 Icons.person_outline_rounded,
                 color: scheme.primary,
@@ -311,40 +301,6 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                 borderRadius: BorderRadius.circular(18),
                 borderSide: BorderSide(color: scheme.primary, width: 1.4),
               ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: _softFill(context, scheme.primary),
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: scheme.primary.withOpacity(0.12)),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.info_outline_rounded,
-                  color: scheme.primary,
-                  size: 21,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    _accountType.isCompany
-                        ? "حساب الشركة يميّز الحركات المرسلة والاستقبال تلقائيًا من أسماء المستخدمين في الإعدادات."
-                        : "يفضّل اختيار اسم واضح ومختصر حتى يسهل تمييز الحساب داخل التطبيق.",
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.textTheme.bodyMedium?.color?.withOpacity(
-                        0.78,
-                      ),
-                      height: 1.4,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
             ),
           ),
         ],
