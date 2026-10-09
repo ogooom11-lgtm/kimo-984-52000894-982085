@@ -16,7 +16,7 @@ import 'package:flutter/material.dart';
 import '../database_service.dart';
 import '../models.dart';
 
-enum AllStatsPeriod { daily, monthly, yearly }
+enum AllStatsPeriod { daily, monthly }
 
 enum AccountSortMode { priority, name, operations, trend, amount, manual }
 

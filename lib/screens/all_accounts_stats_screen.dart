@@ -30,17 +30,18 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
 
   DateTime _anchor = DateTime.now();
 
-  /// الشكل الافتراضي، مع تذكّر الفترة والترتيب ونوع الحسابات
+  /// الشكل الثابت، مع تذكّر الفترة ونوع الحسابات ووضع العرض
   AllStatsPrefs _prefs = _basePrefs();
 
   static AllStatsPrefs _basePrefs() {
     final saved = AllStatsPrefsStore.load();
+    final details = saved.showGlobalCards && !saved.showQuickStats;
     return AllStatsPrefs(
       period: saved.period,
-      sortMode: saved.sortMode == AccountSortMode.manual
-          ? AccountSortMode.name
-          : saved.sortMode,
       accountType: saved.accountType,
+      showQuickStats: !details,
+      showGlobalCards: details,
+      showAccountCards: details,
     );
   }
 
@@ -52,8 +53,15 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   AllStatsPeriod get _period => _prefs.period;
   set _period(AllStatsPeriod v) => _update(_prefs.copyWith(period: v));
 
-  AccountSortMode get _sortMode => _prefs.sortMode;
-  set _sortMode(AccountSortMode v) => _update(_prefs.copyWith(sortMode: v));
+  /// عرض التفصيل (بطاقات المبالغ) بدل الملخص السريع
+  bool get _details => _prefs.showGlobalCards;
+  set _details(bool v) => _update(
+    _prefs.copyWith(
+      showQuickStats: !v,
+      showGlobalCards: v,
+      showAccountCards: v,
+    ),
+  );
 
   AccountType get _accountTypeFilter => _prefs.accountType;
   set _accountTypeFilter(AccountType v) =>
@@ -61,9 +69,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
 
   bool get _showHeader =>
       _prefs.showHeader && !(_exporting && _prefs.hideHeaderInExport);
-  bool get _showQuickStats => _prefs.showQuickStats;
-  bool get _showGlobalCards => _prefs.showGlobalCards;
-  bool get _showAccountCards => _prefs.showAccountCards;
   bool get _showCurrencyRows => _prefs.showCurrencyRows;
   bool get _showDeltaStrip => _prefs.showDelta;
   bool get _showAccountsInsideQuickCards => _prefs.showAccountsInQuick;
@@ -93,19 +98,12 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     1,
   ).subtract(const Duration(milliseconds: 1));
 
-  DateTime _startOfYear(DateTime d) => DateTime(d.year, 1, 1);
-
-  DateTime _endOfYear(DateTime d) =>
-      DateTime(d.year + 1, 1, 1).subtract(const Duration(milliseconds: 1));
-
   _Range _currentRange() {
     switch (_period) {
       case AllStatsPeriod.daily:
         return _Range(_startOfDay(_anchor), _endOfDay(_anchor));
       case AllStatsPeriod.monthly:
         return _Range(_startOfMonth(_anchor), _endOfMonth(_anchor));
-      case AllStatsPeriod.yearly:
-        return _Range(_startOfYear(_anchor), _endOfYear(_anchor));
     }
   }
 
@@ -117,9 +115,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
       case AllStatsPeriod.monthly:
         final prev = DateTime(_anchor.year, _anchor.month - 1, 1);
         return _Range(_startOfMonth(prev), _endOfMonth(prev));
-      case AllStatsPeriod.yearly:
-        final prev = DateTime(_anchor.year - 1, 1, 1);
-        return _Range(_startOfYear(prev), _endOfYear(prev));
     }
   }
 
@@ -132,8 +127,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         return current.start.isBefore(_startOfDay(now));
       case AllStatsPeriod.monthly:
         return current.start.isBefore(_startOfMonth(now));
-      case AllStatsPeriod.yearly:
-        return current.start.isBefore(_startOfYear(now));
     }
   }
 
@@ -141,13 +134,10 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
     setState(() {
       switch (_period) {
         case AllStatsPeriod.daily:
-          _anchor = _anchor.add(Duration(days: delta));
+          _anchor = DateTime(_anchor.year, _anchor.month, _anchor.day + delta);
           break;
         case AllStatsPeriod.monthly:
           _anchor = DateTime(_anchor.year, _anchor.month + delta, 1);
-          break;
-        case AllStatsPeriod.yearly:
-          _anchor = DateTime(_anchor.year + delta, 1, 1);
           break;
       }
     });
@@ -159,7 +149,7 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
       initialDate: _anchor,
       firstDate: DateTime(2020, 1, 1),
       lastDate: DateTime.now(),
-      helpText: 'اختر التاريخ المرجعي',
+      helpText: _period == AllStatsPeriod.daily ? 'اختر اليوم' : 'اختر الشهر',
       confirmText: 'اختيار',
       cancelText: 'إلغاء',
     );
@@ -175,8 +165,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         return "يومي";
       case AllStatsPeriod.monthly:
         return "شهري";
-      case AllStatsPeriod.yearly:
-        return "سنوي";
     }
   }
 
@@ -186,25 +174,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
         return "${_anchor.year}-${_anchor.month.toString().padLeft(2, '0')}-${_anchor.day.toString().padLeft(2, '0')}";
       case AllStatsPeriod.monthly:
         return "${_anchor.year}-${_anchor.month.toString().padLeft(2, '0')}";
-      case AllStatsPeriod.yearly:
-        return "${_anchor.year}";
-    }
-  }
-
-  String _sortModeLabel() {
-    switch (_sortMode) {
-      case AccountSortMode.priority:
-        return 'حسب الأهمية';
-      case AccountSortMode.name:
-        return 'حسب الاسم';
-      case AccountSortMode.operations:
-        return 'حسب العمليات';
-      case AccountSortMode.trend:
-        return 'حسب التغير';
-      case AccountSortMode.amount:
-        return 'حسب المبالغ';
-      case AccountSortMode.manual:
-        return 'ترتيب يدوي';
     }
   }
 
@@ -419,22 +388,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
       return (Icons.trending_down_rounded, '$pct%', Colors.red);
     }
     return (Icons.trending_flat_rounded, '0%', Colors.grey);
-  }
-
-  int _compareStatsByPriority(_AccountStats a, _AccountStats b) {
-    final c1 = b.unreceivedNow.length.compareTo(a.unreceivedNow.length);
-    if (c1 != 0) return c1;
-
-    final c2 = b.addedNow.length.compareTo(a.addedNow.length);
-    if (c2 != 0) return c2;
-
-    final c3 = b.receivedNow.length.compareTo(a.receivedNow.length);
-    if (c3 != 0) return c3;
-
-    final c4 = a.cancelledNow.length.compareTo(b.cancelledNow.length);
-    if (c4 != 0) return c4;
-
-    return a.account.name.compareTo(b.account.name);
   }
 
   Widget _buildHeader(ColorScheme cs, String title, String subtitle) {
@@ -1213,370 +1166,73 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
   }
 
   // ==========================
-  // Bottom sheets
+  // Controls (خارج الصورة)
   // ==========================
 
-  Future<void> _openPeriodAndSortSheet() async {
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        return Directionality(
-          textDirection: TextDirection.rtl,
-          child: StatefulBuilder(
-            builder: (context, setSheet) {
-              final cs = Theme.of(context).colorScheme;
+  Widget _buildControls(ColorScheme cs) {
+    final daily = _period == AllStatsPeriod.daily;
 
-              Widget sectionTitle(String title, IconData icon) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: cs.primary.withOpacity(.10),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(icon, size: 18, color: cs.primary),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 15.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              Widget actionTile({
-                required String title,
-                String? subtitle,
-                required IconData icon,
-                required VoidCallback? onTap,
-                bool selected = false,
-                Color? iconColor,
-              }) {
-                return InkWell(
-                  borderRadius: BorderRadius.circular(18),
-                  onTap: onTap,
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: cs.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: selected
-                            ? cs.primary.withOpacity(.30)
-                            : cs.outlineVariant.withOpacity(.18),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: (iconColor ?? cs.primary).withOpacity(.10),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(icon, color: iconColor ?? cs.primary),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                title,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 14.5,
-                                ),
-                              ),
-                              if (subtitle != null) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  subtitle,
-                                  style: TextStyle(
-                                    color: cs.onSurfaceVariant,
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 12.5,
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                        if (selected)
-                          Icon(Icons.check_circle_rounded, color: cs.primary),
-                        if (onTap == null)
-                          Icon(
-                            Icons.block_rounded,
-                            color: cs.onSurfaceVariant.withOpacity(.5),
-                          ),
-                      ],
-                    ),
-                  ),
-                );
-              }
-
-              return SafeArea(
-                top: false,
-                child: Container(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(context).size.height * 0.88,
-                  ),
-                  decoration: BoxDecoration(
-                    color: cs.surface,
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(28),
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(.18),
-                        blurRadius: 30,
-                        offset: const Offset(0, -10),
-                      ),
-                    ],
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topRight,
-                                end: Alignment.bottomLeft,
-                                colors: [
-                                  cs.primary.withOpacity(.12),
-                                  cs.secondary.withOpacity(.08),
-                                ],
-                              ),
-                              borderRadius: BorderRadius.circular(22),
-                              border: Border.all(
-                                color: cs.primary.withOpacity(.14),
-                              ),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                Row(
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: cs.primary.withOpacity(.12),
-                                        borderRadius: BorderRadius.circular(16),
-                                      ),
-                                      child: Icon(
-                                        Icons.calendar_month_rounded,
-                                        color: cs.primary,
-                                        size: 22,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    const Expanded(
-                                      child: Text(
-                                        'الفترة والترتيب',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 17,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 12),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    _infoChip(
-                                      label: "الفترة: ${_periodLabel()}",
-                                      icon: Icons.date_range_rounded,
-                                      cs: cs,
-                                    ),
-                                    _infoChip(
-                                      label: "التاريخ: ${_formatPeriodDate()}",
-                                      icon: Icons.event_rounded,
-                                      cs: cs,
-                                    ),
-                                    _infoChip(
-                                      label: "الترتيب: ${_sortModeLabel()}",
-                                      icon: Icons.sort_rounded,
-                                      cs: cs,
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 18),
-
-                          sectionTitle(
-                            'نوع الفترة',
-                            Icons.calendar_view_month_rounded,
-                          ),
-                          actionTile(
-                            title: 'عرض يومي',
-                            icon: Icons.today_rounded,
-                            selected: _period == AllStatsPeriod.daily,
-                            onTap: () {
-                              setState(() => _period = AllStatsPeriod.daily);
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'عرض شهري',
-                            icon: Icons.calendar_view_month_rounded,
-                            selected: _period == AllStatsPeriod.monthly,
-                            onTap: () {
-                              setState(() => _period = AllStatsPeriod.monthly);
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'عرض سنوي',
-                            icon: Icons.calendar_today_rounded,
-                            selected: _period == AllStatsPeriod.yearly,
-                            onTap: () {
-                              setState(() => _period = AllStatsPeriod.yearly);
-                              Navigator.pop(context);
-                            },
-                          ),
-
-                          const SizedBox(height: 8),
-                          sectionTitle(
-                            'التنقل بالتاريخ',
-                            Icons.swap_horiz_rounded,
-                          ),
-                          actionTile(
-                            title: 'اختيار التاريخ',
-                            icon: Icons.edit_calendar_rounded,
-                            onTap: () async {
-                              Navigator.pop(context);
-                              await Future.delayed(
-                                const Duration(milliseconds: 120),
-                              );
-                              await _pickAnchorDate();
-                            },
-                          ),
-                          actionTile(
-                            title: 'الفترة السابقة',
-                            icon: Icons.chevron_right_rounded,
-                            onTap: () {
-                              _shiftPeriod(-1);
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'الفترة التالية',
-                            icon: Icons.chevron_left_rounded,
-                            onTap: _canGoNext()
-                                ? () {
-                                    _shiftPeriod(1);
-                                    Navigator.pop(context);
-                                  }
-                                : null,
-                          ),
-
-                          const SizedBox(height: 8),
-                          sectionTitle('الترتيب', Icons.leaderboard_rounded),
-                          actionTile(
-                            title: 'ترتيب حسب الأهمية',
-                            icon: Icons.flag_rounded,
-                            selected: _sortMode == AccountSortMode.priority,
-                            onTap: () {
-                              setState(
-                                () => _sortMode = AccountSortMode.priority,
-                              );
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'ترتيب حسب العمليات',
-                            icon: Icons.bar_chart_rounded,
-                            selected: _sortMode == AccountSortMode.operations,
-                            onTap: () {
-                              setState(
-                                () => _sortMode = AccountSortMode.operations,
-                              );
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'ترتيب حسب التغير',
-                            icon: Icons.trending_up_rounded,
-                            selected: _sortMode == AccountSortMode.trend,
-                            onTap: () {
-                              setState(() => _sortMode = AccountSortMode.trend);
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'ترتيب حسب المبالغ',
-                            icon: Icons.payments_rounded,
-                            selected: _sortMode == AccountSortMode.amount,
-                            onTap: () {
-                              setState(
-                                () => _sortMode = AccountSortMode.amount,
-                              );
-                              Navigator.pop(context);
-                            },
-                          ),
-                          actionTile(
-                            title: 'ترتيب حسب الاسم',
-                            icon: Icons.sort_by_alpha_rounded,
-                            selected: _sortMode == AccountSortMode.name,
-                            onTap: () {
-                              setState(() => _sortMode = AccountSortMode.name);
-                              Navigator.pop(context);
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _infoChip({
-    required String label,
-    required IconData icon,
-    required ColorScheme cs,
-  }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: cs.surface,
-        borderRadius: BorderRadius.circular(999),
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: cs.outlineVariant.withOpacity(.18)),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Icon(icon, size: 15, color: cs.primary),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5),
+          SegmentedButton<AllStatsPeriod>(
+            showSelectedIcon: false,
+            segments: const [
+              ButtonSegment(
+                value: AllStatsPeriod.daily,
+                icon: Icon(Icons.today_rounded),
+                label: Text('يومي'),
+              ),
+              ButtonSegment(
+                value: AllStatsPeriod.monthly,
+                icon: Icon(Icons.calendar_view_month_rounded),
+                label: Text('شهري'),
+              ),
+            ],
+            selected: {_period},
+            onSelectionChanged: (v) => setState(() => _period = v.first),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              IconButton.filledTonal(
+                tooltip: daily ? 'اليوم السابق' : 'الشهر السابق',
+                onPressed: () => _shiftPeriod(-1),
+                icon: const Icon(Icons.chevron_right_rounded),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickAnchorDate,
+                  icon: const Icon(Icons.edit_calendar_rounded, size: 18),
+                  label: Text(
+                    _formatPeriodDate(),
+                    style: const TextStyle(fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                tooltip: daily ? 'اليوم التالي' : 'الشهر التالي',
+                onPressed: _canGoNext() ? () => _shiftPeriod(1) : null,
+                icon: const Icon(Icons.chevron_left_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          FilledButton.tonalIcon(
+            onPressed: () => setState(() => _details = !_details),
+            icon: Icon(
+              _details ? Icons.dashboard_rounded : Icons.view_agenda_rounded,
+            ),
+            label: Text(_details ? 'إظهار الملخص السريع' : 'إظهار التفصيل'),
           ),
         ],
       ),
@@ -1689,22 +1345,11 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                 )
                 .toList();
 
+            // الأكثر حركة أولًا
             stats.sort((a, b) {
-              switch (_sortMode) {
-                case AccountSortMode.priority:
-                  return _compareStatsByPriority(a, b);
-                case AccountSortMode.name:
-                case AccountSortMode.manual:
-                  return a.account.name.compareTo(b.account.name);
-                case AccountSortMode.operations:
-                  return b.totalNow.compareTo(a.totalNow);
-                case AccountSortMode.trend:
-                  final aDiff = a.totalNow - a.totalPrev;
-                  final bDiff = b.totalNow - b.totalPrev;
-                  return bDiff.compareTo(aDiff);
-                case AccountSortMode.amount:
-                  return b.totalAmountNow.compareTo(a.totalAmountNow);
-              }
+              final c = b.totalNow.compareTo(a.totalNow);
+              if (c != 0) return c;
+              return a.account.name.compareTo(b.account.name);
             });
 
             final global = _GlobalData.fromStats(stats);
@@ -1734,11 +1379,6 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                             ? Icons.business_rounded
                             : Icons.account_balance_wallet_rounded,
                       ),
-                    ),
-                    IconButton(
-                      tooltip: 'الفترة والترتيب',
-                      onPressed: _openPeriodAndSortSheet,
-                      icon: const Icon(Icons.calendar_month_rounded),
                     ),
                     IconButton(
                       tooltip: _busy ? 'جارٍ التنفيذ...' : 'حفظ الصورة',
@@ -1780,83 +1420,96 @@ class _AllAccountsStatsScreenState extends State<AllAccountsStatsScreen> {
                           constraints: const BoxConstraints(
                             maxWidth: _maxCanvasWidth,
                           ),
-                          child: RepaintBoundary(
-                            key: _shotKey,
-                            child: Container(
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: cs.surface,
-                                borderRadius: BorderRadius.circular(28),
-                                border: Border.all(
-                                  color: cs.outlineVariant.withOpacity(.18),
-                                ),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  if (_showHeader)
-                                    _buildHeader(
-                                      cs,
-                                      _prefs.title.isNotEmpty
-                                          ? _prefs.title
-                                          : 'إحصائيات ${_accountTypeFilter.label}',
-                                      "${_periodLabel()} — ${_formatPeriodDate()}",
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _buildControls(cs),
+                              const SizedBox(height: 12),
+                              RepaintBoundary(
+                                key: _shotKey,
+                                child: Container(
+                                  padding: const EdgeInsets.all(14),
+                                  decoration: BoxDecoration(
+                                    color: cs.surface,
+                                    borderRadius: BorderRadius.circular(28),
+                                    border: Border.all(
+                                      color: cs.outlineVariant.withOpacity(.18),
                                     ),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      if (_showHeader)
+                                        _buildHeader(
+                                          cs,
+                                          _prefs.title.isNotEmpty
+                                              ? _prefs.title
+                                              : 'إحصائيات ${_accountTypeFilter.label}',
+                                          "${_periodLabel()} — ${_formatPeriodDate()}",
+                                        ),
 
-                                  if (_showHeader) const SizedBox(height: 12),
+                                      if (_showHeader)
+                                        const SizedBox(height: 12),
 
-                                  if (_showQuickStats) ...[
-                                    _buildQuickStats(stats, global),
-                                    const SizedBox(height: 14),
-                                  ],
+                                      if (!_details) ...[
+                                        _buildQuickStats(stats, global),
+                                        const SizedBox(height: 14),
+                                      ],
 
-                                  if (_showGlobalCards)
-                                    for (final m in _metrics) ...[
-                                      _categoryCard(
-                                        title: _categoryTitle(m),
-                                        count: global.countOf(m),
-                                        totals: global.totalsOf(m),
-                                        prevTotals: global.prevTotalsOf(m),
-                                        icon: _metricIcon(m),
-                                        gradient: _metricGradient(m),
-                                        cs: cs,
-                                        yesterday: global.prevCountOf(m),
-                                        countsByCurrency: global.countsOf(m),
-                                        showAmountIndicators: true,
-                                      ),
-                                      const SizedBox(height: 14),
-                                    ],
-
-                                  if (_showGlobalCards && _showAccountCards)
-                                    const SizedBox(height: 18),
-
-                                  if (_showAccountCards)
-                                    for (final s in stats)
-                                      if (!_prefs.hideZeroAccounts ||
-                                          s.totalNow > 0) ...[
+                                      if (_details)
                                         for (final m in _metrics) ...[
                                           _categoryCard(
-                                            title: _categoryTitle(
-                                              m,
-                                              s.account.name,
-                                            ),
-                                            count: s.nowOf(m).length,
-                                            totals: s.totalsNowOf(m),
-                                            prevTotals: s.totalsPrevOf(m),
+                                            title: _categoryTitle(m),
+                                            count: global.countOf(m),
+                                            totals: global.totalsOf(m),
+                                            prevTotals: global.prevTotalsOf(m),
                                             icon: _metricIcon(m),
                                             gradient: _metricGradient(m),
                                             cs: cs,
-                                            yesterday: s.prevOf(m).length,
-                                            countsByCurrency: s.countsNowOf(m),
+                                            yesterday: global.prevCountOf(m),
+                                            countsByCurrency: global.countsOf(
+                                              m,
+                                            ),
                                             showAmountIndicators: true,
                                           ),
-                                          const SizedBox(height: 12),
+                                          const SizedBox(height: 14),
                                         ],
-                                        const SizedBox(height: 18),
-                                      ],
-                                ],
+
+                                      if (_details) const SizedBox(height: 18),
+
+                                      // تفصيل كل حساب فيه حركة (بدون البطاقات الفاضية)
+                                      if (_details)
+                                        for (final s in stats)
+                                          if (s.totalNow > 0) ...[
+                                            for (final m in _metrics)
+                                              if (s.nowOf(m).isNotEmpty ||
+                                                  s.prevOf(m).isNotEmpty) ...[
+                                                _categoryCard(
+                                                  title: _categoryTitle(
+                                                    m,
+                                                    s.account.name,
+                                                  ),
+                                                  count: s.nowOf(m).length,
+                                                  totals: s.totalsNowOf(m),
+                                                  prevTotals: s.totalsPrevOf(m),
+                                                  icon: _metricIcon(m),
+                                                  gradient: _metricGradient(m),
+                                                  cs: cs,
+                                                  yesterday: s.prevOf(m).length,
+                                                  countsByCurrency: s
+                                                      .countsNowOf(m),
+                                                  showAmountIndicators: true,
+                                                ),
+                                                const SizedBox(height: 12),
+                                              ],
+                                            const SizedBox(height: 18),
+                                          ],
+                                    ],
+                                  ),
+                                ),
                               ),
-                            ),
+                            ],
                           ),
                         ),
                       ),
